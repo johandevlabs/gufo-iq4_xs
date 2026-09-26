@@ -12,6 +12,7 @@ gufo_extension_target(
     modules/attention.cpp
     modules/embed.cpp
     modules/ffn.cpp
+    modules/moe.cpp
     modules/norm.cpp
     modules/quant_gemm.cpp
     modules/residual.cpp
@@ -74,6 +75,9 @@ gufo_extension_target(
     gufo_qwen_draft_vocab
     gufo_compare
     hip::host
+    # Routed-expert MoE (qwen35moe) reuses the vendored llama.cpp-derived MMQ
+    # quantized kernels built for the Flash-Next runner.
+    gufo_qwen38_flash_next_mmq
 )
 
 if(TARGET gufo_qwen_hip)
