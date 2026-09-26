@@ -76,8 +76,10 @@ gufo_extension_target(
     gufo_compare
     hip::host
     # Routed-expert MoE (qwen35moe) reuses the vendored llama.cpp-derived MMQ
-    # quantized kernels built for the Flash-Next runner.
+    # quantized kernels and the routed F16 expert GEMMs built for the
+    # Flash-Next runner.
     gufo_qwen38_flash_next_mmq
+    gufo_qwen38_flash_next_kernels
 )
 
 if(TARGET gufo_qwen_hip)

@@ -65,6 +65,30 @@ if (ENGINE_ENABLE_HIP)
     $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-value;-Wno-unused-command-line-argument>)
   target_include_directories(gufo_qwen38_flash_next_mmq SYSTEM PUBLIC ${QFN_MMQ_DIR})
   target_link_libraries(gufo_qwen38_flash_next_mmq PUBLIC hip::host roc::hipblas)
+
+  # The device kernels depend only on the HIP runtime, so they build as their
+  # own library: the Qwen runner reuses the routed-expert kernels for
+  # qwen35moe without depending on this model package.
+  add_library(gufo_qwen38_flash_next_kernels STATIC
+    ${QFN_ROCM_DIR}/kernels.hip.cpp
+    ${QFN_ROCM_DIR}/w8a8_wave64.hip)
+  set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
+    PROPERTIES LANGUAGE HIP COMPILE_OPTIONS "-mwavefrontsize64")
+  # The shared Qwen kernel headers these sources include depend on
+  # ENGINE_ENABLE_HIP.
+  target_compile_definitions(gufo_qwen38_flash_next_kernels PRIVATE
+    QFN_ROCM_BUILD=1 ENGINE_ENABLE_HIP=1)
+  target_compile_options(gufo_qwen38_flash_next_kernels PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-O3;-ffast-math;-fno-finite-math-only;-Wno-unused-command-line-argument>)
+  target_include_directories(gufo_qwen38_flash_next_kernels PUBLIC
+    ${PROJECT_SOURCE_DIR}
+    ${GUFO_EXTENSION_BUILD_ROOT})
+  target_include_directories(gufo_qwen38_flash_next_kernels SYSTEM PUBLIC
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR}
+    ${ROCWMMA_INCLUDE_DIR})
+  target_link_libraries(gufo_qwen38_flash_next_kernels PUBLIC hip::host)
 endif()
 
 gufo_extension_target(
@@ -84,6 +108,7 @@ gufo_extension_target(
     gufo_cache_hip
     gufo_qwen_vision
     gufo_qwen_draft_vocab
+    gufo_qwen38_flash_next_kernels
     gufo_qwen38_flash_next_mmq
     gufo_compare
     hip::host
@@ -92,14 +117,6 @@ gufo_extension_target(
 )
 
 if(TARGET gufo_qwen38_flash_next_hip)
-  set(QFN_ROCM_DIR "${GUFO_EXTENSION_BUILD_ROOT}/kernels/rocm")
-  gufo_extension_hip_sources(gufo_qwen38_flash_next_hip
-    SOURCES
-      kernels/rocm/kernels.hip.cpp
-      kernels/rocm/w8a8_wave64.hip
-  )
-  set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
-    PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   target_compile_definitions(gufo_qwen38_flash_next_hip PRIVATE QFN_ROCM_BUILD=1)
   target_compile_options(gufo_qwen38_flash_next_hip PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O2>
