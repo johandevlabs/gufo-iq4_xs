@@ -124,6 +124,11 @@ public:
   [[nodiscard]] std::size_t GetPackedWeightBytes() const noexcept {
     return packed_weight_bytes_;
   }
+  /// MoE targets carry no exact cold/live continuation contract, so the draft
+  /// may project prompt context on matrix cores.
+  [[nodiscard]] bool TargetIsMoE() const noexcept {
+    return target_model_ != nullptr && target_model_->GetConfig().IsMoE();
+  }
 
   /// Draft vocabulary (draft_vocab.hpp): the head's leading rows, scored in
   /// place. Zero when every draft scores the full head.

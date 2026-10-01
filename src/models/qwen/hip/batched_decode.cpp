@@ -11,12 +11,11 @@
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "src/families/qwen/kernels/verify_gemm_27b.hpp"
+#include "qfn_mmq.h"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"
 #include "src/models/qwen/modules/moe.hpp"
-
-#include "qfn_mmq.h"
 
 namespace gufo::hip {
 namespace {
@@ -122,8 +121,7 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
   const std::uint32_t n_used = config.expert_used_count;
   const std::size_t expert_ff = config.expert_ff_length;
   const std::size_t shared_ff = config.expert_shared_ff_length;
-  const std::uint32_t slots =
-      static_cast<std::uint32_t>(batch_size) * n_used;
+  const std::uint32_t slots = static_cast<std::uint32_t>(batch_size) * n_used;
   constexpr int kGgmlQ8_0 = static_cast<int>(core::GgmlType::kQ8_0);
 
   LaunchProjection(view.router, scratch.decode.normed.data(),
@@ -131,9 +129,9 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
                    stream);
   LaunchProjection(view.shexp_gate_inp, scratch.decode.normed.data(),
                    moe.shexp_gate.data(), batch_size, 1, hidden, stream);
-  LaunchMoeRouterTopK(moe.router_logits.data(), n_experts, moe.ids.data(),
-                      moe.weights.data(), static_cast<std::uint32_t>(batch_size),
-                      n_experts, n_used, stream);
+  LaunchMoeRouterTopK(
+      moe.router_logits.data(), n_experts, moe.ids.data(), moe.weights.data(),
+      static_cast<std::uint32_t>(batch_size), n_experts, n_used, stream);
 
   LaunchProjection(view.shexp_gate, scratch.decode.normed.data(),
                    scratch.ffn.gate.data(), batch_size, shared_ff, hidden,
@@ -144,27 +142,34 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
   LaunchBatchedSwiGLUActivation(scratch.ffn.gate.data(), scratch.ffn.up.data(),
                                 moe.shexp_act.data(), nullptr,
                                 batch_size * shared_ff, stream);
-  LaunchProjection(view.shexp_down, moe.shexp_act.data(),
-                   moe.shexp_out.data(), batch_size, hidden, shared_ff, stream);
+  LaunchProjection(view.shexp_down, moe.shexp_act.data(), moe.shexp_out.data(),
+                   batch_size, hidden, shared_ff, stream);
 
   if (view.gate_exps.type == core::GgmlType::kQ8_0 &&
       view.up_exps.type == core::GgmlType::kQ8_0) {
-    if (qfn_mmq_moe_gated_vec(kGgmlQ8_0, view.gate_exps.data,
-                              view.up_exps.data, scratch.decode.normed.data(),
-                              moe.ids.data(), moe.gate_e.data(),
-                              static_cast<int>(expert_ff),
-                              static_cast<int>(hidden),
-                              static_cast<int>(batch_size),
-                              static_cast<int>(n_experts),
-                              static_cast<int>(n_used), stream) != 0) {
-      throw std::runtime_error("MoE gated expert projection failed");
+    // The Q8_0 gated vector kernel takes at most 8 token rows per launch
+    // (MMVQ_MAX_BATCH_SIZE), but concurrent verification stacks up to
+    // kMaxDecodeBatch rows per session. Rows are independent, so launch
+    // row slices over the token-major activations, ids and outputs.
+    constexpr std::size_t kGatedVecMaxRows = 8;
+    for (std::size_t row = 0; row < batch_size; row += kGatedVecMaxRows) {
+      const std::size_t rows = std::min(kGatedVecMaxRows, batch_size - row);
+      if (qfn_mmq_moe_gated_vec(
+              kGgmlQ8_0, view.gate_exps.data, view.up_exps.data,
+              scratch.decode.normed.data() + row * hidden,
+              moe.ids.data() + row * n_used,
+              moe.gate_e.data() + row * n_used * expert_ff,
+              static_cast<int>(expert_ff), static_cast<int>(hidden),
+              static_cast<int>(rows), static_cast<int>(n_experts),
+              static_cast<int>(n_used), stream) != 0) {
+        throw std::runtime_error("MoE gated expert projection failed");
+      }
     }
   } else {
-    LaunchMoeSlotSwigluGemv(view.gate_exps.data, view.gate_exps.type,
-                            view.up_exps.data, view.up_exps.type,
-                            scratch.decode.normed.data(), moe.ids.data(),
-                            moe.gate_e.data(), expert_ff, hidden, slots,
-                            n_used, stream);
+    LaunchMoeSlotSwigluGemv(
+        view.gate_exps.data, view.gate_exps.type, view.up_exps.data,
+        view.up_exps.type, scratch.decode.normed.data(), moe.ids.data(),
+        moe.gate_e.data(), expert_ff, hidden, slots, n_used, stream);
   }
   if (view.down_exps.type == core::GgmlType::kQ8_0) {
     if (qfn_mmq_moe_vec(kGgmlQ8_0, view.down_exps.data, moe.gate_e.data(),
@@ -179,9 +184,8 @@ void LaunchMoeFfn(const models::QwenLayerWeights& layer,
                       moe.gate_e.data(), moe.ids.data(), moe.down_e.data(),
                       hidden, expert_ff, slots, 1, stream);
   }
-  LaunchMoeEpilogue(moe.down_e.data(), moe.weights.data(),
-                    moe.shexp_out.data(), moe.shexp_gate.data(),
-                    scratch.ffn.out.data(),
+  LaunchMoeEpilogue(moe.down_e.data(), moe.weights.data(), moe.shexp_out.data(),
+                    moe.shexp_gate.data(), scratch.ffn.out.data(),
                     static_cast<std::uint32_t>(batch_size), n_used, hidden,
                     stream);
 }
