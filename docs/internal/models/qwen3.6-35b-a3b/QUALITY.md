@@ -30,6 +30,15 @@ runs. The op test also checks the dense mode of the BF16 WMMA GEMM against
 the FP32-activation GEMV for 1, 100 and 512 rows (relative error < 1e-2,
 every row written).
 
+## Scope of the target test for prefill changes
+
+The parity fixtures are 12-16 tokens, so the target test never reaches the
+routes that only large chunks take (the paired routed tile map). Changes there
+are qualified by comparing greedy completions on 6K and 12K prompts against the
+previous build in server mode; the October 1, 2026 prefill changes keep them
+byte-identical on UD-Q6_K_XL and UD-Q8_K_XL, and both artifacts pass the target
+test and the MoE operator test.
+
 ## Reproduce
 
 Build the `gpu-test` preset and run the binaries inside the ROCm container:

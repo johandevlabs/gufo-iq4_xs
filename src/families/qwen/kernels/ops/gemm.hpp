@@ -238,6 +238,18 @@ void LaunchBatchedFusedRMSNormQuantizeQ8_1(
     void* q8_1_out, std::size_t batch_size, std::size_t dim, float eps,
     hipStream_t stream = nullptr);
 
+/// Whether LaunchBatchedFusedResidualRMSNormQuantizeQ8_1 accepts this width.
+bool IsFusedResidualRMSNormQuantizeQ8_1Supported(std::size_t dim) noexcept;
+
+/// One pass for LaunchBatchedResidualAdd (when `residual` is non-null; the sum
+/// goes to `sum_out`, which may alias `x`), LaunchBatchedRMSNorm into `out`
+/// and `out_bf16`, and LaunchQuantizeActivationQ8_1 of that BF16 row into
+/// `q8_1_out`. Every output is bit-identical to the separate launches.
+void LaunchBatchedFusedResidualRMSNormQuantizeQ8_1(
+    const float* x, const float* residual, const float* weight, float* sum_out,
+    float* out, void* out_bf16, void* q8_1_out, std::size_t batch_size,
+    std::size_t dim, float eps, hipStream_t stream = nullptr);
+
 void LaunchQuantizeActivationQ8_1FromFp32(const float* fp32_x, void* q8_1_out,
                                           std::size_t batch, std::size_t k,
                                           hipStream_t stream = nullptr);

@@ -70,6 +70,28 @@ stopped; see [Experiments](EXPERIMENTS.md).
 | 16384 | 1852.64 | 800.98 | +131.3% |
 | tg128 | 53.95 | 48.83 | +10.5% |
 
+## Prefill after the October 1, 2026 kernel changes
+
+Routed down projection on the mixed pair map, one-wave GDN post-norm and the
+fused residual/RMSNorm/quantize pass (see [Experiments](EXPERIMENTS.md)),
+measured October 1, 2026 as an interleaved A/B against the build of the tree
+they were developed on: `gufo bench --n-prompt 1024,2048,4096,8192 --n-gen 0
+--repetitions 3`, three rounds for UD-Q6_K_XL and two for UD-Q8_K_XL, mean of
+the rounds, production inference services and the OOM cron stopped. The tables
+above predate the routed F16 expert GEMM and are not comparable with these.
+
+| Prompt (tokens) | UD-Q6_K_XL before (t/s) | after (t/s) | gain | UD-Q8_K_XL before (t/s) | after (t/s) | gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1024 | 2268.9 | 2439.8 | +7.5% | 2065.1 | 2186.6 | +5.9% |
+| 2048 | 2581.6 | 2715.7 | +5.2% | 2305.8 | 2438.3 | +5.7% |
+| 4096 | 2695.6 | 2860.8 | +6.1% | 2396.4 | 2530.6 | +5.6% |
+| 8192 | 2603.0 | 2746.6 | +5.5% | 2321.5 | 2448.9 | +5.5% |
+
+Server mode, one session, greedy with thinking off: a 12,262-token prompt
+prefills at 2475 → 2617 t/s on UD-Q6_K_XL and 2204 → 2343 t/s on UD-Q8_K_XL,
+a 6,113-token prompt at 2572 → 2708 and 2318 → 2422 t/s. The 128-token
+completions are byte-identical before and after on both artifacts.
+
 ## Qwen3.8 27B regression (UD-Q8_K_XL)
 
 Confirms the shared attention/GDN path is unchanged by the MoE work.

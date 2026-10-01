@@ -99,7 +99,7 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                             const models::QwenLayerWeights& layer,
                             const core::ModelConfig& config,
                             std::size_t batch_size, GemmWeight& gemm_weight,
-                            ReadsQ8& reads_q8_act) {
+                            ReadsQ8& reads_q8_act, bool norm_quantized) {
   const auto view = models::qwen::MakeMoeView(layer, config);
   const std::size_t hidden = config.hidden_size;
   const std::uint32_t n_experts = config.expert_count;
@@ -146,8 +146,10 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
   // Q8_0 routes read the tiled Q8_1 activation, which the dense section would
   // have quantized from the FFN-normed BF16 staging buffer; do it here for
   // the MoE branch (d_scratch_bf16 still holds the FFN norm output).
-  LaunchQuantizeActivationQ8_1(arena.d_scratch_bf16, arena.d_scratch_q8_act,
-                               batch_size, hidden, stream);
+  if (!norm_quantized) {
+    LaunchQuantizeActivationQ8_1(arena.d_scratch_bf16, arena.d_scratch_q8_act,
+                                 batch_size, hidden, stream);
+  }
   gemm_weight(view.shexp_gate, arena.d_scratch_bf16, arena.d_normed,
               arena.d_ffn_gate, shared_ff, hidden, arena.d_scratch_q8_act);
   gemm_weight(view.shexp_up, arena.d_scratch_bf16, arena.d_normed,
@@ -163,9 +165,13 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
               moe.shexp_out.data(), hidden, shared_ff, arena.d_scratch_q8_act);
 
   // Tile map from the real bucket sizes: one entry per (expert, token tile)
-  // of its 16-padded bucket, packed expert | tile << 16. Large chunks whose
-  // gate/up share a format pair them over a second map of 64 or 128 rows, the
-  // wider one when it launches at most three quarters as many tiles; the
+  // of its 16-padded bucket, packed expert | tile << 16, the tile index in
+  // units of the tile's own width. Large chunks whose gate/up share a format
+  // pair them over a second, mixed map: 128-row tiles for every expert with
+  // more than 64 rows, one 64-row tile for the others. A tile is mostly a
+  // pass over the expert's weights, so an expert never gets two tiles where
+  // one wide tile holds its rows, and all of an expert's tiles stay in one
+  // launch, consecutive, where the later ones find its weights cached. The
   // paired kernel writes F16 only, so a layer whose down projection reads F32
   // rows keeps the unpaired launches.
   const bool pair = routed_gate_up && routed_down &&
@@ -175,7 +181,9 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
   std::uint32_t tile_rows = 16;
   std::uint32_t n_tiles = 0;
   std::uint32_t n_pair = 0;
-  std::uint32_t pair_rows = 64;
+  std::uint32_t n_narrow = 0;
+  constexpr std::uint32_t kPairRows = 128;
+  constexpr std::uint32_t kNarrowRows = 64;
   if (routed_gate_up || routed_down) {
     HIP_CHECK(hipEventSynchronize(routed_host.counts_ready));
     tile_rows = RoutedTileRows(slots, n_experts);
@@ -186,25 +194,28 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
       }
     }
     if (pair) {
-      std::uint32_t tiles_64 = 0;
-      std::uint32_t tiles_128 = 0;
+      // Wide tiles first, the narrow ones after them: [n_pair][n_narrow].
       for (std::uint32_t e = 0; e < n_experts; ++e) {
         const std::uint32_t padded = (routed_host.counts[e] + 15U) / 16U * 16U;
-        tiles_64 += (padded + 63U) / 64U;
-        tiles_128 += (padded + 127U) / 128U;
-      }
-      pair_rows = tiles_128 * 4 <= tiles_64 * 3 ? 128U : 64U;
-      for (std::uint32_t e = 0; e < n_experts; ++e) {
-        const std::uint32_t padded = (routed_host.counts[e] + 15U) / 16U * 16U;
-        for (std::uint32_t j = 0; j * pair_rows < padded; ++j) {
+        const std::uint32_t wide =
+            padded > kNarrowRows ? (padded + kPairRows - 1U) / kPairRows : 0U;
+        for (std::uint32_t j = 0; j < wide; ++j) {
           routed_host.tiles[n_tiles + n_pair++] =
               static_cast<std::int32_t>(e | (j << 16));
         }
       }
+      for (std::uint32_t e = 0; e < n_experts; ++e) {
+        const std::uint32_t padded = (routed_host.counts[e] + 15U) / 16U * 16U;
+        if (padded != 0 && padded <= kNarrowRows) {
+          routed_host.tiles[n_tiles + n_pair + n_narrow++] =
+              static_cast<std::int32_t>(e);
+        }
+      }
     }
-    HIP_CHECK(hipMemcpyAsync(moe.routed_tiles.data(), routed_host.tiles,
-                             (n_tiles + n_pair) * sizeof(std::int32_t),
-                             hipMemcpyHostToDevice, stream));
+    HIP_CHECK(
+        hipMemcpyAsync(moe.routed_tiles.data(), routed_host.tiles,
+                       (n_tiles + n_pair + n_narrow) * sizeof(std::int32_t),
+                       hipMemcpyHostToDevice, stream));
     routed::RoutedCompact(
         moe.ids.data(), routed_counts, moe.routed_bounds.data(),
         moe.routed_cursors.data(), moe.rows_token.data(), moe.rows_slot.data(),
@@ -238,6 +249,15 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     routed::NarrowActivations(arena.d_normed, moe.x_half.data(), false,
                               batch_size * hidden, stream);
     const auto* x_half = reinterpret_cast<const __half*>(moe.x_half.data());
+    const auto paired_gate_up = [&](const std::int32_t* tiles,
+                                    std::uint32_t count, std::uint32_t rows) {
+      return count == 0 ||
+             routed::RoutedGatedF16Gemm(
+                 view.gate_exps.data, view.up_exps.data, *gate_type, x_half,
+                 tiles, count, rows, moe.routed_bounds.data(),
+                 moe.rows_token.data(), moe.rows_slot.data(), act_half,
+                 expert_ff, hidden, stream);
+    };
     const bool gate_ok =
         pair ||
         routed::RoutedF16Gemm(view.gate_exps.data, *gate_type, x_half,
@@ -249,11 +269,10 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     // a non-routed down projection take the separate SwiGLU below.
     const bool up_ok =
         gate_ok &&
-        (pair ? routed::RoutedGatedF16Gemm(
-                    view.gate_exps.data, view.up_exps.data, *gate_type, x_half,
-                    moe.routed_tiles.data() + n_tiles, n_pair, pair_rows,
-                    moe.routed_bounds.data(), moe.rows_token.data(),
-                    moe.rows_slot.data(), act_half, expert_ff, hidden, stream)
+        (pair ? (paired_gate_up(moe.routed_tiles.data() + n_tiles, n_pair,
+                                kPairRows) &&
+                 paired_gate_up(moe.routed_tiles.data() + n_tiles + n_pair,
+                                n_narrow, kNarrowRows))
          : routed_down
              ? routed::RoutedF16Gemm(
                    view.up_exps.data, *up_type, x_half, moe.routed_tiles.data(),
@@ -302,11 +321,22 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                                 slots * expert_ff, stream);
     }
     auto* down_half = reinterpret_cast<__half*>(moe.down_e.data());
-    if (!routed::RoutedF16Gemm(view.down_exps.data, *down_type, act_half,
-                               moe.routed_tiles.data(), n_tiles, tile_rows,
-                               moe.routed_bounds.data(), moe.rows_slot.data(),
-                               moe.rows_slot.data(), nullptr, nullptr,
-                               down_half, hidden, expert_ff, stream)) {
+    // The kernel decodes an expert's weights once per tile, so a paired layer
+    // sends the down projection over the mixed tile map it already built for
+    // gate/up: fewer tiles, each expert's rows unchanged.
+    const auto down = [&](const std::int32_t* tiles, std::uint32_t count,
+                          std::uint32_t rows) {
+      return count == 0 ||
+             routed::RoutedF16Gemm(view.down_exps.data, *down_type, act_half,
+                                   tiles, count, rows, moe.routed_bounds.data(),
+                                   moe.rows_slot.data(), moe.rows_slot.data(),
+                                   nullptr, nullptr, down_half, hidden,
+                                   expert_ff, stream);
+    };
+    if (!(pair ? (down(moe.routed_tiles.data() + n_tiles, n_pair, kPairRows) &&
+                  down(moe.routed_tiles.data() + n_tiles + n_pair, n_narrow,
+                       kNarrowRows))
+               : down(moe.routed_tiles.data(), n_tiles, tile_rows))) {
       throw std::runtime_error("routed F16 expert down GEMM failed");
     }
     routed::MoeEpilogueVec4F16(
@@ -560,6 +590,18 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         IsFusedRMSNormQuantizeQ8_1Supported(hidden_size) &&
         is_q8(layer.ffn_gate) && is_q8(layer.ffn_up);
 
+    // A DeltaNet layer always quantizes its normed row and an MoE FFN always
+    // quantizes the FFN-normed row for the shared expert; where the row is
+    // 2048 wide the norm writes that activation itself, with the preceding
+    // residual add folded in for the FFN norm.
+    const bool fused_norm_quant =
+        !half_prefill &&
+        IsFusedResidualRMSNormQuantizeQ8_1Supported(hidden_size);
+    const bool attn_norm_quantized =
+        fused_norm_quant && !norm_feeds_q8_only && !layer.is_full_attention;
+    const bool ffn_norm_quantized =
+        fused_norm_quant && !ffn_feeds_q8_only && config.IsMoE();
+
     // Pre-layer RMSNorm (generates BF16 into d_scratch_bf16 directly)
     if (half_prefill) {
       LaunchBatchedRMSNormFp16(arena_.d_hidden, nullptr,
@@ -571,6 +613,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           arena_.d_hidden, /*residual=*/nullptr,
           static_cast<const float*>(layer.attn_norm.data), /*sum_out=*/nullptr,
           arena_.d_scratch_q8_act, batch_size, hidden_size, eps, arena_.stream);
+    } else if (attn_norm_quantized) {
+      LaunchBatchedFusedResidualRMSNormQuantizeQ8_1(
+          arena_.d_hidden, /*residual=*/nullptr,
+          static_cast<const float*>(layer.attn_norm.data), /*sum_out=*/nullptr,
+          arena_.d_normed, arena_.d_scratch_bf16, arena_.d_scratch_q8_act,
+          batch_size, hidden_size, eps, arena_.stream);
     } else {
       LaunchBatchedRMSNorm(arena_.d_hidden,
                            static_cast<const float*>(layer.attn_norm.data),
@@ -753,7 +801,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                     arena_.d_scratch_q8_act);
       }
     } else {
-      if (!half_prefill && !norm_feeds_q8_only) {
+      if (!half_prefill && !norm_feeds_q8_only && !attn_norm_quantized) {
         LaunchQuantizeActivationQ8_1(arena_.d_scratch_bf16,
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
@@ -858,6 +906,12 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           arena_.d_hidden, arena_.d_attn_out,
           static_cast<const float*>(layer.ffn_norm.data), arena_.d_hidden,
           arena_.d_scratch_q8_act, batch_size, hidden_size, eps, arena_.stream);
+    } else if (ffn_norm_quantized) {
+      LaunchBatchedFusedResidualRMSNormQuantizeQ8_1(
+          arena_.d_hidden, arena_.d_attn_out,
+          static_cast<const float*>(layer.ffn_norm.data), arena_.d_hidden,
+          arena_.d_normed, arena_.d_scratch_bf16, arena_.d_scratch_q8_act,
+          batch_size, hidden_size, eps, arena_.stream);
     } else {
       LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_attn_out,
                                arena_.d_hidden, batch_size, hidden_size,
@@ -877,7 +931,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
 
     if (config.IsMoE()) {
       ExecuteMoePrefillChunk(arena_, scratch.moe, layer, config, batch_size,
-                             gemm_weight, reads_q8_act);
+                             gemm_weight, reads_q8_act, ffn_norm_quantized);
     } else {
       {
         if (!half_prefill && !ffn_feeds_q8_only) {
