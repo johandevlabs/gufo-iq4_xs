@@ -70,27 +70,39 @@ stopped; see [Experiments](EXPERIMENTS.md).
 | 16384 | 1852.64 | 800.98 | +131.3% |
 | tg128 | 53.95 | 48.83 | +10.5% |
 
-## Prefill after the October 1, 2026 kernel changes
+## Prefill after the October 2026 kernel changes
 
-Routed down projection on the mixed pair map, one-wave GDN post-norm and the
-fused residual/RMSNorm/quantize pass (see [Experiments](EXPERIMENTS.md)),
-measured October 1, 2026 as an interleaved A/B against the build of the tree
-they were developed on: `gufo bench --n-prompt 1024,2048,4096,8192 --n-gen 0
---repetitions 3`, three rounds for UD-Q6_K_XL and two for UD-Q8_K_XL, mean of
-the rounds, production inference services and the OOM cron stopped. The tables
-above predate the routed F16 expert GEMM and are not comparable with these.
+The routed down projection on the mixed pair map, the one-wave GDN post-norm
+and QK norm, the fused residual/RMSNorm/quantize pass, the GDN convolution in
+the qkv GEMM epilogue and the BF16 router and GDN controls (see
+[Experiments](EXPERIMENTS.md)), measured October 2, 2026 as an interleaved A/B
+against the source they were developed on. Both sides compile their HIP
+sources with the pinned ROCm 7.2.3 compiler and run in the ROCm 7.2.3
+container: `gufo bench --n-prompt 1024,2048,4096,8192,16384 --n-gen 0
+--repetitions 3`, three rounds per artifact, mean of the rounds, production
+inference services and the OOM cron stopped. The tables above predate the
+routed F16 expert GEMM and are not comparable with these.
 
 | Prompt (tokens) | UD-Q6_K_XL before (t/s) | after (t/s) | gain | UD-Q8_K_XL before (t/s) | after (t/s) | gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1024 | 2268.9 | 2439.8 | +7.5% | 2065.1 | 2186.6 | +5.9% |
-| 2048 | 2581.6 | 2715.7 | +5.2% | 2305.8 | 2438.3 | +5.7% |
-| 4096 | 2695.6 | 2860.8 | +6.1% | 2396.4 | 2530.6 | +5.6% |
-| 8192 | 2603.0 | 2746.6 | +5.5% | 2321.5 | 2448.9 | +5.5% |
+| 1024 | 2305.2 | 2632.4 | +14.2% | 2175.0 | 2408.3 | +10.7% |
+| 2048 | 2629.0 | 2992.6 | +13.8% | 2415.4 | 2697.7 | +11.7% |
+| 4096 | 2748.9 | 3153.9 | +14.7% | 2483.6 | 2804.1 | +12.9% |
+| 8192 | 2667.9 | 3053.3 | +14.4% | 2420.7 | 2719.8 | +12.4% |
+| 16384 | 2511.5 | 2849.8 | +13.5% | 2294.1 | 2559.5 | +11.6% |
+
+Plain decoding is unchanged: tg128 on UD-Q6_K_XL is 55.5 t/s before and after.
 
 Server mode, one session, greedy with thinking off: a 12,262-token prompt
-prefills at 2475 → 2617 t/s on UD-Q6_K_XL and 2204 → 2343 t/s on UD-Q8_K_XL,
-a 6,113-token prompt at 2572 → 2708 and 2318 → 2422 t/s. The 128-token
-completions are byte-identical before and after on both artifacts.
+prefills at 2533 → 2874 t/s on UD-Q6_K_XL and 2312 → 2580 t/s on UD-Q8_K_XL,
+a 6,113-token prompt at 2645 → 3000 and 2402 → 2687 t/s. The completions are
+not byte-identical to the previous build, because the router and the GDN
+controls are rounded to BF16 in prefill; [Quality](QUALITY.md) has the checks
+that qualified that change.
+
+The compiler matters on its own: the same source built with the ROCm 7.1
+compiler prefills about 2% slower (pp4096 2952 against 3004 t/s before the BF16
+route) and decodes at 54.2 against 55.5 t/s.
 
 ## Qwen3.8 27B regression (UD-Q8_K_XL)
 
@@ -105,14 +117,14 @@ Confirms the shared attention/GDN path is unchanged by the MoE work.
 
 ```sh
 cmake --build --preset release --parallel 16
-# stop the production services + OOM cron first (see the handoff)
+# Nothing else may use the GPU while these run.
 for QUANT in Q8_K_XL Q6_K_XL; do
-  /home/sami/gufo/run-in-container.sh bench \
-    --model /home/sami/models-mtp/Qwen3.6-35B-A3B-MTP-UD-$QUANT.gguf \
+  ./build/release/gufo bench \
+    --model "$MODELS/Qwen3.6-35B-A3B-MTP-UD-$QUANT.gguf" \
     --n-prompt 512,1024,2048,4096,8192,16384 --n-gen 128 --repetitions 3
 done
-/home/sami/gufo/run-in-container.sh bench \
-  --model /home/sami/models-gufo/qwen38-27b/Qwen3.8-27B-UD-Q8_K_XL.gguf \
+./build/release/gufo bench \
+  --model "$MODELS/Qwen3.8-27B-UD-Q8_K_XL.gguf" \
   --n-prompt 2048,8192 --n-gen 0 --repetitions 2
 ```
 
