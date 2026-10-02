@@ -340,7 +340,11 @@ __launch_bounds__(32) __global__
   const float total_o_sq =
       group_sq[0] + group_sq[1] + group_sq[2] + group_sq[3];
   const float mean_sq = total_o_sq / static_cast<float>(kValDim);
-  const float inv_rms = rsqrtf(mean_sq + 1e-6F);
+  // The 128-thread kernel reduces from lane 0 of each wave. The lanes of a
+  // butterfly agree only while the compiler keeps the square separate from
+  // the first add; once it fuses them each lane rounds differently, so take
+  // lane 0 here as well.
+  const float inv_rms = __shfl(rsqrtf(mean_sq + 1e-6F), 0);
 
   const std::size_t num_blocks = inner_size / 32;
 #pragma unroll
