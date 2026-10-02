@@ -238,6 +238,18 @@ void LaunchBatchedFusedRMSNormQuantizeQ8_1(
     void* q8_1_out, std::size_t batch_size, std::size_t dim, float eps,
     hipStream_t stream = nullptr);
 
+/// The GDN qkv projection with its causal convolution and SiLU applied in the
+/// GEMM epilogue, for Q8_0 weights. `conv_out` receives every token except the
+/// first three of each 64-token span; `y` receives the raw projection of those
+/// three, of the last four tokens of each span and of the last four tokens of
+/// the batch, which is what LaunchBatchedSSMConvRecurrenceRowSplit with
+/// `conv_fused` reads. Both are bit-identical to the projection followed by
+/// the convolution. Returns false, launching nothing, for any other shape.
+[[nodiscard]] bool TryLaunchBatchedQuantGEMMSsmConv(
+    core::GgmlType type, const void* w, const void* q8_1_x, float* y,
+    const float* conv_weights, float* conv_out, std::size_t batch,
+    std::size_t m, std::size_t k, hipStream_t stream = nullptr);
+
 /// Whether LaunchBatchedFusedResidualRMSNormQuantizeQ8_1 accepts this width.
 bool IsFusedResidualRMSNormQuantizeQ8_1Supported(std::size_t dim) noexcept;
 

@@ -1751,6 +1751,16 @@ void LaunchBatchedQuantGEMMPreQuantized(core::GgmlType type, const void* w,
   }
 }
 
+bool TryLaunchBatchedQuantGEMMSsmConv(core::GgmlType type, const void* w,
+                                      const void* q8_1_x, float* y,
+                                      const float* conv_weights,
+                                      float* conv_out, std::size_t batch,
+                                      std::size_t m, std::size_t k,
+                                      hipStream_t stream) {
+  return detail::TryLaunchQuantPrefillSsmConvWave64(
+      type, w, q8_1_x, y, conv_weights, conv_out, batch, m, k, stream);
+}
+
 void LaunchBatchedDualQuantGEMMPreQuantized(
     core::GgmlType type, const void* w_gate, const void* w_up,
     const void* q8_1_x, float* y_gate, float* y_up, std::size_t batch,

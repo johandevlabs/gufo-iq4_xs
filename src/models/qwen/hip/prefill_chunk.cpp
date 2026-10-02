@@ -806,9 +806,38 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                                      arena_.d_scratch_q8_act, batch_size,
                                      hidden_size, arena_.stream);
       }
-      gemm_weight(layer.attn_qkv, arena_.d_scratch_bf16, arena_.d_normed,
-                  arena_.d_ssm_qkv, ssm_qkv_size, hidden_size,
-                  arena_.d_scratch_q8_act);
+      // The row-split recurrence parallelizes independent state rows. Its
+      // epilogue emits the activation consumed by ssm_out directly.
+      const bool ssm_row_split = detail::ShouldUseSsmRowSplitRecurrence(
+          IsDeltaNetRowSplitSupported(config.ssm_state_size,
+                                      config.SsmValueSize()),
+          arena_.d_ssm_kq_scales != nullptr &&
+              arena_.d_ssm_alpha_beta != nullptr);
+      // On the row-split route a Q8_0 qkv projection applies the causal
+      // convolution in its own epilogue, so the FP32 projection is neither
+      // written nor read back. Replay capture needs the raw projection.
+      const bool ssm_conv_fused =
+          ssm_row_split && !half_prefill &&
+          !arena_.IsSsmReplayCaptureActive() &&
+          models::qwen::ResolveQwenGemmRoute(
+              {.type = layer.attn_qkv.type,
+               .batch_size = batch_size,
+               .m = ssm_qkv_size,
+               .k = hidden_size,
+               .mode = models::qwen::QwenGemmMode::kHipPrefill})
+                  .route ==
+              models::qwen::QwenGemmRoute::kHipPrefillQuantDirect &&
+          TryLaunchBatchedQuantGEMMSsmConv(
+              layer.attn_qkv.type, layer.attn_qkv.data, arena_.d_scratch_q8_act,
+              arena_.d_ssm_qkv,
+              static_cast<const float*>(layer.ssm_conv1d.data),
+              arena_.d_conv_out, batch_size, ssm_qkv_size, hidden_size,
+              arena_.stream);
+      if (!ssm_conv_fused) {
+        gemm_weight(layer.attn_qkv, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_ssm_qkv, ssm_qkv_size, hidden_size,
+                    arena_.d_scratch_q8_act);
+      }
       gemm_weight(layer.attn_gate, arena_.d_scratch_bf16, arena_.d_normed,
                   arena_.d_ssm_gate, ssm_inner_size, hidden_size,
                   arena_.d_scratch_q8_act);
@@ -825,16 +854,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             batch_size, ssm_qkv_size, time_step_rank, arena_.stream);
       }
 
-      // The row-split recurrence parallelizes independent state rows. Its
-      // epilogue emits the activation consumed by ssm_out directly.
       const bool ssm_epilogue_q8 = reads_q8_act(layer.ssm_out) &&
                                    IsFusedSSMEpilogueQuantizeQ8_1Supported(
                                        config.SsmValueSize(), ssm_inner_size);
-      const bool ssm_row_split = detail::ShouldUseSsmRowSplitRecurrence(
-          IsDeltaNetRowSplitSupported(config.ssm_state_size,
-                                      config.SsmValueSize()),
-          arena_.d_ssm_kq_scales != nullptr &&
-              arena_.d_ssm_alpha_beta != nullptr);
       if (ssm_row_split) {
         LaunchBatchedSSMConvRecurrenceRowSplit(
             arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
@@ -849,7 +871,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
             config.ssm_group_count, config.ssm_time_step_rank,
             config.ssm_state_size, config.SsmValueSize(), arena_.stream,
             arena_.GetRecurrentStateStorage(),
-            half_prefill ? arena_.d_scratch_bf16 : nullptr);
+            half_prefill ? arena_.d_scratch_bf16 : nullptr, ssm_conv_fused);
       } else {
         LaunchBatchedSSMConvRecurrence(
             arena_.d_ssm_qkv, static_cast<const float*>(layer.ssm_conv1d.data),
