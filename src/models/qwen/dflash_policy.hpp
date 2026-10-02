@@ -234,10 +234,16 @@ public:
     // preserves E[accepted - m * rejected] == 0. Weight a completed block by
     // its accepted tokens too; a fixed increment biases short blocks upward
     // and long blocks downward.
-    mean_ = accepted == drafted
-                ? std::min(mean_ + 0.25F * static_cast<float>(accepted),
-                           static_cast<float>(limit_))
-                : 0.75F * mean_ + 0.25F * static_cast<float>(accepted);
+    // An MoE target pays for every row of a block, so a noisy estimate costs
+    // more there: on recorded Qwen3.6-35B acceptance traces a weight of 0.10
+    // decodes about 1% faster than 0.25, within 1% of the best fixed length
+    // for each prompt.
+    const float weight = moe_target_ ? 0.10F : 0.25F;
+    mean_ =
+        accepted == drafted
+            ? std::min(mean_ + weight * static_cast<float>(accepted),
+                       static_cast<float>(limit_))
+            : (1.0F - weight) * mean_ + weight * static_cast<float>(accepted);
   }
 
   void Reset() noexcept {

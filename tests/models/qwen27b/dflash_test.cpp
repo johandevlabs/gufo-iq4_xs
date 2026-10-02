@@ -60,7 +60,7 @@ void TestLengthController() {
     }
     Expect(dense.Choose(7) > moe.Choose(7) && moe.Choose(7) <= 3,
            "MoE verification cost shortens a poorly accepted block");
-    for (int round = 0; round < 32; ++round) {
+    for (int round = 0; round < 96; ++round) {
       const auto drafted = moe.Choose(7);
       moe.Observe(drafted, drafted);
     }
