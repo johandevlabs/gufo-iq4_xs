@@ -87,6 +87,67 @@ constexpr std::size_t kRoutedPairMinTokens = 1024;
 /// the exact small-batch route to the WMMA GEMM.
 constexpr std::size_t kBf16WmmaMinPrefillBatch = 128;
 
+/// True when `rows` x `k` F32 weights of an MoE model can take the BF16 WMMA
+/// GEMM for this chunk, with the converted weights staged in `scratch_bytes`
+/// of scratch. The router and the GDN alpha/beta controls are well under 1% of
+/// a chunk's arithmetic but about a tenth of its time on the hipBLAS FP32
+/// route; like the BF16 dense projections, MoE targets have no exact cold/live
+/// continuation contract that would pin them to FP32.
+bool CanUseBf16WmmaProjection(std::size_t batch_size, std::size_t rows,
+                              std::size_t k, std::size_t scratch_bytes) {
+  return batch_size >= kBf16WmmaMinPrefillBatch &&
+         IsMoeGroupedBf16GemmSupported(rows, k, 1) &&
+         scratch_bytes >= rows * k * sizeof(hip_bfloat16);
+}
+
+/// GDN alpha and beta as one [B, 2 * rank] BF16 WMMA GEMM when the two F32
+/// matrices are adjacent in the weight storage, so the activations are read
+/// once; the stacked rows are then split into the two control buffers. Returns
+/// false when the layout or the scratch does not allow it; the caller then
+/// projects them one by one.
+bool LaunchStackedSsmControls(QwenGpuArena& arena,
+                              const models::QwenLayerWeights& layer,
+                              std::size_t batch_size, std::size_t rank,
+                              std::size_t hidden) {
+  const auto& alpha = layer.ssm_alpha;
+  const auto& beta = layer.ssm_beta;
+  if (alpha.type != core::GgmlType::kF32 || beta.type != alpha.type ||
+      alpha.num_elements != rank * hidden ||
+      beta.num_elements != alpha.num_elements) {
+    return false;
+  }
+  const std::size_t matrix_bytes = alpha.EncodedSizeBytes();
+  if (alpha.available_bytes < 2 * matrix_bytes ||
+      static_cast<const std::byte*>(alpha.data) + matrix_bytes != beta.data) {
+    return false;
+  }
+  // The BF16 weight scratch is free between projections. It holds the
+  // converted weights followed by the stacked output.
+  const std::size_t rows = 2 * rank;
+  const auto scratch = arena.GetScratchView().decode.weight_bf16;
+  const std::size_t weight_bytes = rows * hidden * sizeof(hip_bfloat16);
+  const std::size_t out_offset = (weight_bytes + 63) / 64 * 64;
+  const std::size_t out_bytes = batch_size * rows * sizeof(float);
+  if (scratch.size_bytes() < out_offset + out_bytes ||
+      !CanUseBf16WmmaProjection(batch_size, rows, hidden, weight_bytes)) {
+    return false;
+  }
+  auto* const base = reinterpret_cast<std::byte*>(scratch.data());
+  auto* const stacked = reinterpret_cast<float*>(base + out_offset);
+  LaunchFloatToBfloat16(static_cast<const float*>(alpha.data), base,
+                        rows * hidden, arena.stream);
+  LaunchBf16WmmaGemm(base, arena.d_normed, stacked, batch_size, rows, hidden,
+                     arena.stream);
+  const std::size_t pitch = rank * sizeof(float);
+  HIP_CHECK(hipMemcpy2DAsync(arena.d_alpha_buf, pitch, stacked, 2 * pitch,
+                             pitch, batch_size, hipMemcpyDeviceToDevice,
+                             arena.stream));
+  HIP_CHECK(hipMemcpy2DAsync(arena.d_beta_buf, pitch, stacked + rank, 2 * pitch,
+                             pitch, batch_size, hipMemcpyDeviceToDevice,
+                             arena.stream));
+  return true;
+}
+
 /// Batched routed MoE FFN (qwen35moe) for one prefill chunk. The router and
 /// shared expert reuse the dense prefill GEMM routes. Each routed projection
 /// picks its own route: Q8_0 / Q6_K take Flash-Next's routed F16 WMMA GEMM,
@@ -109,11 +170,23 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
   const std::size_t slots = batch_size * n_used;
   const hipStream_t stream = arena.stream;
 
-  // Router logits [B, E] and shared-expert gate [B]: F32 weights on the
-  // hipBLAS FP32 route.
-  LaunchHipblasGEMM(arena.hipblas_handle, view.router.data, false,
-                    arena.d_normed, moe.router_logits.data(), batch_size,
-                    n_experts, hidden, arena.d_scratch_bf16, stream);
+  // Router logits [B, E] and shared-expert gate [B]: F32 weights. Large
+  // chunks round the router to BF16 for the WMMA GEMM; the one-row gate and
+  // small chunks stay on the hipBLAS FP32 route.
+  const auto weight_scratch = arena.GetScratchView().decode.weight_bf16;
+  if (view.router.type == core::GgmlType::kF32 &&
+      CanUseBf16WmmaProjection(batch_size, n_experts, hidden,
+                               weight_scratch.size_bytes())) {
+    LaunchFloatToBfloat16(static_cast<const float*>(view.router.data),
+                          weight_scratch.data(), n_experts * hidden, stream);
+    LaunchBf16WmmaGemm(weight_scratch.data(), arena.d_normed,
+                       moe.router_logits.data(), batch_size, n_experts, hidden,
+                       stream);
+  } else {
+    LaunchHipblasGEMM(arena.hipblas_handle, view.router.data, false,
+                      arena.d_normed, moe.router_logits.data(), batch_size,
+                      n_experts, hidden, arena.d_scratch_bf16, stream);
+  }
   LaunchHipblasGEMM(arena.hipblas_handle, view.shexp_gate_inp.data, false,
                     arena.d_normed, moe.shexp_gate.data(), batch_size, 1,
                     hidden, arena.d_scratch_bf16, stream);
@@ -841,12 +914,16 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
       gemm_weight(layer.attn_gate, arena_.d_scratch_bf16, arena_.d_normed,
                   arena_.d_ssm_gate, ssm_inner_size, hidden_size,
                   arena_.d_scratch_q8_act);
-      gemm_weight(layer.ssm_alpha, arena_.d_scratch_bf16, arena_.d_normed,
-                  arena_.d_alpha_buf, time_step_rank, hidden_size,
-                  arena_.d_scratch_q8_act);
-      gemm_weight(layer.ssm_beta, arena_.d_scratch_bf16, arena_.d_normed,
-                  arena_.d_beta_buf, time_step_rank, hidden_size,
-                  arena_.d_scratch_q8_act);
+      if (half_prefill || !config.IsMoE() ||
+          !LaunchStackedSsmControls(arena_, layer, batch_size, time_step_rank,
+                                    hidden_size)) {
+        gemm_weight(layer.ssm_alpha, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_alpha_buf, time_step_rank, hidden_size,
+                    arena_.d_scratch_q8_act);
+        gemm_weight(layer.ssm_beta, arena_.d_scratch_bf16, arena_.d_normed,
+                    arena_.d_beta_buf, time_step_rank, hidden_size,
+                    arena_.d_scratch_q8_act);
+      }
       if (arena_.IsSsmReplayCaptureActive()) {
         LaunchCaptureBatchedSsmReplay(
             arena_.d_ssm_qkv, arena_.d_alpha_buf, arena_.d_beta_buf,

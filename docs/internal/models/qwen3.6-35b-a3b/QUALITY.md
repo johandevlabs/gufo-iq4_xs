@@ -39,6 +39,27 @@ previous build in server mode; the October 1, 2026 prefill changes keep them
 byte-identical on UD-Q6_K_XL and UD-Q8_K_XL, and both artifacts pass the target
 test and the MoE operator test.
 
+## BF16 router and GDN controls in prefill
+
+Prefill chunks of at least 128 tokens round the F32 router and the GDN
+alpha/beta projections to BF16 (see [Experiments](EXPERIMENTS.md)), so their
+output is not byte-identical to the FP32 route. The change was qualified on
+UD-Q6_K_XL, greedy, plain decoding, against the same source without it:
+
+| Check | FP32 route | BF16 route |
+| --- | ---: | ---: |
+| 5-shot MMLU, 969 questions over 57 subjects, mean prompt 651 tokens | 741 (76.47%) | 739 (76.26%) |
+| Aggregation over 40/120/300 order records, 90 questions, up to 5.5K tokens | 40 | 40 |
+| Recall of one or two access codes among three, 54 prompts at 2K-12K tokens | 54 | 54 |
+| Recall of three codes among sixteen similar names, 30 prompts at 6K-24K tokens | 90 of 90 | 90 of 90 |
+
+On MMLU the two routes pick the same letter on 97.0% of questions; 13 are right
+only with FP32 and 11 only with BF16 (exact McNemar p = 0.84). `--validate-prefill`
+keeps the sequential reference's top-1 token at 512, 2048 and 4096 tokens, with
+an RMSE of 0.087 / 0.564 / 1.85 against 0.086 / 0.523 / 2.10 for the FP32 route.
+Both artifacts pass the target test. This bounds a loss to about one MMLU point;
+it does not measure long generations, tool calling or speculative decoding.
+
 ## Reproduce
 
 Build the `gpu-test` preset and run the binaries inside the ROCm container:
