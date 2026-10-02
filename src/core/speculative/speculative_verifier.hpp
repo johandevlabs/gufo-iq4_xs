@@ -288,12 +288,16 @@ public:
 
   /// Resets target and draft state, prefills the prompt, and returns the first
   /// target token. This setup is outside benchmarked decode regions.
+  /// `keep_context_from` is the first position whose target features the
+  /// draft still needs: a prompt span that ends at or before it is prefilled
+  /// without capturing or injecting draft context, when the draft supports
+  /// skipping. Zero keeps every position.
   [[nodiscard]] sampling::TokenId Prime(
       std::span<const sampling::TokenId> prompt_tokens,
-      bool compute_logits = true);
+      bool compute_logits = true, std::uint32_t keep_context_from = 0);
   [[nodiscard]] sampling::TokenId ExtendPrompt(
       std::span<const sampling::TokenId> tokens, std::uint32_t position,
-      bool compute_logits = true);
+      bool compute_logits = true, std::uint32_t keep_context_from = 0);
 
   /// Commits one externally supplied continuation token through the target
   /// model and updates draft-provider state with the matching target features.

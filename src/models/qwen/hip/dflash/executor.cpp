@@ -785,6 +785,7 @@ void QwenDFlashGpuExecutor::RestoreSnapshot(
   }
   HIP_CHECK(hipStreamSynchronize(stream_));
   injected_context_len_ = snapshot.valid_context_;
+  context_floor_ = 0;
 }
 
 void QwenDFlashGpuExecutor::RestorePersistentSnapshot(
@@ -864,6 +865,7 @@ void QwenDFlashGpuExecutor::RestorePersistentSnapshot(
   }
   HIP_CHECK(hipStreamSynchronize(stream_));
   injected_context_len_ = valid_context;
+  context_floor_ = 0;
 }
 
 void QwenDFlashGpuExecutor::Reset() noexcept {
@@ -876,6 +878,17 @@ void QwenDFlashGpuExecutor::Reset() noexcept {
   }
   // Attention only reads the valid prefix; new rows overwrite stale KV.
   injected_context_len_ = 0;
+  context_floor_ = 0;
+}
+
+void QwenDFlashGpuExecutor::SkipTargetContextTo(std::uint32_t position) {
+  if (position < injected_context_len_ || position > max_context_) {
+    throw std::invalid_argument("DFlash context skip position is invalid");
+  }
+  if (position != injected_context_len_) {
+    injected_context_len_ = position;
+    context_floor_ = position;
+  }
 }
 
 bool QwenDFlashGpuExecutor::InjectTargetContext(

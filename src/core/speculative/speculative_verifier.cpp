@@ -1323,18 +1323,29 @@ std::vector<sampling::TokenId> SpeculativeVerifier::Generate(
 
 sampling::TokenId SpeculativeVerifier::ExtendPrompt(
     std::span<const sampling::TokenId> tokens, std::uint32_t position,
-    bool compute_logits) {
+    bool compute_logits, std::uint32_t keep_context_from) {
   if (tokens.empty() || position == 0) {
     throw std::invalid_argument(
         "prompt extension needs a nonempty retained prefix");
   }
-  const bool capture =
+  const bool needs_hidden =
       draft_backend_ != nullptr && draft_backend_->RequiresTargetHiddenStates();
+  // The draft's window will have moved past this whole span before it is
+  // used again: advance it without the span's features.
+  const bool skip_context = needs_hidden &&
+                            draft_backend_->TargetContextWindow() != 0 &&
+                            position + tokens.size() <= keep_context_from;
+  const bool capture = needs_hidden && !skip_context;
   target_executor_->SetPromptHiddenCapture(
       capture, capture ? draft_backend_->TargetHiddenLayerIds()
                        : std::span<const std::uint32_t>{});
   const auto next =
       target_executor_->ForwardPromptSuffix(tokens, position, compute_logits);
+  if (skip_context &&
+      !draft_backend_->SkipTargetContext(
+          position, static_cast<std::uint32_t>(tokens.size()), false)) {
+    throw std::runtime_error("draft failed to skip target prompt features");
+  }
   if (capture) {
     const auto hidden = target_executor_->GetPromptHiddenStates();
     if (hidden.empty() || hidden.size() % tokens.size() != 0 ||
@@ -1351,21 +1362,31 @@ sampling::TokenId SpeculativeVerifier::ExtendPrompt(
 }
 
 sampling::TokenId SpeculativeVerifier::Prime(
-    std::span<const sampling::TokenId> prompt_tokens, bool compute_logits) {
+    std::span<const sampling::TokenId> prompt_tokens, bool compute_logits,
+    std::uint32_t keep_context_from) {
   if (prompt_tokens.empty()) {
     throw std::invalid_argument("speculative prompt must not be empty");
   }
   Reset();
   target_executor_->Reset();
 
-  const bool capture_hidden =
+  const bool needs_hidden =
       draft_backend_ != nullptr && draft_backend_->RequiresTargetHiddenStates();
+  const bool skip_context = needs_hidden &&
+                            draft_backend_->TargetContextWindow() != 0 &&
+                            prompt_tokens.size() <= keep_context_from;
+  const bool capture_hidden = needs_hidden && !skip_context;
   const auto target_layer_ids = capture_hidden
                                     ? draft_backend_->TargetHiddenLayerIds()
                                     : std::span<const std::uint32_t>{};
   target_executor_->SetPromptHiddenCapture(capture_hidden, target_layer_ids);
   const sampling::TokenId first_token =
       target_executor_->ForwardPromptSuffix(prompt_tokens, 0, compute_logits);
+  if (skip_context &&
+      !draft_backend_->SkipTargetContext(
+          0, static_cast<std::uint32_t>(prompt_tokens.size()), true)) {
+    throw std::runtime_error("draft backend failed to skip target context");
+  }
   if (capture_hidden) {
     const auto prompt_hidden = target_executor_->GetPromptHiddenStates();
     if (prompt_hidden.empty() ||

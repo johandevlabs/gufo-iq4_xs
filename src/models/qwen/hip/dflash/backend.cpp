@@ -254,6 +254,33 @@ QwenDFlashGpuDraftBackend::CreateFromGguf(
   return Create(std::move(model), config, error_msg);
 }
 
+std::uint32_t QwenDFlashGpuDraftBackend::TargetContextWindow() const noexcept {
+  return executor_->GetHistoryCapacity();
+}
+
+bool QwenDFlashGpuDraftBackend::SkipTargetContext(std::uint32_t position,
+                                                  std::uint32_t count,
+                                                  bool prime) {
+  if (prime) {
+    Reset();
+    if (position != 0 || count == 0) {
+      return false;
+    }
+  } else if (!primed_ || proposal_active_ ||
+             position < executor_->GetInjectedContextLength()) {
+    return false;
+  }
+  if (count > config_.max_context - position) {
+    return false;
+  }
+  // Features of committed tokens that precede skipped positions are older
+  // still, so they are dropped with them.
+  pending_target_features_.clear();
+  executor_->SkipTargetContextTo(position + count);
+  primed_ = true;
+  return true;
+}
+
 bool QwenDFlashGpuDraftBackend::PrimeTargetContext(
     const speculative::DraftTargetContext& context) {
   CheckContinuation();
@@ -436,6 +463,10 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
     const auto& request = requests[index];
     auto& backend = *backends[index];
     proposals[index].start_pos = request.position;
+    // As in the single-request path: no draft while a skipped position is
+    // still inside this session's attention window.
+    if (!backend.executor_->ContextComplete())
+      continue;
     const auto count =
         shared_count ? *shared_count
                      : backend.controller_.Choose(
@@ -671,6 +702,12 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
 
   speculative::DraftProposal proposal;
   proposal.start_pos = current_pos;
+  // A skipped position inside the attention window would be read as stale
+  // K/V. Callers keep the window whole; decode this block without a draft
+  // if one did not.
+  if (!executor_->ContextComplete()) {
+    return proposal;
+  }
   const std::uint32_t context_budget =
       current_pos < config_.max_context ? config_.max_context - current_pos - 1U
                                         : 0;

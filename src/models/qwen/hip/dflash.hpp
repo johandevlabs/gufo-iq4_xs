@@ -184,6 +184,18 @@ public:
                            std::uint32_t position, std::uint32_t num_tokens,
                            const DFlashTrace& trace = {});
 
+  /// Advances the injected length to `position` without writing K/V. The
+  /// skipped positions must have left the attention window before the next
+  /// block is drafted; ContextComplete() reports whether they have.
+  void SkipTargetContextTo(std::uint32_t position);
+  [[nodiscard]] bool ContextComplete() const noexcept {
+    return injected_context_len_ - context_floor_ >=
+           std::min(injected_context_len_, history_capacity_);
+  }
+  [[nodiscard]] std::uint32_t GetHistoryCapacity() const noexcept {
+    return history_capacity_;
+  }
+
   /// Projects committed features together and writes each private cache at
   /// its original absolute positions. Reuses the coordinator's scalar scratch.
   static void InjectTargetContextBatch(
@@ -267,6 +279,8 @@ private:
   std::shared_ptr<const QwenDFlashGpuModel> model_;
   std::uint32_t max_context_{4096};
   std::uint32_t injected_context_len_{0};
+  /// First position whose K/V is present; positions below it were skipped.
+  std::uint32_t context_floor_{0};
   std::uint32_t history_capacity_{0};
   std::uint32_t injection_capacity_{0};
   hipStream_t stream_{nullptr};
@@ -358,6 +372,11 @@ public:
   [[nodiscard]] bool AppendTargetContext(
       const speculative::DraftTargetContext& context,
       std::uint32_t position) override;
+
+  [[nodiscard]] std::uint32_t TargetContextWindow() const noexcept override;
+  [[nodiscard]] bool SkipTargetContext(std::uint32_t position,
+                                       std::uint32_t count,
+                                       bool prime) override;
 
   void UpdateTargetHidden(std::span<const float> hidden) override;
 
