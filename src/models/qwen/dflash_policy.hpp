@@ -283,10 +283,10 @@ private:
   static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
       1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
   // Qwen3.6-35B-A3B UD-Q6_K_XL, one request: complete fixed-width cycles cost
-  // 29.7/33.7/38.0/41.7/45.2/49.2/53.0 ms for 1-7 drafts, about 3.9 ms per
+  // 29.4/33.1/36.8/40.1/43.4/47.2/50.8 ms for 1-7 drafts, about 3.6 ms per
   // extra row, on four prompt kinds whose cycle cost agreed within 1 ms.
   static constexpr std::array<float, kMaxDraftTokens> kMoeRelativeCost{
-      1.0F, 1.135F, 1.28F, 1.40F, 1.52F, 1.66F, 1.785F};
+      1.0F, 1.126F, 1.252F, 1.364F, 1.476F, 1.605F, 1.728F};
   // Two greedy requests verify 4–16 rows together. Crossing eight rows has a
   // large projection cost that the C1 estimate misses. Complete-cycle release
   // controls normalize to 104 ms at one draft; the paired context multiplier

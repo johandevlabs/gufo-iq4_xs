@@ -47,10 +47,8 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
     return;
   }
 
-  for (std::size_t row = 0; row < batch_size; ++row) {
-    LaunchGEMV(weight.data, weight.type, input + (row * input_size),
-               output + (row * output_size), output_size, input_size, stream);
-  }
+  LaunchGEMVRows(weight.data, weight.type, input, output, batch_size,
+                 output_size, input_size, stream);
 }
 
 void LaunchFfnActivation(const models::QwenLayerWeights& layer,

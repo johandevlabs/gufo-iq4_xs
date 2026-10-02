@@ -96,6 +96,15 @@ void LaunchGEMV(
     std::size_t M, std::size_t K, hipStream_t stream = nullptr,
     models::qwen::QwenGemmMode mode = models::qwen::QwenGemmMode::kHipDecode);
 
+/// `rows` independent GEMVs sharing A: y[row] = A * x[row], with x rows of K
+/// and y rows of M elements. Each row is bit-identical to LaunchGEMV; the
+/// baseline F32/BF16 routes take one launch for all rows.
+void LaunchGEMVRows(
+    const void* A, core::GgmlType a_type, const float* x, float* y,
+    std::size_t rows, std::size_t M, std::size_t K,
+    hipStream_t stream = nullptr,
+    models::qwen::QwenGemmMode mode = models::qwen::QwenGemmMode::kHipDecode);
+
 /// opt-c1xx-q8k-gemv: computes y = A * x where A is stored as block_q8_K
 /// ({ float d; int8_t qs[256]; int16_t bsums[16]; }, QK_K=256). The dot runs
 /// at Q8 (activation quantized to int8, integer MAC, single fp scale at block
