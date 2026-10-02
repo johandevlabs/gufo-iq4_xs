@@ -39,10 +39,11 @@ public:
   static constexpr std::uint32_t kMaxDraftTokens = 7;
 
   DFlashLengthController(DFlashDraftPolicy policy, std::uint32_t limit,
-                         bool q8_target = false)
+                         bool q8_target = false, bool moe_target = false)
       : policy_(policy),
         limit_(std::clamp(limit, 1U, kMaxDraftTokens)),
-        q8_target_(q8_target) {
+        q8_target_(q8_target),
+        moe_target_(moe_target) {
     Reset();
   }
 
@@ -103,11 +104,16 @@ public:
       context_multiplier = 4.0F * 100.0F / 170.66F;
     }
     const float attention_cost_scale = context_scale * context_multiplier;
+    // A lone request on an MoE target pays for every verified row: the routed
+    // experts are not shared between rows as dense projections are.
+    const bool moe_single = moe_target_ && greedy_batch_size <= 1;
     for (std::uint32_t length = 1; length <= cap; ++length) {
       survival *= probability;
       expected_tokens += survival;
       const float cost =
-          q8_target_ && greedy_batch_size != 4
+          moe_single ? kMoeRelativeCost[length - 1] +
+                           attention_cost_scale * kQ4ContextCost[length - 1]
+          : q8_target_ && greedy_batch_size != 4
               ? 1.0F + 0.02F * static_cast<float>(length)
               : (*relative_costs)[length - 1] +
                     attention_cost_scale * kQ4ContextCost[length - 1];
@@ -276,6 +282,11 @@ private:
                                   2.183F, 2.850F, 2.813F};
   static constexpr std::array<float, kMaxDraftTokens> kQ4RelativeCost{
       1.0F, 1.02F, 1.045F, 1.08F, 1.14F, 1.20F, 1.29F};
+  // Qwen3.6-35B-A3B UD-Q6_K_XL, one request: complete fixed-width cycles cost
+  // 29.7/33.7/38.0/41.7/45.2/49.2/53.0 ms for 1-7 drafts, about 3.9 ms per
+  // extra row, on four prompt kinds whose cycle cost agreed within 1 ms.
+  static constexpr std::array<float, kMaxDraftTokens> kMoeRelativeCost{
+      1.0F, 1.135F, 1.28F, 1.40F, 1.52F, 1.66F, 1.785F};
   // Two greedy requests verify 4–16 rows together. Crossing eight rows has a
   // large projection cost that the C1 estimate misses. Complete-cycle release
   // controls normalize to 104 ms at one draft; the paired context multiplier
@@ -307,6 +318,7 @@ private:
   DFlashDraftPolicy policy_;
   std::uint32_t limit_;
   bool q8_target_;
+  bool moe_target_;
   float mean_{0.0F};
   std::uint32_t last_full_width_{0};
 };

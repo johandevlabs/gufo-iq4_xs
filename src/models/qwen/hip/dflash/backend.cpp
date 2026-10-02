@@ -197,7 +197,8 @@ QwenDFlashGpuDraftBackend::QwenDFlashGpuDraftBackend(
           // The tied output tensor distinguishes the qualified Q8 target
           // (Q8_0 head) from Q4 (Q6_K head) for verification cost selection.
           executor_->GetModel().GetWeights().output.type ==
-              core::GgmlType::kQ8_0) {
+              core::GgmlType::kQ8_0,
+          executor_->GetModel().TargetIsMoE()) {
   const auto& tokenizer = executor_->GetModel().GetTokenizer();
   const std::array names{tokenization::kImStart, tokenization::kImEnd,
                          tokenization::kEndOfText};
