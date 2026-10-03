@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "src/core/hip/detail/dispatch_telemetry.hpp"
+#include <gufo/ext/experimental/dispatch_telemetry.hpp>
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/attention_decode_split_k.hpp"
 #include "src/families/qwen/kernels/attention_decode_verify_wave64.hpp"
@@ -832,6 +832,15 @@ static void LaunchSplitKAttentionHalfPartials(
   }
 }
 
+void LaunchSplitKAttentionReduce(const float* gate, const float* scratch,
+                                 float* out_context, std::uint32_t num_heads,
+                                 std::uint32_t rows, std::uint32_t splits,
+                                 hipStream_t stream) {
+  QwenDecodeSplitKAttentionReduceKernel<<<dim3(num_heads, rows), 32, 0,
+                                          stream>>>(gate, scratch, out_context,
+                                                    num_heads, splits);
+}
+
 void LaunchAttention(const float* q, const float* k, const float* v,
                      const float* gate, float* k_cache, float* v_cache,
                      void* k_cache_f16, void* v_cache_f16, float* out_context,
@@ -853,6 +862,17 @@ void LaunchAttention(const float* q, const float* k, const float* v,
   const std::size_t sequence_length = static_cast<std::size_t>(pos) + 1;
   const bool split_k_supported = detail::IsSplitKDecodeAttentionSupported(
       sequence_length, num_heads, num_kv_heads, head_dim);
+  // Eight query heads per KV head take the matrix-core route; the FP32
+  // reference cache keeps the scalar one.
+  if (split_k_supported && split_k_scratch != nullptr &&
+      (k_cache == nullptr || v_cache == nullptr) &&
+      LaunchQwenWmmaDecodeAttention(
+          q, gate, k_cache_f16, v_cache_f16, out_context, layer_idx, pos, 1,
+          max_context, num_heads, num_kv_heads, head_dim, stream,
+          {split_k_scratch,
+           detail::DecodeAttentionScratchElements(num_heads, head_dim)})) {
+    return;
+  }
   if (split_k_supported && split_k_scratch != nullptr) {
     const std::uint32_t split_count =
         detail::SelectDecodeAttentionSplitCount(sequence_length);
@@ -931,6 +951,12 @@ void LaunchCausalDecodeAttention(
       detail::IsSplitKDecodeAttentionSupported(
           static_cast<std::size_t>(start_pos) + 1, num_heads, num_kv_heads,
           head_dim)) {
+    if ((k_cache == nullptr || v_cache == nullptr) &&
+        LaunchQwenWmmaDecodeAttention(q, gate, k_cache_f16, v_cache_f16,
+                                      out_context, layer_idx, start_pos,
+                                      batch_size, max_context, num_heads,
+                                      num_kv_heads, head_dim, stream, scratch))
+      return;
     const auto splits = detail::SelectDecodeAttentionSplitCount(
         static_cast<std::size_t>(start_pos) + 1);
     // Keep a partition's KV resident while visiting every query row. With the
