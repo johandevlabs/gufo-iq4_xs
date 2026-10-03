@@ -223,7 +223,13 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
 
   unsigned row_tile = blockIdx.y;
   unsigned token_tile = blockIdx.x;
-  if constexpr (kAffineWave64) {
+  // Q8_0 too: with the token tiles fastest, every row tile reads the whole
+  // activation from the cache again. Grouping eight row tiles is 10-17%
+  // faster for the Qwen3.6-35B-A3B projections at 4096 tokens (2048 x 8192:
+  // 4.93 -> 4.19 ms) and changes no output, which is per tile.
+  constexpr bool kGroupRowTiles =
+      kAffineWave64 || (WaveSize == 64 && WType == core::GgmlType::kQ8_0);
+  if constexpr (kGroupRowTiles) {
     // Reuse each activation panel across up to eight neighboring row tiles.
     // The final group may contain fewer rows; every output tile still has
     // exactly one owner.
