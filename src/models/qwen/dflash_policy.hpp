@@ -112,7 +112,7 @@ public:
       expected_tokens += survival;
       const float cost =
           moe_single ? kMoeRelativeCost[length - 1] +
-                           attention_cost_scale * kQ4ContextCost[length - 1]
+                           attention_cost_scale * kMoeContextCost[length - 1]
           : q8_target_ && greedy_batch_size != 4
               ? 1.0F + 0.02F * static_cast<float>(length)
               : (*relative_costs)[length - 1] +
@@ -319,6 +319,12 @@ private:
   // cold-KV measurements include the anchor plus 1–7 proposals and preserve
   // the actual row-tile boundaries. Position is deterministic on replay;
   // request timings and sampled proposals never enter the decision.
+  // The same target with fixed 1-7 drafts at 3.4k, 26k, 53k and 104k prompt
+  // tokens: the cycle grows linearly with context, by 4.2/5.4/6.9/8.5/11.8/
+  // 13.0/14.3 ms per 30,720 tokens past 2,048, in units of its 30.1 ms
+  // one-draft cycle. Verification rows each read the whole attention cache.
+  static constexpr std::array<float, kMaxDraftTokens> kMoeContextCost{
+      0.138F, 0.181F, 0.231F, 0.283F, 0.392F, 0.432F, 0.473F};
   static constexpr std::array<float, kMaxDraftTokens> kQ4ContextCost{
       0.11F, 0.14F, 0.21F, 0.23F, 0.25F, 0.31F, 0.35F};
   DFlashDraftPolicy policy_;
