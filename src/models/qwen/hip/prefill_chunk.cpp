@@ -108,7 +108,7 @@ bool CanUseBf16WmmaProjection(std::size_t batch_size, std::size_t rows,
 bool LaunchStackedSsmControls(QwenGpuArena& arena,
                               const models::QwenLayerWeights& layer,
                               std::size_t batch_size, std::size_t rank,
-                              std::size_t hidden) {
+                              std::size_t hidden, const void* x_tiled) {
   const auto& alpha = layer.ssm_alpha;
   const auto& beta = layer.ssm_beta;
   if (alpha.type != core::GgmlType::kF32 || beta.type != alpha.type ||
@@ -136,8 +136,13 @@ bool LaunchStackedSsmControls(QwenGpuArena& arena,
   auto* const stacked = reinterpret_cast<float*>(base + out_offset);
   LaunchFloatToBfloat16(static_cast<const float*>(alpha.data), base,
                         rows * hidden, arena.stream);
-  LaunchBf16WmmaGemm(base, arena.d_normed, stacked, batch_size, rows, hidden,
-                     arena.stream);
+  if (x_tiled != nullptr) {
+    LaunchBf16WmmaGemmTiled(base, x_tiled, stacked, batch_size, rows, hidden,
+                            arena.stream);
+  } else {
+    LaunchBf16WmmaGemm(base, arena.d_normed, stacked, batch_size, rows, hidden,
+                       arena.stream);
+  }
   const std::size_t pitch = rank * sizeof(float);
   HIP_CHECK(hipMemcpy2DAsync(arena.d_alpha_buf, pitch, stacked, 2 * pitch,
                              pitch, batch_size, hipMemcpyDeviceToDevice,
@@ -179,9 +184,16 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                                weight_scratch.size_bytes())) {
     LaunchFloatToBfloat16(static_cast<const float*>(view.router.data),
                           weight_scratch.data(), n_experts * hidden, stream);
-    LaunchBf16WmmaGemm(weight_scratch.data(), arena.d_normed,
-                       moe.router_logits.data(), batch_size, n_experts, hidden,
-                       stream);
+    // The fused FFN norm also wrote the tiled BF16 copy of d_normed.
+    if (norm_quantized) {
+      LaunchBf16WmmaGemmTiled(weight_scratch.data(), moe.x_bf16_tiled.data(),
+                              moe.router_logits.data(), batch_size, n_experts,
+                              hidden, stream);
+    } else {
+      LaunchBf16WmmaGemm(weight_scratch.data(), arena.d_normed,
+                         moe.router_logits.data(), batch_size, n_experts,
+                         hidden, stream);
+    }
   } else {
     LaunchHipblasGEMM(arena.hipblas_handle, view.router.data, false,
                       arena.d_normed, moe.router_logits.data(), batch_size,
@@ -674,6 +686,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
         fused_norm_quant && !norm_feeds_q8_only && !layer.is_full_attention;
     const bool ffn_norm_quantized =
         fused_norm_quant && !ffn_feeds_q8_only && config.IsMoE();
+    // The fused norms of an MoE model also write the tiled BF16 activation
+    // the router and the stacked alpha/beta GEMMs read.
+    void* const norm_tiled =
+        config.IsMoE() ? scratch.moe.x_bf16_tiled.data() : nullptr;
 
     // Pre-layer RMSNorm (generates BF16 into d_scratch_bf16 directly)
     if (half_prefill) {
@@ -691,7 +707,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           arena_.d_hidden, /*residual=*/nullptr,
           static_cast<const float*>(layer.attn_norm.data), /*sum_out=*/nullptr,
           arena_.d_normed, arena_.d_scratch_bf16, arena_.d_scratch_q8_act,
-          batch_size, hidden_size, eps, arena_.stream);
+          batch_size, hidden_size, eps, arena_.stream, norm_tiled);
     } else {
       LaunchBatchedRMSNorm(arena_.d_hidden,
                            static_cast<const float*>(layer.attn_norm.data),
@@ -915,8 +931,9 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
                   arena_.d_ssm_gate, ssm_inner_size, hidden_size,
                   arena_.d_scratch_q8_act);
       if (half_prefill || !config.IsMoE() ||
-          !LaunchStackedSsmControls(arena_, layer, batch_size, time_step_rank,
-                                    hidden_size)) {
+          !LaunchStackedSsmControls(
+              arena_, layer, batch_size, time_step_rank, hidden_size,
+              attn_norm_quantized ? norm_tiled : nullptr)) {
         gemm_weight(layer.ssm_alpha, arena_.d_scratch_bf16, arena_.d_normed,
                     arena_.d_alpha_buf, time_step_rank, hidden_size,
                     arena_.d_scratch_q8_act);
@@ -1010,7 +1027,7 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptChunk(
           arena_.d_hidden, arena_.d_attn_out,
           static_cast<const float*>(layer.ffn_norm.data), arena_.d_hidden,
           arena_.d_normed, arena_.d_scratch_bf16, arena_.d_scratch_q8_act,
-          batch_size, hidden_size, eps, arena_.stream);
+          batch_size, hidden_size, eps, arena_.stream, norm_tiled);
     } else {
       LaunchBatchedResidualAdd(arena_.d_hidden, arena_.d_attn_out,
                                arena_.d_hidden, batch_size, hidden_size,

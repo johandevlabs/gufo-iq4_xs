@@ -77,12 +77,14 @@ std::size_t MoeScratchBytes(const core::ModelConfig& config,
   total = CheckedSum(total, ints(RoutedRows(slots, experts)));
   total = CheckedSum(total, ints(RoutedRows(slots, experts)));
   total = CheckedSum(total, ints(RoutedTiles(slots, experts)));
-  total = CheckedSum(
-      total,
-      ((CheckedMultiply(CheckedMultiply(batch, hidden), sizeof(std::uint16_t)) +
-        255) /
-       256) *
-          256);
+  // x_half and x_bf16_tiled.
+  for (int i = 0; i < 2; ++i) {
+    total = CheckedSum(total, ((CheckedMultiply(CheckedMultiply(batch, hidden),
+                                                sizeof(std::uint16_t)) +
+                                255) /
+                               256) *
+                                  256);
+  }
   return total;
 }
 
@@ -129,6 +131,9 @@ QwenMoeScratch CarveMoeScratch(std::uint8_t* block,
   scratch.rows_slot = take_ints(RoutedRows(slots, experts));
   scratch.routed_tiles = take_ints(RoutedTiles(slots, experts));
   scratch.x_half = std::span<std::uint16_t>(
+      reinterpret_cast<std::uint16_t*>(block + offset), batch * hidden);
+  offset += ((batch * hidden * sizeof(std::uint16_t) + 255) / 256) * 256;
+  scratch.x_bf16_tiled = std::span<std::uint16_t>(
       reinterpret_cast<std::uint16_t*>(block + offset), batch * hidden);
   offset += ((batch * hidden * sizeof(std::uint16_t) + 255) / 256) * 256;
   return scratch;

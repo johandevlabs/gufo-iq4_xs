@@ -140,7 +140,8 @@ __launch_bounds__(256) __global__
         const float* x, const float* __restrict__ residual,
         const float* __restrict__ weight, float* sum_out,
         float* __restrict__ out, hip_bfloat16* __restrict__ out_bf16,
-        void* __restrict__ q8_out, std::size_t batch_size, float eps) {
+        void* __restrict__ q8_out, std::size_t batch_size, float eps,
+        hip_bfloat16* __restrict__ out_bf16_tiled) {
   constexpr std::size_t kDim = static_cast<std::size_t>(Items) * 256;
   const std::size_t b = blockIdx.x;
   if (b >= batch_size) {
@@ -207,6 +208,9 @@ __launch_bounds__(256) __global__
     const hip_bfloat16 rounded = hip_bfloat16(normed);
     if (out_bf16 != nullptr) {
       out_bf16[row + i] = rounded;
+    }
+    if (out_bf16_tiled != nullptr) {
+      out_bf16_tiled[((((i / 64) * batch_size) + b) * 64) + (i % 64)] = rounded;
     }
     if (q8_out != nullptr) {
       const float val = static_cast<float>(rounded);
@@ -1168,14 +1172,15 @@ bool IsFusedResidualRMSNormQuantizeQ8_1Supported(std::size_t dim) noexcept {
 void LaunchBatchedFusedResidualRMSNormQuantizeQ8_1(
     const float* x, const float* residual, const float* weight, float* sum_out,
     float* out, void* out_bf16, void* q8_1_out, std::size_t batch_size,
-    std::size_t dim, float eps, hipStream_t stream) {
+    std::size_t dim, float eps, hipStream_t stream, void* out_bf16_tiled) {
   if (batch_size == 0 || !IsFusedResidualRMSNormQuantizeQ8_1Supported(dim)) {
     return;
   }
   BatchedFusedResidualRMSNormQuantizeQ8_1Kernel<8>
       <<<static_cast<unsigned int>(batch_size), 256, 0, stream>>>(
           x, residual, weight, sum_out, out,
-          static_cast<hip_bfloat16*>(out_bf16), q8_1_out, batch_size, eps);
+          static_cast<hip_bfloat16*>(out_bf16), q8_1_out, batch_size, eps,
+          static_cast<hip_bfloat16*>(out_bf16_tiled));
   LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, dim, stream);
 }
 

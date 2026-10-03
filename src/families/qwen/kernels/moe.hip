@@ -507,6 +507,140 @@ __launch_bounds__(kGroupedThreads) __global__ void MoeGroupedBf16GemmKernel(
   }
 }
 
+/// Dense BF16 GEMM over the tiled activation [k / 64][rows][64] that the
+/// fused residual/RMSNorm/quantize kernel writes. A stage of BM rows is then
+/// one contiguous run: from the row-major [rows, k] F32 activation, whose
+/// 8 KiB row stride (k = 2048) sends every block's 256-byte slices to the
+/// same memory channels at once, the 35B's router read at ~25 GB/s cold.
+/// BM x BN outputs per block as WR x (8 / WR) waves; the next stage is
+/// fetched into registers while the current one is multiplied. Each output
+/// keeps MoeGroupedBf16GemmKernel's chain (zero, then one WMMA per 16 k in
+/// order) on the same BF16 operands, so the result is bit-identical.
+template<int BM, int BN, int WR>
+__launch_bounds__(kGroupedThreads) __global__
+    void Bf16WmmaTiledGemmKernel(const unsigned short* __restrict__ w,
+                                 const unsigned short* __restrict__ x,
+                                 float* __restrict__ out, std::uint32_t rows,
+                                 std::uint32_t m, std::uint32_t k) {
+  constexpr int kWaveCols = 8 / WR;
+  constexpr int kTileRows = BM / WR / 16;
+  constexpr int kTileCols = BN / kWaveCols / 16;
+  // 16-byte chunks per thread and stage: a row's 64 k are eight chunks.
+  constexpr int kAChunks = BM * 8 / kGroupedThreads;
+  constexpr int kBChunks = BN * 8 / kGroupedThreads;
+  static_assert(kTileRows >= 1 && kTileCols >= 1 && kAChunks >= 1 &&
+                kBChunks >= 1);
+  __shared__ unsigned short a_lds[BM][kGroupedLdsStride];
+  __shared__ unsigned short b_lds[BN][kGroupedLdsStride];
+
+  const std::uint32_t tid = threadIdx.x;
+  const std::uint32_t lane = tid % 32U;
+  const std::uint32_t wave = tid / 32U;
+  const std::uint32_t row0 = blockIdx.x * BM;
+  const std::uint32_t col0 = blockIdx.y * BN;
+  const std::size_t stage_stride = static_cast<std::size_t>(rows) * 64;
+
+  const unsigned short* a_src[kAChunks];
+  const unsigned short* b_src[kBChunks];
+  uint4 a_reg[kAChunks];
+  uint4 b_reg[kBChunks];
+#pragma unroll
+  for (int i = 0; i < kAChunks; ++i) {
+    const std::uint32_t c = tid + (i * kGroupedThreads);
+    const std::uint32_t row = row0 + (c / 8U);
+    a_src[i] = row < rows
+                   ? x + (static_cast<std::size_t>(row) * 64) + ((c % 8U) * 8U)
+                   : nullptr;
+  }
+#pragma unroll
+  for (int i = 0; i < kBChunks; ++i) {
+    const std::uint32_t c = tid + (i * kGroupedThreads);
+    b_src[i] =
+        w + (static_cast<std::size_t>(col0 + (c / 8U)) * k) + ((c % 8U) * 8U);
+  }
+  const auto fetch = [&](std::uint32_t k0) {
+#pragma unroll
+    for (int i = 0; i < kAChunks; ++i) {
+      a_reg[i] = a_src[i] != nullptr
+                     ? *reinterpret_cast<const uint4*>(
+                           a_src[i] + ((k0 / 64U) * stage_stride))
+                     : make_uint4(0U, 0U, 0U, 0U);
+    }
+#pragma unroll
+    for (int i = 0; i < kBChunks; ++i) {
+      b_reg[i] = *reinterpret_cast<const uint4*>(b_src[i] + k0);
+    }
+  };
+
+  const std::uint32_t wave_row = wave / kWaveCols;
+  const std::uint32_t wave_col = wave % kWaveCols;
+  GroupedAccumulator acc[kTileRows][kTileCols];
+#pragma unroll
+  for (int tr = 0; tr < kTileRows; ++tr) {
+#pragma unroll
+    for (int tc = 0; tc < kTileCols; ++tc) {
+      acc[tr][tc] = GroupedAccumulator{};
+    }
+  }
+  fetch(0);
+  for (std::uint32_t k0 = 0; k0 < k; k0 += kGroupedTileK) {
+#pragma unroll
+    for (int i = 0; i < kAChunks; ++i) {
+      const std::uint32_t c = tid + (i * kGroupedThreads);
+      *reinterpret_cast<uint4*>(&a_lds[c / 8U][(c % 8U) * 8U]) = a_reg[i];
+    }
+#pragma unroll
+    for (int i = 0; i < kBChunks; ++i) {
+      const std::uint32_t c = tid + (i * kGroupedThreads);
+      *reinterpret_cast<uint4*>(&b_lds[c / 8U][(c % 8U) * 8U]) = b_reg[i];
+    }
+    __syncthreads();
+    if (k0 + kGroupedTileK < k) {
+      fetch(k0 + kGroupedTileK);
+    }
+#pragma unroll
+    for (std::uint32_t ks = 0; ks < kGroupedTileK; ks += 16) {
+      GroupedFragment a[kTileRows];
+      GroupedFragment b[kTileCols];
+#pragma unroll
+      for (int tr = 0; tr < kTileRows; ++tr) {
+        a[tr] = GroupedLoadFragment(
+            &a_lds[((wave_row * kTileRows + tr) * 16) + (lane % 16U)][ks]);
+      }
+#pragma unroll
+      for (int tc = 0; tc < kTileCols; ++tc) {
+        b[tc] = GroupedLoadFragment(
+            &b_lds[((wave_col * kTileCols + tc) * 16) + (lane % 16U)][ks]);
+      }
+#pragma unroll
+      for (int tr = 0; tr < kTileRows; ++tr) {
+#pragma unroll
+        for (int tc = 0; tc < kTileCols; ++tc) {
+          acc[tr][tc] = __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(
+              a[tr], b[tc], acc[tr][tc]);
+        }
+      }
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (int tr = 0; tr < kTileRows; ++tr) {
+#pragma unroll
+    for (int tc = 0; tc < kTileCols; ++tc) {
+      const std::uint32_t col =
+          col0 + ((wave_col * kTileCols + tc) * 16) + (lane % 16U);
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const std::uint32_t row =
+            row0 + ((wave_row * kTileRows + tr) * 16) + (2 * i) + (lane / 16U);
+        if (row < rows) {
+          out[(static_cast<std::size_t>(row) * m) + col] = acc[tr][tc][i];
+        }
+      }
+    }
+  }
+}
+
 }  // namespace
 
 bool IsMoeGroupedBf16GemmSupported(std::size_t m, std::size_t k,
@@ -568,6 +702,33 @@ void LaunchBf16WmmaGemm(const void* w, const float* x, float* out,
       static_cast<const unsigned short*>(w), x, out, nullptr, nullptr, nullptr,
       static_cast<std::uint32_t>(m), static_cast<std::uint32_t>(k), 0,
       static_cast<std::uint32_t>(batch_size));
+}
+
+void LaunchBf16WmmaGemmTiled(const void* w, const void* x_tiled, float* out,
+                             std::size_t batch_size, std::size_t m,
+                             std::size_t k, hipStream_t stream) {
+  if (batch_size == 0) {
+    return;
+  }
+  // 128 x 128 blocks for the router (256 columns), 128 x 64 for the stacked
+  // alpha/beta (64): the fastest cold-cache shapes at 1k-4k rows.
+  constexpr int kRows = 128;
+  const auto* wb = static_cast<const unsigned short*>(w);
+  const auto* xb = static_cast<const unsigned short*>(x_tiled);
+  const auto rows = static_cast<std::uint32_t>(batch_size);
+  const auto m32 = static_cast<std::uint32_t>(m);
+  const auto k32 = static_cast<std::uint32_t>(k);
+  const auto row_blocks =
+      static_cast<std::uint32_t>((batch_size + kRows - 1) / kRows);
+  if (m % 128 == 0) {
+    Bf16WmmaTiledGemmKernel<kRows, 128, 4>
+        <<<dim3(row_blocks, m32 / 128U), kGroupedThreads, 0, stream>>>(
+            wb, xb, out, rows, m32, k32);
+  } else {
+    Bf16WmmaTiledGemmKernel<kRows, 64, 4>
+        <<<dim3(row_blocks, m32 / 64U), kGroupedThreads, 0, stream>>>(
+            wb, xb, out, rows, m32, k32);
+  }
 }
 
 void LaunchMoeRouterTopK(const float* logits, std::uint32_t logits_stride,

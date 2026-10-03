@@ -91,6 +91,14 @@ void LaunchBf16WmmaGemm(const void* w, const float* x, float* out,
                         std::size_t batch_size, std::size_t m, std::size_t k,
                         hipStream_t stream = nullptr);
 
+/// LaunchBf16WmmaGemm on the tiled BF16 activation [k / 64][batch][64] that
+/// LaunchBatchedFusedResidualRMSNormQuantizeQ8_1 writes (`out_bf16_tiled`):
+/// bit-identical, and read as contiguous runs rather than 8 KiB-strided rows.
+/// Same requirements as LaunchBf16WmmaGemm.
+void LaunchBf16WmmaGemmTiled(const void* w, const void* x_tiled, float* out,
+                             std::size_t batch_size, std::size_t m,
+                             std::size_t k, hipStream_t stream = nullptr);
+
 }  // namespace gufo::hip
 #endif  // defined(ENGINE_ENABLE_HIP)
 

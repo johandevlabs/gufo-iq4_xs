@@ -253,6 +253,9 @@ struct QwenMoeScratch {
   std::span<std::int32_t> rows_slot;       // [RoutedRows(slots, experts)]
   std::span<std::int32_t> routed_tiles;    // [RoutedTiles(slots, experts)]
   std::span<std::uint16_t> x_half;         // [batch, hidden] F16
+  // The FFN or GDN pre-layer norm output as BF16 [hidden / 64][batch][64],
+  // read by the router and the stacked alpha/beta GEMMs.
+  std::span<std::uint16_t> x_bf16_tiled;
 };
 
 /// Row capacity of the routed buckets: each expert pads to 16 rows.

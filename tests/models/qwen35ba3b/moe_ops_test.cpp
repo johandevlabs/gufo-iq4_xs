@@ -509,6 +509,49 @@ void CheckGroupedBf16(hipStream_t stream) {
   std::cout << "grouped BF16 experts: OK\n";
 }
 
+/// The tiled-activation GEMM must reproduce LaunchBf16WmmaGemm bit for bit:
+/// the same BF16 operands in the same WMMA chain, only a different layout.
+void CheckDenseBf16Tiled(hipStream_t stream) {
+  constexpr std::size_t kK = 2048;
+  for (const std::size_t m : {256U, 64U, 192U}) {
+    std::vector<std::uint16_t> w(m * kK);
+    for (auto& v : w) {
+      v = FloatToBf16Bits(RndFloat(-0.05F, 0.05F));
+    }
+    gufo::test::DeviceBuffer<std::uint16_t> d_w(w);
+    for (const std::uint32_t rows : {1U, 100U, 129U, 512U, 4096U}) {
+      std::vector<float> x(rows * kK);
+      for (auto& v : x) {
+        v = RndFloat(-1.0F, 1.0F);
+      }
+      std::vector<std::uint16_t> x_tiled(rows * kK);
+      for (std::size_t r = 0; r < rows; ++r) {
+        for (std::size_t c = 0; c < kK; ++c) {
+          x_tiled[((((c / 64) * rows) + r) * 64) + (c % 64)] =
+              FloatToBf16Bits(x[(r * kK) + c]);
+        }
+      }
+      gufo::test::DeviceBuffer<float> d_x(x);
+      gufo::test::DeviceBuffer<std::uint16_t> d_x_tiled(x_tiled);
+      const std::vector<float> nan_fill(
+          rows * m, std::numeric_limits<float>::quiet_NaN());
+      gufo::test::DeviceBuffer<float> d_ref(nan_fill);
+      gufo::test::DeviceBuffer<float> d_got(nan_fill);
+      gufo::hip::LaunchBf16WmmaGemm(d_w.data(), d_x.data(), d_ref.data(), rows,
+                                    m, kK, stream);
+      gufo::hip::LaunchBf16WmmaGemmTiled(d_w.data(), d_x_tiled.data(),
+                                         d_got.data(), rows, m, kK, stream);
+      HIP_CHECK(hipStreamSynchronize(stream));
+      const auto ref = d_ref.CopyToHost();
+      const auto got = d_got.CopyToHost();
+      Expect(
+          std::memcmp(ref.data(), got.data(), ref.size() * sizeof(float)) == 0,
+          "tiled BF16 WMMA GEMM differs from LaunchBf16WmmaGemm");
+    }
+  }
+  std::cout << "tiled dense BF16 WMMA: OK\n";
+}
+
 /// Dense mode of the same WMMA kernel (BF16 dense projections in prefill),
 /// against the per-slot GEMV with every row routed to one matrix.
 void CheckDenseBf16(hipStream_t stream) {
@@ -866,6 +909,7 @@ int main() {
     CheckDecodeMoe(f, nullptr, /*force_fallback=*/true);
     CheckGroupedBf16(nullptr);
     CheckDenseBf16(nullptr);
+    CheckDenseBf16Tiled(nullptr);
     CheckRoutedF16(nullptr);
     CheckRoutedPair(nullptr);
   } catch (const std::exception& e) {
