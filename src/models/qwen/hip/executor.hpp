@@ -701,6 +701,11 @@ private:
   [[nodiscard]] tokenization::TokenId ForwardPromptChunk(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos, bool compute_logits);
+  /// Prompt chunks up to this many tokens run on the verification forward.
+  static constexpr std::size_t kSmallPromptChunkRows = 8;
+  [[nodiscard]] tokenization::TokenId ForwardSmallPromptChunk(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t start_pos, bool compute_logits);
   [[nodiscard]] std::vector<tokenization::TokenId>
   ForwardDecodeEquivalentVerificationChunk(
       std::span<const tokenization::TokenId> candidate_tokens,
