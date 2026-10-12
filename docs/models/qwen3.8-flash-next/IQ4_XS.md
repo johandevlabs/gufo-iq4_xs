@@ -5,10 +5,11 @@ smaller Strix Halo machines (96 GB unified memory, e.g. GMKtec Evo-X2). Upstream
 Gufo supports only **UD-Q4_K_XL**. Smaller quants (for example IQ3_XXS) are a
 possible follow-up, not a goal.
 
-Status: **Phase 2 complete: UD-IQ4_XS runs at Q4_K_XL speed (prefill within
-3-4%, decode and multi-user throughput at parity) in 17 GiB less memory.**
-Branch `feat/qwen-flash-iq4-xs`, based on upstream `main` `2b4daed`.
-Remaining: qualification on the 96 GB desktop (Phase 3). If this works, the
+Status: **runs on a 96 GB Strix Halo (GMKtec Evo-X2) at the model's full
+262K context with MTP and vision, from a published container image; on that
+machine it matches upstream's published Q4_K_XL prefill and is 6-16× faster
+to prefill and up to 2.6× faster to decode than llama.cpp on the same file.**
+Branch `feat/qwen-flash-iq4-xs`, based on upstream `main` `2b4daed`. If this works, the
 intent is an upstream pull request; quality of the IQ4_XS file itself is already
 judged acceptable from day-to-day use with llama.cpp.
 
@@ -289,6 +290,64 @@ With rootless Podman, use `--userns=keep-id:uid=1000,gid=1000
 --group-add keep-groups` instead of the two `--group-add` options, as in the
 [main README](../../../README.md#quickstart).
 
+## Phase 3 results (96 GB Evo-X2)
+
+October 12, 2026, GMKtec Evo-X2 (Ryzen AI MAX+ 395, 96 GB LPDDR5X, GTT limit
+96 GiB, kernel 7.0), sustained 119-120 W at about 2.53 GHz under load. Gufo ran
+from `ghcr.io/johandevlabs/gufo-toolboxes/gufo-runtime:edge` (digest
+`sha256:95350e5dbb8f275a92affab12b8398148f6bb6b724e865b4a5667660b153c25c`,
+Gufo `71bea96`). Model files verified against the hashes above.
+
+**Memory.** `gufo serve` with the IQ4_XS target, the shared Q8_0 MTP sidecar
+and the BF16 vision projector at the native 262,144-token context loads in
+11.1 s and reports 78.0 GiB GPU memory in use (the configured capacity is
+reserved at admission) and 18.8 GiB host memory available. Q4_K_XL needs
+16.4 GiB more for its weights alone.
+
+**`gufo bench`** (pp2048 / tg128, two repetitions): pp2048 1701.90 ± 0.14,
+tg128 30.20 ± 0.06, pp2048 @ d16K 1577.90 ± 3.37, tg128 @ d16K 29.15 ± 0.02
+tok/s, against upstream's published Q4_K_XL 1702.93 / 27.98 tok/s at d0 on a
+128 GB machine.
+
+**Against llama.cpp on the same machine and file**, through the same HTTP driver
+(`tools/bench/model-bench.py`, pp2048 / tg128, greedy, thinking off, one sample
+per point; depth is the cached prefix). AR reference: llama.cpp `aa94f2086`
+(October 10, 2026) Vulkan build with the driver's flags (`-ngl 999 -fa on
+--cache-reuse 0 --jinja --reasoning off --cache-ram 0`, default batch sizes).
+MTP reference: Unsloth's llama.cpp fork `586b15ef8` (Vulkan) with the
+non-shared `mtp-Qwen3.8-Flash-Next-Q8_0.gguf` sidecar, because neither
+llama.cpp build loads the shared sidecar Gufo uses (`token_embd.weight` not
+found) and the main build does not load the non-shared one either
+(`output_hc_norm.weight` not found). Gain is Gufo relative to llama.cpp.
+
+| Mode | Depth | Gufo pp | llama.cpp pp | Gain | Gufo tg | llama.cpp tg | Gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 1628.43 | 271.21 | 6.0× | 29.78 | 24.25 | +23% |
+| AR | 16,384 | 1486.34 | 230.95 | 6.4× | 29.69 | 22.22 | +34% |
+| AR | 65,536 | 1411.92 | 155.13 | 9.1× | 29.25 | 14.67 | +99% |
+| AR | 131,072 | 1345.58 | 102.92 | 13.1× | 28.64 | 10.99 | 2.6× |
+| MTP mixed | 0 | 1541.52 | 278.72 | 5.5× | 38.48 | 33.85 | +14% |
+| MTP mixed | 16,384 | 1405.39 | 215.31 | 6.5× | 42.39 | 26.27 | +61% |
+| MTP mixed | 65,536 | 1365.64 | 133.09 | 10.3× | 35.69 | 16.88 | 2.1× |
+| MTP mixed | 131,072 | 1313.49 | 86.67 | 15.2× | 39.24 | 15.02 | 2.6× |
+| MTP repetitive | 0 | 1547.33 | 267.11 | 5.8× | 74.87 | 48.13 | +56% |
+| MTP repetitive | 16,384 | 1393.88 | 211.34 | 6.6× | 55.01 | 42.03 | +31% |
+| MTP repetitive | 65,536 | 1361.02 | 133.28 | 10.2× | 55.80 | 28.36 | +97% |
+| MTP repetitive | 131,072 | 1355.97 | 86.78 | 15.6× | 51.82 | 22.33 | 2.3× |
+
+| Users | AR Gufo | AR llama.cpp | MTP mixed Gufo | MTP mixed llama.cpp | MTP repetitive Gufo | MTP repetitive llama.cpp |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 29.70 | 23.91 | 38.49 | 33.95 | 75.29 | 48.80 |
+| 2 | 53.41 | 38.89 | 68.07 | 39.77 | 96.82 | 50.60 |
+| 4 | 89.93 | 53.00 | 91.84 | 30.10 | 152.73 | 32.13 |
+| 6 | 114.48 | 62.34 | 113.13 | 37.39 | 166.42 | 33.35 |
+| 8 | 129.27 | 64.05 | 125.46 | 42.69 | 168.90 | 37.01 |
+
+Multi-user rows sum the individual request decode rates (context 4096 per
+user, all sessions prefilled first). llama.cpp's MTP throughput falls at C4 and
+beyond in this configuration. Tuned llama.cpp batch sizes (for example
+`-b 8192 -ub 2048`) would raise its prefill; they were not part of this run.
+
 ## Plan
 
 Q4_K_XL code paths must stay byte-identical: new formats are added as new cases,
@@ -327,7 +386,7 @@ expect before the larger kernel work.
 3. Profile with `tools/prof`, following the optimize-kernel skill; compare against
    Gufo Q4_K_XL and llama.cpp IQ4_XS (ROCm and Vulkan).
 
-### Phase 3: qualification (in progress)
+### Phase 3: qualification (laptop and Evo-X2 done)
 
 Functional suites (`state-edges`, `tool-agent`, `long-context`, `cache`; AR and
 MTP) on IQ4_XS; MTP acceptance versus Q4_K_XL; IQ4_XS BENCHMARKS/QUALITY entries
