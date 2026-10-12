@@ -630,19 +630,33 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
                        error) ||
       !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error))
     return false;
-  if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
-      l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
+  const auto gate_type = l.ffn_gate_exps.type;
+  const bool q4 = gate_type == core::GgmlType::kQ4_K;
+  const bool iq = gate_type == core::GgmlType::kIQ3_S ||
+                  gate_type == core::GgmlType::kIQ4_XS;
+  if ((q4 || iq) && l.ffn_up_exps.type == gate_type) {
     // Share expert weights across request boundaries while retaining the
-    // scalar Q8 activation quantization and dot-product reduction.
-    if (qfn_mmq_moe_gated_vec(static_cast<int>(l.ffn_gate_exps.type),
-                              l.ffn_gate_exps.data, l.ffn_up_exps.data, x,
-                              base.ids, base.gate_e, c.expert_ff, c.hidden_size,
-                              rows, c.num_experts, c.num_experts_used,
-                              stream_) != 0 ||
-        qfn_mmq_moe_vec(
-            static_cast<int>(l.ffn_down_exps.type), l.ffn_down_exps.data,
-            base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
-            rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
+    // scalar Q8 activation quantization and dot-product reduction. The IQ
+    // fused gate/up vector covers eight rows; its separate projections and
+    // SwiGLU keep the same bits for the whole batch.
+    const int type = static_cast<int>(gate_type);
+    const bool gated =
+        q4 ? qfn_mmq_moe_gated_vec(
+                 type, l.ffn_gate_exps.data, l.ffn_up_exps.data, x, base.ids,
+                 base.gate_e, c.expert_ff, c.hidden_size, rows, c.num_experts,
+                 c.num_experts_used, stream_) == 0
+           : qfn_mmq_moe_vec(type, l.ffn_gate_exps.data, x, base.ids,
+                             base.gate_e, c.expert_ff, c.hidden_size, rows,
+                             c.num_experts, c.num_experts_used, stream_,
+                             l.ffn_up_exps.data, base.up_e) == 0;
+    if (gated && iq)
+      Swiglu(base.gate_e, base.up_e,
+             std::size_t{rows} * c.num_experts_used * c.expert_ff, stream_);
+    if (!gated || qfn_mmq_moe_vec(static_cast<int>(l.ffn_down_exps.type),
+                                  l.ffn_down_exps.data, base.gate_e, base.ids,
+                                  base.down_e, c.hidden_size, c.expert_ff,
+                                  rows * c.num_experts_used, c.num_experts, 1,
+                                  stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
     MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
