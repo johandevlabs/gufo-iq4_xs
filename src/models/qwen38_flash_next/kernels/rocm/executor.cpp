@@ -1449,6 +1449,16 @@ bool Executor::Quantize(const float* x, std::uint32_t n_tokens, std::uint32_t k,
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
+  if (w.type == GgmlType::kQ6_K && q.data != nullptr) {
+    if (w.cols != q.k ||
+        qfn_mmq_dense_vec_preq(static_cast<int>(w.type), w.data, q.data, out,
+                               static_cast<int>(w.rows), static_cast<int>(q.n),
+                               static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "Q6_K GEMV failed");
+      return false;
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0 && q.data != nullptr) {
     if (w.cols != q.k) {
       AssignError(error_msg, "quantized input width mismatch");
@@ -1542,6 +1552,32 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
+  if (w.type == GgmlType::kQ6_K) {
+    // Only the logits head uses Q6_K. Every row keeps the single-row GEMV
+    // arithmetic, so decode, verification and batched heads agree; wider
+    // calls run eight rows per launch.
+    for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += kVecBatch) {
+      const std::uint32_t rows = std::min(kVecBatch, n_tokens - r0);
+      const float* src = x + static_cast<std::size_t>(r0) * w.cols;
+      const void* ready = ReadyQ8(src, rows, w.cols);
+      if (ready == nullptr) {
+        void* slot = s_.x_q8[q8_slot_];
+        q8_slot_ ^= 1u;
+        if (qfn_mmq_quantize_q8_1(src, slot, static_cast<int>(rows),
+                                  static_cast<int>(w.cols), stream_) != 0) {
+          AssignError(error_msg, "activation quantization failed");
+          return false;
+        }
+        ready = slot;
+      }
+      Q8Input q{src, ready, rows, w.cols};
+      if (!Dense(w, q, out + static_cast<std::size_t>(r0) * w.rows,
+                 error_msg)) {
+        return false;
+      }
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
       Q8Input q;
@@ -1741,6 +1777,17 @@ bool Executor::Experts(const DeviceTensor& w, const float* x,
       case GgmlType::kQ8_0:
         rc = qfn_mmq_q8_0_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
         break;
+      case GgmlType::kIQ3_S:
+        rc = qfn_mmq_iq3_s_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
+      case GgmlType::kIQ4_NL:
+        rc =
+            qfn_mmq_iq4_nl_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
+      case GgmlType::kIQ4_XS:
+        rc =
+            qfn_mmq_iq4_xs_moe_raw(w.data, x, ids, out, M, K, T, E, U, stream_);
+        break;
       default:
         break;
     }
@@ -1760,7 +1807,8 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                           a.cols == b.cols && a.experts == b.experts;
   if (!MatrixRows(n_tokens) && n_used <= 32 && same_shape &&
       (a.type == GgmlType::kQ4_K || a.type == GgmlType::kQ5_K ||
-       a.type == GgmlType::kQ8_0)) {
+       a.type == GgmlType::kQ8_0 || a.type == GgmlType::kIQ3_S ||
+       a.type == GgmlType::kIQ4_NL || a.type == GgmlType::kIQ4_XS)) {
     // The shared expert quantized the same rows (or their producer did).
     const void* ready = ReadyQ8(x, n_tokens, a.cols);
     if ((ready != nullptr

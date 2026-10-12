@@ -72,7 +72,8 @@ struct Uploader {
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
-    if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
+    if ((t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ6_K) &&
+        t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
     return d;
@@ -268,8 +269,8 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
+  // The CPU reference also reads Q6_K, but of the production kernels only the
+  // logits head does. Reject it elsewhere before allocating device weights.
   const auto supported = [&](const TensorRef& t) {
     if (t.type != core::GgmlType::kQ6_K)
       return true;
@@ -281,7 +282,8 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&
            supported(l.ffn_down_exps);
   };
-  if (!supported(w.token_embd) || !supported(w.output) ||
+  if (!supported(w.token_embd) ||
+      (w.output.data == w.token_embd.data && !supported(w.output)) ||
       !std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
       (mtp != nullptr && !layer_supported(mtp->block))) {
     return nullptr;

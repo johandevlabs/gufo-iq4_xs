@@ -232,6 +232,10 @@ static constexpr __device__ vec_dot_q_hip_t get_vec_dot_q_hip(ggml_type type) {
         case GGML_TYPE_Q8_0:    return vec_dot_q8_0_q8_1;
         case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1;
         case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1;
+        case GGML_TYPE_Q6_K:    return vec_dot_q6_K_q8_1;
+        case GGML_TYPE_IQ3_S:   return vec_dot_iq3_s_q8_1;
+        case GGML_TYPE_IQ4_NL:  return vec_dot_iq4_nl_q8_1;
+        case GGML_TYPE_IQ4_XS:  return vec_dot_iq4_xs_q8_1;
         default:                return nullptr;
     }
 }
@@ -242,6 +246,10 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_Q8_0:    return VDR_Q8_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_K:    return VDR_Q4_K_Q8_1_MMVQ;
         case GGML_TYPE_Q5_K:    return VDR_Q5_K_Q8_1_MMVQ;
+        case GGML_TYPE_Q6_K:    return VDR_Q6_K_Q8_1_MMVQ;
+        case GGML_TYPE_IQ3_S:   return VDR_IQ3_S_Q8_1_MMVQ;
+        case GGML_TYPE_IQ4_NL:  return VDR_IQ4_NL_Q8_1_MMVQ;
+        case GGML_TYPE_IQ4_XS:  return VDR_IQ4_XS_Q8_1_MMVQ;
         default:                return 1;
     }
 }
@@ -756,6 +764,70 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
   }
 }
 
+// One wave per weight row and up to eight inputs, for formats without a
+// specialized dense kernel (the Q6_K logits head). Each input's dot products
+// and reduction are those of a single-input launch, so decode, verification
+// and batched rows share the same arithmetic.
+template<ggml_type type, int tokens>
+__launch_bounds__(64) static __global__ void mul_mat_vec_q_dense(
+    const void* __restrict__ weights, const block_q8_1* __restrict__ input,
+    float* __restrict__ output, int k, int rows, int input_stride) {
+  constexpr int qk = ggml_hip_type_traits<type>::qk;
+  constexpr int qi = ggml_hip_type_traits<type>::qi;
+  constexpr int vdr = get_vdr_mmvq(type);
+  constexpr int blocks_per_iter = vdr * 32 / qi;
+  constexpr auto dot = get_vec_dot_q_hip(type);
+  const int lane = threadIdx.x;
+  const int row = blockIdx.x * 2 + threadIdx.y;
+  if (row >= rows)
+    return;
+  const int blocks_per_row = k / qk;
+  const int kqs = vdr * (lane % (qi / vdr));
+  float sum[tokens] = {};
+  for (int kb = lane / (qi / vdr); kb < blocks_per_row; kb += blocks_per_iter) {
+#pragma unroll
+    for (int t = 0; t < tokens; ++t)
+      sum[t] += dot(weights, input + t * input_stride + kb * (qk / QK8_1),
+                    row * blocks_per_row + kb, kqs);
+  }
+#pragma unroll
+  for (int t = 0; t < tokens; ++t) {
+    sum[t] = warp_reduce_sum<32>(sum[t]);
+    if (lane == 0)
+      output[t * rows + row] = sum[t];
+  }
+}
+
+template<ggml_type type, int tokens = 1>
+static void launch_dense(const void* weights, const block_q8_1* input,
+                         float* output, int k, int rows, int n_tokens,
+                         int input_stride, hipStream_t stream) {
+  if (n_tokens == tokens) {
+    mul_mat_vec_q_dense<type, tokens><<<(rows + 1) / 2, dim3(32, 2), 0, stream>>>(
+        weights, input, output, k, rows, input_stride);
+  } else if constexpr (tokens < MMVQ_MAX_BATCH_SIZE) {
+    launch_dense<type, tokens + 1>(weights, input, output, k, rows, n_tokens,
+                                   input_stride, stream);
+  } else {
+    GGML_ABORT("invalid dense vector batch width");
+  }
+}
+
+void mul_mat_vec_dense_dispatch(const void* weights, ggml_type type,
+                                const block_q8_1* input, float* output, int k,
+                                int rows, int tokens, int input_stride,
+                                hipStream_t stream) {
+  GGML_ASSERT(k % ggml_blck_size(type) == 0 && rows > 0);
+  switch (type) {
+    case GGML_TYPE_Q6_K:
+      launch_dense<GGML_TYPE_Q6_K>(weights, input, output, k, rows, tokens,
+                                   input_stride, stream);
+      break;
+    default:
+      GGML_ABORT("unsupported dense vector weight format");
+  }
+}
+
 template<ggml_type type, int rows_per_wave = 2>
 static void launch_moe(const void* weights, const block_q8_1* input,
                        const int32_t* ids, float* output, int k, int rows,
@@ -823,6 +895,21 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
             launch_moe<GGML_TYPE_Q5_K>(weights, input, ids, output, k, rows, tokens,
                                           experts_used, input_stride, stream);
             break;
+        case GGML_TYPE_IQ3_S:
+            launch_moe<GGML_TYPE_IQ3_S>(weights, input, ids, output, k, rows,
+                                        tokens, experts_used, input_stride,
+                                        stream);
+            break;
+        case GGML_TYPE_IQ4_NL:
+            launch_moe<GGML_TYPE_IQ4_NL>(weights, input, ids, output, k, rows,
+                                         tokens, experts_used, input_stride,
+                                         stream);
+            break;
+        case GGML_TYPE_IQ4_XS:
+            launch_moe<GGML_TYPE_IQ4_XS>(weights, input, ids, output, k, rows,
+                                         tokens, experts_used, input_stride,
+                                         stream);
+            break;
         default: GGML_ABORT("unsupported vector weight format");
     }
 }
@@ -856,6 +943,18 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
       launch_moe_grouped<GGML_TYPE_Q8_0>(gate, up, input, groups, output, k,
                                          rows, tokens, experts_used,
                                          input_stride, stream);
+    } else if (type == GGML_TYPE_IQ3_S) {
+      launch_moe_grouped<GGML_TYPE_IQ3_S>(gate, up, input, groups, output, k,
+                                          rows, tokens, experts_used,
+                                          input_stride, stream);
+    } else if (type == GGML_TYPE_IQ4_XS) {
+      launch_moe_grouped<GGML_TYPE_IQ4_XS>(gate, up, input, groups, output, k,
+                                           rows, tokens, experts_used,
+                                           input_stride, stream);
+    } else if (type == GGML_TYPE_IQ4_NL) {
+      launch_moe_grouped<GGML_TYPE_IQ4_NL>(gate, up, input, groups, output, k,
+                                           rows, tokens, experts_used,
+                                           input_stride, stream);
     } else {
       GGML_ASSERT(type == GGML_TYPE_Q5_K);
       launch_moe_grouped<GGML_TYPE_Q5_K>(gate, up, input, groups, output, k,
@@ -873,6 +972,18 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
         rows * experts_used, rows * row_stride, rows, 1, experts_used, up);
   } else if (type == GGML_TYPE_Q8_0) {
     mul_mat_vec_q_moe<GGML_TYPE_Q8_0, 2, true><<<grid, block, 0, stream>>>(
+        gate, input, ids, output, k, rows, row_stride, input_stride,
+        rows * experts_used, rows * row_stride, rows, 1, experts_used, up);
+  } else if (type == GGML_TYPE_IQ3_S) {
+    mul_mat_vec_q_moe<GGML_TYPE_IQ3_S, 2, true><<<grid, block, 0, stream>>>(
+        gate, input, ids, output, k, rows, row_stride, input_stride,
+        rows * experts_used, rows * row_stride, rows, 1, experts_used, up);
+  } else if (type == GGML_TYPE_IQ4_XS) {
+    mul_mat_vec_q_moe<GGML_TYPE_IQ4_XS, 2, true><<<grid, block, 0, stream>>>(
+        gate, input, ids, output, k, rows, row_stride, input_stride,
+        rows * experts_used, rows * row_stride, rows, 1, experts_used, up);
+  } else if (type == GGML_TYPE_IQ4_NL) {
+    mul_mat_vec_q_moe<GGML_TYPE_IQ4_NL, 2, true><<<grid, block, 0, stream>>>(
         gate, input, ids, output, k, rows, row_stride, input_stride,
         rows * experts_used, rows * row_stride, rows, 1, experts_used, up);
   } else {
