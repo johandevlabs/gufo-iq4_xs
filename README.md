@@ -1,3 +1,107 @@
+# Gufo IQ4_XS fork: Qwen3.8 Flash-Next on 96 GB Strix Halo
+
+> [!NOTE]
+> This is a community fork of [gufo-org/gufo](https://github.com/gufo-org/gufo),
+> not the official project. It adds one thing: support for Unsloth's
+> **UD-IQ4_XS** quant of Qwen3.8 Flash-Next, so the model runs on **96 GB**
+> Strix Halo machines with MTP, vision and the full 262K context. Everything
+> else is upstream Gufo; the upstream README follows below the line.
+
+## Why
+
+Upstream Gufo supports Flash-Next as UD-Q4_K_XL, which needs about 77 GiB of
+GPU-resident weights and does not fit a 96 GB machine with MTP and long
+context. UD-IQ4_XS needs 60.4 GiB. On a 96 GB GMKtec Evo-X2 this fork loads
+the IQ4_XS target with the MTP sidecar and the vision projector at the native
+262,144-token context in 11 s, using 78 GiB of GPU memory.
+
+## How it differs from upstream
+
+- Routed experts in IQ3_S, IQ4_XS and IQ4_NL, and a Q6_K logits head, on every
+  Flash-Next path: decode, MTP verification, batched sessions and the WMMA
+  prefill GEMM.
+- Q4_K_XL behaves exactly as upstream: its logits are byte-identical to
+  upstream `main` after every change in this fork.
+- The other models are untouched.
+
+Changes, tests and all measurements:
+[docs/models/qwen3.8-flash-next/IQ4_XS.md](docs/models/qwen3.8-flash-next/IQ4_XS.md).
+
+## Performance on a 96 GB Evo-X2
+
+Same machine, same IQ4_XS file, same HTTP benchmark driver, tok/s. llama.cpp
+is a Vulkan build with default flags / with `-b 8192 -ub 2048`.
+
+| Workload | This fork | llama.cpp |
+| --- | ---: | ---: |
+| Prefill, 2048 tokens | 1628 | 271 / 351 |
+| Prefill at 128K context | 1346 | 103 / 91 |
+| Decode | 29.8 | 24.3 / 24.1 |
+| Decode with MTP, mixed text | 38.5 | 33.9 / 33.0 |
+| Decode with MTP, repetitive text | 74.9 | 48.1 / 48.2 |
+| 8 users, total decode | 129.3 | 64.1 / 67.4 |
+
+One sample per point; the MTP reference is Unsloth's llama.cpp fork with its
+non-shared MTP head, because the llama.cpp builds tested could not load the
+shared one. Details and the full depth/concurrency tables are in the doc above.
+
+## Get the model files
+
+```sh
+hf download unsloth/Qwen3.8-Flash-Next-GGUF \
+  --revision 38bb39ee97821de2c9009abb7e93950eec396e66 \
+  --include "UD-IQ4_XS/*" "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" "mmproj-BF16.gguf" \
+  --local-dir models/qwen3.8-flash-next
+```
+
+Check the GPU memory limit first: `cat /sys/class/drm/card*/device/mem_info_gtt_total`
+should report at least about 85 GiB for the full context. If it is lower
+(often half the RAM by default), raise the TTM limit (`ttm.pages_limit`
+kernel parameter) following your distribution's Strix Halo guidance.
+
+## Run it with Docker or Podman
+
+The image is built from this fork with upstream's Nix recipe
+([gufo-toolboxes fork](https://github.com/johandevlabs/gufo-toolboxes)):
+
+```sh
+docker pull ghcr.io/johandevlabs/gufo-toolboxes/gufo-runtime:edge
+docker run --rm --device /dev/kfd --device /dev/dri \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  --group-add "$(getent group video | cut -d: -f3)" \
+  --ulimit memlock=-1 -p 8080:8080 -v "$PWD/models":/models:ro \
+  ghcr.io/johandevlabs/gufo-toolboxes/gufo-runtime:edge \
+  gufo serve --host 0.0.0.0 --port 8080 llm \
+  --model /models/qwen3.8-flash-next/UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
+  --speculative mtp \
+  --mtp-model /models/qwen3.8-flash-next/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
+  --mmproj /models/qwen3.8-flash-next/mmproj-BF16.gguf
+```
+
+With rootless Podman, replace the two `--group-add` options with
+`--userns=keep-id:uid=1000,gid=1000 --group-add keep-groups` (see the upstream
+[Quickstart](#quickstart) for Podman and SELinux notes). The API is the same
+OpenAI-compatible server as upstream, on port 8080.
+
+## Build from source
+
+```sh
+git clone https://github.com/johandevlabs/gufo-iq4_xs.git
+cd gufo-iq4_xs
+nix build                     # or, without Nix:
+CC=gcc-15 CXX=g++-15 cmake --preset release
+cmake --build --preset release --parallel 8
+./build/release/gufo serve llm --model ... # same options as above
+```
+
+Without Nix, install the dependencies listed under
+[Without Nix](#without-nix) below, plus the `rocwmma` headers. GCC 16 fails
+on ROCm's `__noinline__` macro; GCC 15 works.
+
+---
+
+*The upstream Gufo README follows.*
+
 # Gufo: the Strix Halo inference engine
 
 <p align="center">
