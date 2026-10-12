@@ -5,9 +5,10 @@ smaller Strix Halo machines (96 GB unified memory, e.g. GMKtec Evo-X2). Upstream
 Gufo supports only **UD-Q4_K_XL**. Smaller quants (for example IQ3_XXS) are a
 possible follow-up, not a goal.
 
-Status: **Phase 1 complete: UD-IQ4_XS loads and runs correctly; prefill
-still uses the generic tiled fallback.** Branch `feat/qwen-flash-iq4-xs`, based
-on upstream `main` `2b4daed`. If this works, the
+Status: **Phase 2 complete: UD-IQ4_XS runs at Q4_K_XL speed (prefill within
+3-4%, decode and multi-user throughput at parity) in 17 GiB less memory.**
+Branch `feat/qwen-flash-iq4-xs`, based on upstream `main` `2b4daed`.
+Remaining: qualification on the 96 GB desktop (Phase 3). If this works, the
 intent is an upstream pull request; quality of the IQ4_XS file itself is already
 judged acceptable from day-to-day use with llama.cpp.
 
@@ -56,7 +57,11 @@ UD-IQ4_XS (identical on `main` `766911a6`; last file commit `2c41bd2a`):
 | 00002-of-00003 | `577a38a2392b40ca2193cea502e1d92f60b8cd370675d308e0ec21885d9daaa7` |
 | 00003-of-00003 | `d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833` |
 
-UD-Q4_K_XL shards match [model-identities.json](artifacts/model-identities.json).
+UD-Q4_K_XL shards and the shared Q8_0 MTP sidecar
+(`5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6`) match
+[model-identities.json](artifacts/model-identities.json). The vision projector
+`mmproj-BF16.gguf` at the same revision:
+`2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355`.
 
 ## Phase 0 baseline
 
@@ -140,6 +145,103 @@ Checks:
   identical for about 30 tokens, then a near-tie wording change with the same
   structure.
 
+## Phase 2 results
+
+October 12, 2026, same laptop, `performance` profile, release builds, every
+comparison against Q4_K_XL measured in the same session.
+
+### Changes
+
+- **WMMA prefill** (`RoutedF16GEMMKernel`): IQ3_S, IQ4_XS and IQ4_NL are
+  decoded to signed bytes when a stage is written to LDS (IQ3_S grid in LDS)
+  and then reuse the Q8_0 matrix path unchanged. Paired gate/up (SwiGLU in the
+  epilogue) runs for IQ as for Q4_K.
+- **Batched decode**: IQ3_S/IQ4_XS gate/up rows of a request batch are grouped
+  by expert (the wave64 kernel, now templated on the format); IQ3_S fragments
+  are decoded once and reused for every grouped row. IQ4_NL down slots take
+  the expert-ordered, 4/8-row tiles Q5_1 uses.
+- Q4_K_XL code paths are untouched: new formats only add cases or template
+  instances.
+
+### Speed
+
+| Single user (`gufo bench`, tok/s) | IQ4_XS | Q4_K_XL |
+| --- | ---: | ---: |
+| pp2048 | 1441.74 ± 5.03 | 1488.09 ± 9.90 |
+| tg128 | 27.81 ± 0.69 | 27.64 ± 0.47 |
+| pp2048 @ d16K | 1273.34 ± 0.87 | 1329.53 ± 0.41 |
+| tg128 @ d16K | 26.98 ± 0.90 | 26.73 ± 0.27 |
+
+Single user over HTTP (`tools/bench/model-bench.py`, pp2048 / tg128, greedy,
+thinking off, one sample per point; IQ4_XS / Q4_K_XL):
+
+| Mode | Depth | pp (tok/s) | tg (tok/s) | MTP acceptance (%) |
+| --- | ---: | ---: | ---: | ---: |
+| AR | 0 | 1406.65 / 1410.63 | 28.94 / 28.16 | — |
+| AR | 16,384 | 1194.41 / 1209.22 | 28.75 / 28.00 | — |
+| MTP mixed | 0 | 1365.65 / 1356.38 | 36.59 / 33.40 | 58.1 / 50.0 |
+| MTP mixed | 16,384 | 1163.45 / 1188.02 | 39.43 / 36.03 | 56.6 / 58.1 |
+| MTP repetitive | 0 | 1378.42 / 1397.95 | 69.65 / 62.39 | 89.0 / 88.6 |
+| MTP repetitive | 16,384 | 1171.55 / 1204.67 | 50.94 / 44.56 | 74.2 / 74.3 |
+
+Multiple users, HTTP benchmark driver (`tools/bench/model-bench.py`, pp2048 /
+tg128, context 4096 per user, one sample per point; sum of per-request decode
+rates, tok/s, IQ4_XS / Q4_K_XL):
+
+| Users | AR | MTP mixed | MTP repetitive |
+| ---: | ---: | ---: | ---: |
+| 1 | 29.07 / 28.12 | 36.49 / 33.02 | 67.17 / 61.31 |
+| 2 | 51.23 / 49.94 | 62.74 / 55.15 | 84.69 / 94.02 |
+| 4 | 83.77 / 81.89 | 82.06 / 81.63 | 129.54 / 131.67 |
+| 6 | 103.16 / 102.28 | 98.01 / 95.15 | 143.79 / 137.60 |
+| 8 | 113.90 / 112.11 | 111.32 / 110.72 | 140.55 / 152.68 |
+
+MTP rates also depend on draft acceptance, which differs between the two
+trunks; repetitive-text rows scatter in both directions.
+
+Kernel times at real shapes (2048-token prefill, top-10 of 512 experts;
+decode: 1-64 rows), release build, throwaway harness over the production entry
+points:
+
+| Kernel | Q4_K_XL | IQ4_XS |
+| --- | ---: | ---: |
+| prefill gate/up, paired (ms/layer) | 7.04 (Q4_K) | 8.85 (IQ3_S) |
+| prefill down (ms/layer) | 4.30 (Q5_1) | 4.11 (IQ4_NL) |
+| decode gate/up, 1 row (µs) | 55-58 | 88-100 |
+| decode gate/up, 8 rows, same experts (µs) | 191-204 | 202 (was 752) |
+| decode gate/up, 64 rows, random experts (µs) | 3329 | 3333 (was 4623) |
+| decode down, 64 rows, random experts (µs) | 2107 | 1654 (was 2578) |
+
+### Quality and exactness
+
+- `gpu_probe --reference`, 26-token prompt against the F32 CPU oracle of the
+  same file: IQ4_XS 26/26 top-1, mean/median/max KL 0.0153/0.0035/0.079
+  (Phase 1 MMQ fallback: 25/26, 0.0268/0.0063/0.151; Q4_K_XL: 25/26,
+  0.0177/0.0021/0.289). The Phase 1 gap was the 8-bit activations of the
+  fallback.
+- `routed_wmma_ops`: IQ3_S/IQ4_XS/IQ4_NL F16 route within 3e-4 to 4e-4 of F64
+  relative to scale (Q4_K: 3.6e-4) on the 16/48/64-row tiles, ragged rows and
+  tiny batches; paired gate/up equals the separate projections value for value
+  and replays bit-exactly.
+- `iq_ops`: batched gate/up widths 2-33 and down widths 2-32 are bit-identical
+  to single-row decode.
+- `session_test` (full suite, with MTP and the vision projector) passes on
+  IQ4_XS: C2/C4/C6/C8 AR/MTP logits and RNG exact, sampled acceptance and
+  residuals, 25 sampling strategies, MTP cache replay, EOS, cancellation,
+  rollback, snapshots and image attachment. `--batch-only` also passes on
+  Q4_K_XL after the shared-kernel changes.
+- Q4_K_XL `gpu_probe` logits remain byte-identical to `main` (779-token prefill
+  and 382 decode steps) after every Phase 2 commit.
+
+### Rejected
+
+- Staging IQ codes as 4-bit table indices in LDS (half the code footprint):
+  slower, gate/up 8.85 → 9.86 ms/layer and down 4.11 → 4.63 ms/layer, because
+  each row is then decoded per K block in the WMMA loop (by both half-waves)
+  instead of once while staging.
+- Batched IQ gate/up as separate projections plus SwiGLU across requests:
+  exact, but no faster than per-request loops; replaced by the grouped kernel.
+
 ## Plan
 
 Q4_K_XL code paths must stay byte-identical: new formats are added as new cases,
@@ -167,7 +269,7 @@ MTP verification uses the same quantization and reduction as single-token decode
 At this point, open an upstream issue to confirm interest and the evidence they
 expect before the larger kernel work.
 
-### Phase 2: speed
+### Phase 2: speed (done)
 
 1. `RoutedF16GEMMKernel`: IQ4_NL (down; 32-element blocks, a 16-entry lookup)
    and IQ3_S (gate/up; 256-element superblocks with a 512-entry grid in LDS,
@@ -205,6 +307,13 @@ measured on the 96 GB desktop; no Q4_K_XL regression.
   compilers share the same RAM, and the combination exhausted it.
 - **Formatting.** The system `clang-format` 23 flags untouched files that the
   pinned version accepts; format only changed files.
+- **Profiling.** `rocprofv3` (`rocprofiler-sdk`) is not packaged on Arch, so
+  `tools/prof/prof.py` cannot run here; kernel times above come from hipEvent
+  harnesses over the production entry points.
+- **Rounding.** In this toolchain `__fmul_rn` is a plain multiply (the OCML
+  rounded variants are not enabled), so it does not stop fast-math from fusing
+  a product into a caller's sum. Use an empty `asm volatile("" : "+v"(x))` to
+  materialize a value when two paths must round identically.
 - **Nix** is not installed on the laptop. Upstream evidence for a pull request
   should come from their pinned `nix build`.
 
