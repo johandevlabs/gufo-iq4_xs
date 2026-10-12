@@ -870,7 +870,8 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
     // dst_slots (expert-ordered slot rows) is only used by the down view.
     GGML_ASSERT(!dst_slots || (k == 640 && experts_used == 1 && tokens > 1 &&
                                (type == GGML_TYPE_Q5_1 ||
-                                type == GGML_TYPE_Q8_0)));
+                                type == GGML_TYPE_Q8_0 ||
+                                type == GGML_TYPE_IQ4_NL)));
     switch (type) {
         case GGML_TYPE_Q5_1:
           // Down projection slots have independent inputs. Wider row tiles
@@ -916,6 +917,19 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                                         stream);
             break;
         case GGML_TYPE_IQ4_NL:
+          // The down projection's slots, as for Q5_1.
+          if (k == 640 && experts_used == 1 && tokens > 1) {
+            if (tokens > 20) {
+              launch_moe<GGML_TYPE_IQ4_NL, 8>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream, dst_slots);
+            } else {
+              launch_moe<GGML_TYPE_IQ4_NL, 4>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream, dst_slots);
+            }
+            break;
+          }
             launch_moe<GGML_TYPE_IQ4_NL>(weights, input, ids, output, k, rows,
                                          tokens, experts_used, input_stride,
                                          stream);
