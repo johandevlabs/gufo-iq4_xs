@@ -1111,44 +1111,67 @@ static __device__ __forceinline__ float vec_dot_iq3_xxs_q8_1(
 #define VDR_IQ3_S_Q8_1_MMVQ 2
 #define VDR_IQ3_S_Q8_1_MMQ  2
 
-// TODO: don't use lookup table for signs
-static __device__ __forceinline__ float vec_dot_iq3_s_q8_1(
-    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+// One MMVQ lane's IQ3_S weights, decoded once (grid magnitudes with their
+// signs applied, the sub-block scale and d) and reused across inputs. The
+// single-input dot below is this fragment too, and both products are
+// materialized, so batched inputs keep its bits under fast-math.
+struct Iq3sMoeFragment {
+  int grid[8];
+  int scale;
+  float d;
 
-    const block_iq3_s * bq3 = (const block_iq3_s *) vbq + kbx;
+  __device__ __forceinline__ Iq3sMoeFragment(const void* weights, int block,
+                                            int iqs) {
+    const auto* bq3 = static_cast<const block_iq3_s*>(weights) + block;
+    const int2 qs_packed = make_int2(get_int_b2(bq3->qs, iqs + 0),
+                                     get_int_b2(bq3->qs, iqs + 1));
+    const auto* qs = reinterpret_cast<const uint8_t*>(&qs_packed);
+    const int qh = bq3->qh[iqs / 2];
+    const int signs_packed_32 = get_int_b2(bq3->signs, iqs / 2);
+    const auto* signs_packed_8 =
+        reinterpret_cast<const uint8_t*>(&signs_packed_32);
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+      const int2 grid_pos =
+          make_int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
+                    iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
+      const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) |
+                                       ((signs_packed_8[l0 / 2] & 0x0C) << 21),
+                                   0x00000000);
+      const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) |
+                                       ((signs_packed_8[l0 / 2] & 0xC0) << 17),
+                                   0x00000000);
+      grid[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
+      grid[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+    }
+    scale = 1 + 2 * ((bq3->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
+    d = __half2float(bq3->d);
+  }
 
-    const int2      qs_packed = make_int2(get_int_b2(bq3->qs, iqs + 0), get_int_b2(bq3->qs, iqs + 1));
-    const uint8_t * qs        = (const uint8_t *) &qs_packed;
-
-    const int qh = bq3->qh[iqs/2];
-
-    const int       signs_packed_32 = get_int_b2(bq3->signs, iqs/2);
-    const uint8_t * signs_packed_8  = (const uint8_t *) &signs_packed_32;
-
+  __device__ __forceinline__ float Dot(const block_q8_1* bq8_1,
+                                       int iqs) const {
     int sumi = 0;
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
-        const int2 grid_pos = make_int2(
-            iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
-            iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
-
-        const int signs0 = __vcmpne4(((signs_packed_8[l0/2] & 0x03) << 7) | ((signs_packed_8[l0/2] & 0x0C) << 21), 0x00000000);
-        const int signs1 = __vcmpne4(((signs_packed_8[l0/2] & 0x30) << 3) | ((signs_packed_8[l0/2] & 0xC0) << 17), 0x00000000);
-
-        const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
-        const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
-
-        const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
-        const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
-
-        sumi = ggml_hip_dp4a(grid_l, u0, sumi);
-        sumi = ggml_hip_dp4a(grid_h, u1, sumi);
+      const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
+      const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
+      sumi = ggml_hip_dp4a(grid[l0 + 0], u0, sumi);
+      sumi = ggml_hip_dp4a(grid[l0 + 1], u1, sumi);
     }
+    sumi *= scale;
+    // Materialize both products: otherwise fast-math may fuse them into the
+    // caller's sum differently once the fragment is hoisted out of a loop.
+    float dd = d * __low2float(bq8_1[iqs / 2].ds);
+    asm volatile("" : "+v"(dd));
+    float product = dd * static_cast<float>(sumi);
+    asm volatile("" : "+v"(product));
+    return product;
+  }
+};
 
-    sumi *= 1 + 2*((bq3->scales[iqs/4] >> ((iqs << 1) & 0x04)) & 0x0F);
-
-    const float d = __half2float(bq3->d) * __low2float(bq8_1[iqs/2].ds);
-    return d * sumi;
+static __device__ __forceinline__ float vec_dot_iq3_s_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+    return Iq3sMoeFragment(vbq, kbx, iqs).Dot(bq8_1, iqs);
 }
 
 #define VDR_IQ1_S_Q8_1_MMVQ 1

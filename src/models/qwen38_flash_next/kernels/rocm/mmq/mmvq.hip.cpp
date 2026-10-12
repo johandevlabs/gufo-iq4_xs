@@ -502,6 +502,21 @@ __launch_bounds__(64) static __global__
         sum[t][0] += w0.Dot(x, kqs);
         sum[t][1] += w1.Dot(x, kqs);
       }
+    } else if constexpr (type == GGML_TYPE_IQ3_S) {
+      // Decode each IQ3_S fragment once for every grouped input.
+      const Iq3sMoeFragment w0(
+          weights, (expert * rows + row0) * blocks_per_row + kb, kqs);
+      const Iq3sMoeFragment w1(
+          weights, (expert * rows + min(row0 + 1, rows - 1)) * blocks_per_row + kb,
+          kqs);
+#pragma unroll
+      for (int t = 0; t < columns; ++t) {
+        if (slots[t] == 0)
+          continue;
+        const auto* x = input + t * input_stride + kb * (qk / QK8_1);
+        sum[t][0] += w0.Dot(x, kqs);
+        sum[t][1] += w1.Dot(x, kqs);
+      }
     } else {
 #pragma unroll
       for (int t = 0; t < columns; ++t) {

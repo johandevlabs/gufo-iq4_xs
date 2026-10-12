@@ -65,10 +65,13 @@ __launch_bounds__(64) static __global__ void mul_mat_vec_moe_batch(
     float sum[columns][2] = {};
     for (int kb = lane / (qi / vdr); kb < blocks_per_row; kb += blocks_per_iter) {
       const int kqs = vdr * (lane % (qi / vdr));
-      if constexpr (q4 && !single_request) {
-        const Q4MoeFragment w0(
+      if constexpr ((q4 || type == GGML_TYPE_IQ3_S) && !single_request) {
+        // Decode each weight fragment once for every grouped input.
+        using Fragment =
+            std::conditional_t<q4, Q4MoeFragment, Iq3sMoeFragment>;
+        const Fragment w0(
             weights, (expert * rows + row0) * blocks_per_row + kb, kqs);
-        const Q4MoeFragment w1(
+        const Fragment w1(
             weights, (expert * rows + min(row0 + 1, rows - 1)) * blocks_per_row + kb,
             kqs);
 #pragma unroll
