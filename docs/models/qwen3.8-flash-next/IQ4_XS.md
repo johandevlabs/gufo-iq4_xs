@@ -7,7 +7,7 @@ possible follow-up, not a goal.
 
 Status: **runs on a 96 GB Strix Halo (GMKtec Evo-X2) at the model's full
 262K context with MTP and vision, from a published container image; on that
-machine it matches upstream's published Q4_K_XL prefill and is 6-16× faster
+machine it matches upstream's published Q4_K_XL prefill and is 4.6-16× faster
 to prefill and up to 2.6× faster to decode than llama.cpp on the same file.**
 Branch `feat/qwen-flash-iq4-xs`, based on upstream `main` `2b4daed`. If this works, the
 intent is an upstream pull request; quality of the IQ4_XS file itself is already
