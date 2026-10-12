@@ -219,7 +219,14 @@ void CheckRouted(const Format& f, int rows, int cols, int tokens, int used) {
   // separate decode projections.
   q::Swiglu(single_a, single_b, count, nullptr);
   const auto swiglu = Download(single_a, count);
-  for (int n = 1; n <= std::min(tokens, 8); ++n) {
+  // IQ3_S/IQ4_XS gate/up also group up to 64 rows of a request batch by
+  // expert (the wave64 path).
+  std::vector<int> gated_widths{1, 2, 3, 4, 5, 6, 7, 8};
+  if (f.type != GgmlType::kIQ4_NL)
+    gated_widths.insert(gated_widths.end(), {9, 16, 31, 32, 33});
+  for (int n : gated_widths) {
+    if (n > tokens)
+      break;
     Expect(!qfn_mmq_moe_gated_vec(type, wa, wb, dx, di, out, rows, cols, n,
                                   experts, used, nullptr),
            tag + ": gated vector launch failed");

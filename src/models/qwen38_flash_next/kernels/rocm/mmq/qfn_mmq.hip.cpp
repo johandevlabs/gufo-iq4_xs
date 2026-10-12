@@ -385,7 +385,9 @@ static int moe_vector_projection(int weight_type, const void* W,
             n_experts);
     return -1;
   }
-  const int max_gated_rows = type == GGML_TYPE_Q4_K
+  const int max_gated_rows = type == GGML_TYPE_Q4_K ||
+                                     type == GGML_TYPE_IQ3_S ||
+                                     type == GGML_TYPE_IQ4_XS
                                  ? MMVQ_MAX_ROUTED_BATCH
                                  : MMVQ_MAX_BATCH_SIZE;
   if (gated && (n_tokens > max_gated_rows || n_expert_used > 32 ||

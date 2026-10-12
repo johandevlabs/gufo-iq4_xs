@@ -921,11 +921,13 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
                            hipStream_t stream) {
   GGML_ASSERT(tokens > 0 && tokens <= MMVQ_MAX_ROUTED_BATCH);
   if (tokens > MMVQ_MAX_BATCH_SIZE) {
-    GGML_ASSERT(type == GGML_TYPE_Q4_K && groups && experts_used <= 32);
+    GGML_ASSERT((type == GGML_TYPE_Q4_K || type == GGML_TYPE_IQ3_S ||
+                 type == GGML_TYPE_IQ4_XS) &&
+                groups && experts_used <= 32);
     group_moe_batch<<<(tokens * experts_used + 127) / 128, 128, 0, stream>>>(
         ids, groups, tokens, experts_used);
-    mul_mat_vec_moe_batch_wave64(gate, up, input, groups, output, k, rows,
-                                 experts_used, input_stride, stream);
+    mul_mat_vec_moe_batch_wave64(gate, up, type, input, groups, output, k,
+                                 rows, experts_used, input_stride, stream);
     return;
   }
   if (tokens > 1) {

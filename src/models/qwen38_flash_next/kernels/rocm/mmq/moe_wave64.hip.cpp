@@ -1,11 +1,12 @@
-// Batched Q4 experts share one wave64 while retaining 32-lane dot reductions.
+// Batched Q4_K/IQ3_S/IQ4_XS experts share one wave64 while retaining 32-lane
+// dot reductions.
 #include "qfn_mmq_prelude.h"
 namespace qfn_mmq {
 #include "mmvq.hpp"
 #include "unary.hpp"
 #include "vecdotq.hpp"
 
-template<bool single_request>
+template<ggml_type type, bool single_request>
 __launch_bounds__(64) static __global__ void mul_mat_vec_moe_batch(
     const void* __restrict__ gate, const void* __restrict__ up,
     const block_q8_1* __restrict__ input, const int32_t* __restrict__ storage,
@@ -17,11 +18,16 @@ __launch_bounds__(64) static __global__ void mul_mat_vec_moe_batch(
   // Keep arithmetic in the kernel body: extracting a shared device helper
   // changes FP32 contraction on the production compiler.
   for (int anchor = blockIdx.y; anchor < count; anchor += gridDim.y) {
+    constexpr bool q4 = type == GGML_TYPE_Q4_K;
     constexpr int qk = QK_K;
-    constexpr int qi = QI4_K;
-    constexpr int vdr = VDR_Q4_K_Q8_1_MMVQ;
+    constexpr int qi = ggml_hip_type_traits<type>::qi;
+    constexpr int vdr = q4                        ? VDR_Q4_K_Q8_1_MMVQ
+                        : type == GGML_TYPE_IQ3_S ? VDR_IQ3_S_Q8_1_MMVQ
+                                                  : VDR_IQ4_XS_Q8_1_MMVQ;
     constexpr int blocks_per_iter = vdr * 32 / qi;
-    constexpr auto dot = vec_dot_q4_K_q8_1;
+    constexpr auto dot = q4                        ? vec_dot_q4_K_q8_1
+                         : type == GGML_TYPE_IQ3_S ? vec_dot_iq3_s_q8_1
+                                                   : vec_dot_iq4_xs_q8_1;
     const int tid = threadIdx.x;
     const int lane = tid % 32;
     const bool is_up = tid >= 32;
@@ -59,7 +65,7 @@ __launch_bounds__(64) static __global__ void mul_mat_vec_moe_batch(
     float sum[columns][2] = {};
     for (int kb = lane / (qi / vdr); kb < blocks_per_row; kb += blocks_per_iter) {
       const int kqs = vdr * (lane % (qi / vdr));
-      if constexpr (!single_request) {
+      if constexpr (q4 && !single_request) {
         const Q4MoeFragment w0(
             weights, (expert * rows + row0) * blocks_per_row + kb, kqs);
         const Q4MoeFragment w1(
@@ -125,16 +131,41 @@ __launch_bounds__(64) static __global__ void mul_mat_vec_moe_batch(
   }
 }
 
-void mul_mat_vec_moe_batch_wave64(const void* gate, const void* up,
-                                 const block_q8_1* input, const int32_t* groups,
-                                 float* output, int k, int rows,
-                                 int experts_used, int input_stride,
-                                 hipStream_t stream) {
+template<ggml_type type>
+static void launch_moe_batch(const void* gate, const void* up,
+                             const block_q8_1* input, const int32_t* groups,
+                             float* output, int k, int rows, int experts_used,
+                             int input_stride, hipStream_t stream) {
   const dim3 grid((rows + 1) / 2, 32);
-  mul_mat_vec_moe_batch<false><<<grid, 64, 0, stream>>>(
+  mul_mat_vec_moe_batch<type, false><<<grid, 64, 0, stream>>>(
       gate, up, input, groups, output, k, rows, experts_used, input_stride);
-  mul_mat_vec_moe_batch<true><<<grid, 64, 0, stream>>>(
+  mul_mat_vec_moe_batch<type, true><<<grid, 64, 0, stream>>>(
       gate, up, input, groups, output, k, rows, experts_used, input_stride);
+}
+
+void mul_mat_vec_moe_batch_wave64(const void* gate, const void* up,
+                                 ggml_type type, const block_q8_1* input,
+                                 const int32_t* groups, float* output, int k,
+                                 int rows, int experts_used, int input_stride,
+                                 hipStream_t stream) {
+  switch (type) {
+    case GGML_TYPE_Q4_K:
+      launch_moe_batch<GGML_TYPE_Q4_K>(gate, up, input, groups, output, k, rows,
+                                       experts_used, input_stride, stream);
+      break;
+    case GGML_TYPE_IQ3_S:
+      launch_moe_batch<GGML_TYPE_IQ3_S>(gate, up, input, groups, output, k,
+                                        rows, experts_used, input_stride,
+                                        stream);
+      break;
+    case GGML_TYPE_IQ4_XS:
+      launch_moe_batch<GGML_TYPE_IQ4_XS>(gate, up, input, groups, output, k,
+                                         rows, experts_used, input_stride,
+                                         stream);
+      break;
+    default:
+      GGML_ABORT("unsupported batched gate/up weight format");
+  }
 }
 
 }  // namespace qfn_mmq
