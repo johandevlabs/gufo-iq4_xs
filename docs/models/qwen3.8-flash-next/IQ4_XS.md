@@ -5,8 +5,9 @@ smaller Strix Halo machines (96 GB unified memory, e.g. GMKtec Evo-X2). Upstream
 Gufo supports only **UD-Q4_K_XL**. Smaller quants (for example IQ3_XXS) are a
 possible follow-up, not a goal.
 
-Status: **Phase 0 (baseline) complete; no engine code changed yet.** Branch
-`feat/qwen-flash-iq4-xs`, based on upstream `main` `2b4daed`. If this works, the
+Status: **Phase 1 complete: UD-IQ4_XS loads and runs correctly; prefill
+still uses the generic tiled fallback.** Branch `feat/qwen-flash-iq4-xs`, based
+on upstream `main` `2b4daed`. If this works, the
 intent is an upstream pull request; quality of the IQ4_XS file itself is already
 judged acceptable from day-to-day use with llama.cpp.
 
@@ -93,6 +94,52 @@ Observations:
 - Prefill is where most of the kernel work and the risk sit: the WMMA routed
   expert GEMM needs IQ3_S and IQ4_NL dequantization to keep the 3× lead.
 
+## Phase 1 results
+
+October 12, 2026, same laptop and settings as the baseline (GCC 15.3, ROCm 7.2.4,
+`performance` profile). Release build of the branch.
+
+| Engine | Target | pp2048 | tg128 | pp2048 @ d16K | tg128 @ d16K |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Gufo branch | IQ4_XS | **909.70** ± 53.81 | **27.55** ± 1.17 | **823.74** ± 0.80 | **26.43** ± 0.59 |
+| Gufo `main` | Q4_K_XL | 1469.61 ± 4.79 | 26.32 ± 1.24 | 1239.06 ± 4.50 | 26.71 ± 0.35 |
+| llama.cpp Vulkan | IQ4_XS | 489.23 ± 8.14 | 27.28 ± 0.06 | 357.72 ± 0.73 | 26.03 ± 0.05 |
+
+IQ4_XS: model load 9.8–10.6 s; peak GPU memory 63.7–64.2 GiB (prompt and
+benchmark runs), against 80.8 GiB for Q4_K_XL.
+
+What changed:
+
+- Loader and CPU reference accept IQ3_S, IQ4_XS and IQ4_NL routed experts.
+- Native Q6_K logits head: a one-wave-per-row MMVQ kernel for 1–8 rows, applied
+  eight rows at a time for wider heads, so decode, verification and batched
+  heads share each row's arithmetic. Q6_K stays rejected for embeddings and
+  experts.
+- Decode (fused gate/up for 1–8 tokens), medium batches (paired vector up to 32
+  rows) and tiled MMQ (prefill and wide batches) for the three expert formats,
+  from the vendored llama.cpp code.
+- Q4_K_XL routing is unchanged: new formats only add cases.
+
+Checks:
+
+- `qwen38_flash_next_iq_ops_test` (new): every format within 0.3–0.5% of an
+  F64 dot product over the CPU dequantizers (vector, paired and MMQ paths);
+  batched rows, paired gate/up, fused gate/up at widths 1–8 and the Q6_K head
+  at widths 1–8 are bit-identical to single-row decode; inactive experts write
+  zeros. `routed_wmma_ops` and `projection_ops` still pass.
+- **Q4_K_XL regression:** `gpu_probe` logits from the branch and from `main`
+  are byte-identical (SHA-256) for a 779-token prefill and 382 token-by-token
+  decode steps.
+- GPU prefill versus the F32 CPU oracle of the same file, 26-token prompt:
+  top-1 agreement 25/26 for IQ4_XS and for Q4_K_XL (each one flip at a near
+  tie). Mean/median KL 0.0268/0.0063 for IQ4_XS, 0.0177/0.0021 for Q4_K_XL.
+  The likely difference: IQ4_XS prefill currently uses MMQ with 8-bit
+  activations, Q4_K_XL the WMMA path with F16 activations. Recheck after
+  Phase 2.
+- Greedy output on a short prompt tracks llama.cpp (ROCm) on the same file:
+  identical for about 30 tokens, then a near-tie wording change with the same
+  structure.
+
 ## Plan
 
 Q4_K_XL code paths must stay byte-identical: new formats are added as new cases,
@@ -100,7 +147,7 @@ and existing Flash-Next operator tests plus logit dumps on Q4_K_XL guard them.
 Every new format must follow the existing exactness contracts, in particular that
 MTP verification uses the same quantization and reduction as single-token decode.
 
-### Phase 1: correct, not yet fast
+### Phase 1: correct, not yet fast (done)
 
 1. Accept IQ3_S, IQ4_XS and IQ4_NL routed experts and a Q6_K head in
    `weights.cpp`; add the missing CPU dequantization cases in `cpu_ops.cpp`
@@ -151,6 +198,13 @@ measured on the 96 GB desktop; no Q4_K_XL regression.
 - **llama.cpp loading.** `llama-bench` replaced `-mmp 0` with `--load-mode`; use
   `-lm dio`. It keeps `per_layer_token_embd` on the CPU and the rest (61.2 GiB)
   on the GPU, with two graph splits.
+- **Test builds.** `gpu-test` builds `gufo-kernel-bench`, which needs
+  `rocprofiler-sdk` (not packaged on Arch); configure with
+  `-DGUFO_BUILD_TOOLS=OFF` to build the operator tests and probes without it.
+- **Memory.** Do not load a model while a parallel HIP build runs: weights and
+  compilers share the same RAM, and the combination exhausted it.
+- **Formatting.** The system `clang-format` 23 flags untouched files that the
+  pinned version accepts; format only changed files.
 - **Nix** is not installed on the laptop. Upstream evidence for a pull request
   should come from their pinned `nix build`.
 
