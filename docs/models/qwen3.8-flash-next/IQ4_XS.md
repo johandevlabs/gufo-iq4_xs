@@ -242,6 +242,53 @@ points:
 - Batched IQ gate/up as separate projections plus SwiGLU across requests:
   exact, but no faster than per-request loops; replaced by the grouped kernel.
 
+## Phase 3 results (laptop)
+
+October 12, 2026. Functional suites (`tests/functional/run.py --record-baseline`,
+sampling preset `qwen38`, `--sessions 4`) with `state-edges`, `tool-agent`,
+`long-context` and `cache`, release build of `71bea96`:
+
+| Mode | Result | Loaded mode | Drafts proposed / accepted |
+| --- | --- | --- | --- |
+| `--speculative off` (sidecar path given) | 11/11 passed | off | 0 / 0 |
+| `--speculative mtp` | 11/11 passed | mtp | 1019 / 897 |
+
+`main` cannot load the IQ4_XS target, so there is no main/PR timing comparison
+for it; the runs record a baseline for later branch changes. The suites need the
+dev shell's Python SDK versions (`openai` 2.41.1, `httpx` 0.28.1); `openai` 3.x
+replaced `httpx` and breaks `tests/functional/metrics.py`.
+
+### Container image
+
+`ghcr.io/johandevlabs/gufo-toolboxes/gufo-runtime:edge` (also tagged
+`sha-<gufo revision>`) is built by the
+[gufo-toolboxes fork](https://github.com/johandevlabs/gufo-toolboxes) with
+upstream's Nix recipe, its `gufo-engine` input pointed at this branch and
+re-locked to the branch head on every build. Rebuild by running its
+`Build & Publish Gufo OCI Images` workflow after pushing here.
+
+Laptop smoke test of the first image (Gufo `71bea96`, 7.76 GiB): `gufo diagnose`
+passes inside the container (ROCm 7.2.3 from the image); `gufo serve` with the
+IQ4_XS target and MTP sidecar loads in 24 s at 32K context (66 GiB GPU memory
+reported by the loader) and answers a greedy chat request correctly at
+50.7 tok/s decode (133/187 drafts accepted).
+
+```sh
+docker run --rm --device /dev/kfd --device /dev/dri \
+  --group-add "$(getent group render | cut -d: -f3)" \
+  --group-add "$(getent group video | cut -d: -f3)" \
+  --ulimit memlock=-1 -p 8080:8080 -v /path/to/models:/models:ro \
+  ghcr.io/johandevlabs/gufo-toolboxes/gufo-runtime:edge \
+  gufo serve --host 0.0.0.0 --port 8080 llm \
+  --model /models/Qwen3.8-Flash-Next-UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
+  --speculative mtp \
+  --mtp-model /models/Qwen3.8-Flash-Next-MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf
+```
+
+With rootless Podman, use `--userns=keep-id:uid=1000,gid=1000
+--group-add keep-groups` instead of the two `--group-add` options, as in the
+[main README](../../../README.md#quickstart).
+
 ## Plan
 
 Q4_K_XL code paths must stay byte-identical: new formats are added as new cases,
@@ -280,7 +327,7 @@ expect before the larger kernel work.
 3. Profile with `tools/prof`, following the optimize-kernel skill; compare against
    Gufo Q4_K_XL and llama.cpp IQ4_XS (ROCm and Vulkan).
 
-### Phase 3: qualification
+### Phase 3: qualification (in progress)
 
 Functional suites (`state-edges`, `tool-agent`, `long-context`, `cache`; AR and
 MTP) on IQ4_XS; MTP acceptance versus Q4_K_XL; IQ4_XS BENCHMARKS/QUALITY entries
