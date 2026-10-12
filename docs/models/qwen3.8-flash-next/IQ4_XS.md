@@ -345,8 +345,39 @@ found) and the main build does not load the non-shared one either
 
 Multi-user rows sum the individual request decode rates (context 4096 per
 user, all sessions prefilled first). llama.cpp's MTP throughput falls at C4 and
-beyond in this configuration. Tuned llama.cpp batch sizes (for example
-`-b 8192 -ub 2048`) would raise its prefill; they were not part of this run.
+beyond in this configuration.
+
+**Tuned llama.cpp.** A second llama.cpp run used the batch sizes from the
+author's own launch scripts (`-b 8192 -ub 2048`, both builds) and an MTP draft
+length of 3 (`--spec-draft-n-max 3`); the q8_0 KV cache from those scripts was
+left out because it changes results. Larger batches raise llama.cpp's short-prompt
+prefill (271 → 351 tok/s) but lower it at 64K/128K, and the shorter drafts help
+MTP decode at depth. At 128K the Unsloth fork lost the Vulkan device in both MTP
+workloads (`vk::Queue::submit: ErrorDeviceLost`, HTTP 500, server terminated);
+the default-flag run completed those cells.
+
+| Mode | Depth | Gufo pp | llama.cpp pp (default / tuned) | Gufo tg | llama.cpp tg (default / tuned) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| AR | 0 | 1628.43 | 271.21 / 351.12 | 29.78 | 24.25 / 24.13 |
+| AR | 16,384 | 1486.34 | 230.95 / 244.10 | 29.69 | 22.22 / 21.61 |
+| AR | 65,536 | 1411.92 | 155.13 / 119.20 | 29.25 | 14.67 / 14.43 |
+| AR | 131,072 | 1345.58 | 102.92 / 90.61 | 28.64 | 10.99 / 10.78 |
+| MTP mixed | 0 | 1541.52 | 278.72 / 267.71 | 38.48 | 33.85 / 33.00 |
+| MTP mixed | 16,384 | 1405.39 | 215.31 / 224.95 | 42.39 | 26.27 / 27.90 |
+| MTP mixed | 65,536 | 1365.64 | 133.09 / 113.20 | 35.69 | 16.88 / 21.15 |
+| MTP mixed | 131,072 | 1313.49 | 86.67 / device lost | 39.24 | 15.02 / device lost |
+| MTP repetitive | 0 | 1547.33 | 267.11 / 279.16 | 74.87 | 48.13 / 48.22 |
+| MTP repetitive | 16,384 | 1393.88 | 211.34 / 224.01 | 55.01 | 42.03 / 43.14 |
+| MTP repetitive | 65,536 | 1361.02 | 133.28 / 113.78 | 55.80 | 28.36 / 29.89 |
+| MTP repetitive | 131,072 | 1355.97 | 86.78 / device lost | 51.82 | 22.33 / device lost |
+
+| Users | AR: Gufo / llama.cpp default / tuned | MTP mixed: Gufo / default / tuned | MTP repetitive: Gufo / default / tuned |
+| ---: | ---: | ---: | ---: |
+| 1 | 29.70 / 23.91 / 23.66 | 38.49 / 33.95 / 32.75 | 75.29 / 48.80 / 50.02 |
+| 2 | 53.41 / 38.89 / 39.31 | 68.07 / 39.77 / 43.12 | 96.82 / 50.60 / 49.24 |
+| 4 | 89.93 / 53.00 / 55.42 | 91.84 / 30.10 / 28.78 | 152.73 / 32.13 / 32.41 |
+| 6 | 114.48 / 62.34 / 64.27 | 113.13 / 37.39 / 36.66 | 166.42 / 33.35 / 45.92 |
+| 8 | 129.27 / 64.05 / 67.41 | 125.46 / 42.69 / 45.25 | 168.90 / 37.01 / 43.89 |
 
 ## Plan
 
