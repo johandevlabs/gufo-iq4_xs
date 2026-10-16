@@ -1,15 +1,167 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "src/models/qwen/hip/mtp.hpp"
 
 namespace gufo::hip {
+namespace {
+
+constexpr std::array<std::uint8_t, 8> kMtpDraftPersistentMagic = {
+    'G', 'M', 'T', 'D', 'R', 'F', '0', '1'};
+constexpr std::uint32_t kMtpDraftPersistentVersion = 1;
+constexpr std::size_t kMtpDraftPersistentHeaderBytes = 64;
+constexpr std::uint32_t kMtpDraftPrimedFlag = 1U << 0U;
+
+template<typename T>
+  requires(std::is_unsigned_v<T>)
+void PutLittleEndian(std::span<std::uint8_t> destination, std::size_t offset,
+                     T value) {
+  if (offset > destination.size() || sizeof(T) > destination.size() - offset) {
+    throw std::length_error("MTP draft persistent header is truncated");
+  }
+  for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
+    destination[offset + byte] =
+        static_cast<std::uint8_t>(value >> (byte * 8U));
+  }
+}
+
+template<typename T>
+  requires(std::is_unsigned_v<T>)
+[[nodiscard]] T GetLittleEndian(std::span<const std::uint8_t> source,
+                                std::size_t offset) {
+  if (offset > source.size() || sizeof(T) > source.size() - offset) {
+    throw std::invalid_argument("MTP draft persistent header is truncated");
+  }
+  T value = 0;
+  for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
+    value |= static_cast<T>(source[offset + byte]) << (byte * 8U);
+  }
+  return value;
+}
+
+[[nodiscard]] std::size_t CheckedPersistentAdd(std::size_t left,
+                                               std::size_t right) {
+  if (right > std::numeric_limits<std::size_t>::max() - left) {
+    throw std::overflow_error("MTP draft persistent size overflows");
+  }
+  return left + right;
+}
+
+[[nodiscard]] std::size_t PersistentSizeFromU64(std::uint64_t value) {
+  if (value > std::numeric_limits<std::size_t>::max()) {
+    throw std::overflow_error("MTP draft persistent size overflows");
+  }
+  return static_cast<std::size_t>(value);
+}
+
+/// Committed-boundary MTP draft state: the packed attention cache plus the last
+/// committed target hidden row that seeds the next proposal.
+class QwenMtpDraftSnapshot final
+    : public speculative::IDraftBackendSnapshot {
+public:
+  QwenMtpDraftSnapshot(std::unique_ptr<QwenMtpGpuSnapshot> gpu_snapshot,
+                       std::vector<float> target_hidden,
+                       QwenMtpGpuDraftConfig config, bool primed)
+      : gpu_snapshot(std::move(gpu_snapshot)),
+        target_hidden(std::move(target_hidden)),
+        config(config),
+        primed(primed) {}
+
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
+    return (gpu_snapshot != nullptr ? gpu_snapshot->PayloadBytes() : 0) +
+           target_hidden.size() * sizeof(float) + sizeof(std::uint32_t);
+  }
+
+  [[nodiscard]] std::size_t PersistentPayloadBytes() const override {
+    if (gpu_snapshot == nullptr ||
+        target_hidden.size() >
+            std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t)) {
+      throw std::invalid_argument(
+          "MTP draft snapshot persistent metadata is invalid");
+    }
+    return CheckedPersistentAdd(
+        CheckedPersistentAdd(kMtpDraftPersistentHeaderBytes,
+                             gpu_snapshot->PersistentPayloadBytes()),
+        target_hidden.size() * sizeof(std::uint32_t));
+  }
+
+  [[nodiscard]] std::size_t SerializePersistent(
+      std::span<std::uint8_t> destination) const override {
+    const std::size_t expected_bytes = PersistentPayloadBytes();
+    if (destination.size() != expected_bytes ||
+        target_hidden.size() > std::numeric_limits<std::uint32_t>::max() ||
+        primed == target_hidden.empty() ||
+        (!primed && gpu_snapshot->ValidContext() != 0)) {
+      throw std::invalid_argument(
+          "MTP draft persistent destination is invalid");
+    }
+    const std::size_t gpu_payload_bytes =
+        gpu_snapshot->PersistentPayloadBytes();
+    std::fill(destination.begin(), destination.end(), std::uint8_t{0});
+    std::copy(kMtpDraftPersistentMagic.begin(), kMtpDraftPersistentMagic.end(),
+              destination.begin());
+    PutLittleEndian<std::uint32_t>(destination, 8,
+                                   kMtpDraftPersistentVersion);
+    PutLittleEndian<std::uint32_t>(
+        destination, 12,
+        static_cast<std::uint32_t>(kMtpDraftPersistentHeaderBytes));
+    PutLittleEndian<std::uint32_t>(destination, 16,
+                                   primed ? kMtpDraftPrimedFlag : 0U);
+    PutLittleEndian<std::uint32_t>(
+        destination, 20, static_cast<std::uint32_t>(target_hidden.size()));
+    PutLittleEndian<std::uint32_t>(destination, 24,
+                                   gpu_snapshot->ValidContext());
+    PutLittleEndian<std::uint32_t>(destination, 28, config.max_context);
+    PutLittleEndian<std::uint32_t>(destination, 32, config.max_draft_tokens);
+    PutLittleEndian<std::uint64_t>(
+        destination, 40, static_cast<std::uint64_t>(gpu_payload_bytes));
+    PutLittleEndian<std::uint64_t>(destination, 48,
+                                   static_cast<std::uint64_t>(expected_bytes));
+    PutLittleEndian<std::uint64_t>(
+        destination, 56, static_cast<std::uint64_t>(target_hidden.size()));
+
+    const std::size_t gpu_offset = kMtpDraftPersistentHeaderBytes;
+    const std::size_t hidden_offset =
+        CheckedPersistentAdd(gpu_offset, gpu_payload_bytes);
+    const std::size_t written = gpu_snapshot->SerializePersistent(
+        destination.subspan(gpu_offset, gpu_payload_bytes));
+    if (written != gpu_payload_bytes) {
+      throw std::runtime_error(
+          "MTP GPU persistent serializer returned the wrong byte count");
+    }
+    for (std::size_t index = 0; index < target_hidden.size(); ++index) {
+      PutLittleEndian<std::uint32_t>(
+          destination, hidden_offset + index * sizeof(std::uint32_t),
+          std::bit_cast<std::uint32_t>(target_hidden[index]));
+    }
+    if (CheckedPersistentAdd(hidden_offset,
+                             target_hidden.size() * sizeof(std::uint32_t)) !=
+        destination.size()) {
+      throw std::logic_error(
+          "MTP draft persistent serializer size mismatch");
+    }
+    return destination.size();
+  }
+
+  std::unique_ptr<QwenMtpGpuSnapshot> gpu_snapshot;
+  std::vector<float> target_hidden;
+  QwenMtpGpuDraftConfig config;
+  bool primed{false};
+};
+
+}  // namespace
 
 QwenMtpGpuDraftBackend::QwenMtpGpuDraftBackend(
     std::unique_ptr<QwenMtpGpuExecutor> executor, QwenMtpGpuDraftConfig config)
@@ -201,6 +353,148 @@ void QwenMtpGpuDraftBackend::UpdateTargetHidden(std::span<const float> hidden) {
                                     hidden.begin(), hidden.end());
   }
   std::ranges::copy(hidden, target_hidden_.begin());
+}
+
+void QwenMtpGpuDraftBackend::DiscardPendingTargetContext(
+    std::uint32_t position) {
+  if (proposal_active_) {
+    // A cancelled verification never feeds its proposal back, so the tentative
+    // draft rows are dropped by rewinding to this step's checkpoint.
+    if (proposal_checkpoint_ + 1 != position) {
+      throw std::logic_error(
+          "MTP cancellation frontier does not match the draft");
+    }
+    executor_->Rewind(proposal_checkpoint_);
+    proposal_active_ = false;
+    proposed_tokens_.clear();
+    proposal_target_hidden_.clear();
+    committed_target_hidden_.clear();
+  }
+  if (executor_->GetNextPosition() + 1 != position) {
+    throw std::logic_error(
+        "MTP cancelled draft is not at the committed frontier");
+  }
+}
+
+std::size_t QwenMtpGpuDraftBackend::SnapshotPayloadBytes() const {
+  // The primed flag travels with the payload but is not part of it; it is
+  // reserved here so the reservation is an exact upper bound.
+  return CheckedPersistentAdd(
+      CheckedPersistentAdd(executor_->SnapshotPayloadBytes(),
+                           target_hidden_.size() * sizeof(float)),
+      sizeof(std::uint32_t));
+}
+
+std::unique_ptr<speculative::IDraftBackendSnapshot>
+QwenMtpGpuDraftBackend::Snapshot() const {
+  if (proposal_active_) {
+    throw std::logic_error(
+        "MTP snapshot requires a committed proposal boundary");
+  }
+  return std::make_unique<QwenMtpDraftSnapshot>(
+      executor_->SaveSnapshot(), target_hidden_, config_, primed_);
+}
+
+void QwenMtpGpuDraftBackend::RestoreSnapshot(
+    const speculative::IDraftBackendSnapshot& snapshot) {
+  const auto* mtp_snapshot =
+      dynamic_cast<const QwenMtpDraftSnapshot*>(&snapshot);
+  if (mtp_snapshot == nullptr || mtp_snapshot->gpu_snapshot == nullptr) {
+    throw std::invalid_argument(
+        "MTP draft snapshot is incompatible with the backend");
+  }
+  if (mtp_snapshot->config.max_context != config_.max_context ||
+      mtp_snapshot->config.max_draft_tokens != config_.max_draft_tokens ||
+      mtp_snapshot->target_hidden.size() != target_hidden_.size() ||
+      mtp_snapshot->primed != !mtp_snapshot->target_hidden.empty()) {
+    throw std::invalid_argument(
+        "MTP draft snapshot has a malformed target hidden row");
+  }
+  executor_->RestoreSnapshot(*mtp_snapshot->gpu_snapshot);
+  target_hidden_ = mtp_snapshot->target_hidden;
+  proposed_tokens_.clear();
+  proposal_target_hidden_.clear();
+  committed_target_hidden_.clear();
+  proposal_input_ = 0;
+  proposal_checkpoint_ = 0;
+  primed_ = mtp_snapshot->primed;
+  proposal_active_ = false;
+}
+
+void QwenMtpGpuDraftBackend::RestorePersistentSnapshot(
+    std::span<const std::uint8_t> payload) {
+  if (payload.size() < kMtpDraftPersistentHeaderBytes ||
+      !std::equal(kMtpDraftPersistentMagic.begin(),
+                  kMtpDraftPersistentMagic.end(), payload.begin()) ||
+      GetLittleEndian<std::uint32_t>(payload, 8) !=
+          kMtpDraftPersistentVersion ||
+      GetLittleEndian<std::uint32_t>(payload, 12) !=
+          kMtpDraftPersistentHeaderBytes ||
+      GetLittleEndian<std::uint32_t>(payload, 36) != 0) {
+    throw std::invalid_argument("MTP draft persistent header is invalid");
+  }
+  const std::uint32_t flags = GetLittleEndian<std::uint32_t>(payload, 16);
+  const std::size_t hidden_size = GetLittleEndian<std::uint32_t>(payload, 20);
+  const std::uint32_t valid_context = GetLittleEndian<std::uint32_t>(payload, 24);
+  const std::uint32_t max_context = GetLittleEndian<std::uint32_t>(payload, 28);
+  const std::uint32_t max_draft_tokens =
+      GetLittleEndian<std::uint32_t>(payload, 32);
+  const std::size_t gpu_payload_bytes =
+      PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 40));
+  const std::size_t total_bytes =
+      PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 48));
+  const std::size_t hidden_count =
+      PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 56));
+  const bool primed = (flags & kMtpDraftPrimedFlag) != 0;
+  const std::size_t expected_hidden = target_hidden_.size();
+
+  if ((flags & ~kMtpDraftPrimedFlag) != 0 || hidden_size != expected_hidden ||
+      max_context != config_.max_context ||
+      max_draft_tokens != config_.max_draft_tokens ||
+      valid_context > config_.max_context ||
+      hidden_count != (primed ? expected_hidden : 0) ||
+      (!primed && valid_context != 0) ||
+      hidden_count >
+          std::numeric_limits<std::size_t>::max() / sizeof(std::uint32_t) ||
+      total_bytes != payload.size()) {
+    throw std::invalid_argument(
+        "MTP draft persistent metadata is incompatible");
+  }
+  const std::size_t gpu_offset = kMtpDraftPersistentHeaderBytes;
+  const std::size_t hidden_offset =
+      CheckedPersistentAdd(gpu_offset, gpu_payload_bytes);
+  const std::size_t hidden_bytes = hidden_count * sizeof(std::uint32_t);
+  if (CheckedPersistentAdd(hidden_offset, hidden_bytes) != payload.size()) {
+    throw std::invalid_argument(
+        "MTP draft persistent payload size is invalid");
+  }
+
+  std::vector<float> target_hidden;
+  target_hidden.reserve(hidden_count);
+  for (std::size_t index = 0; index < hidden_count; ++index) {
+    target_hidden.push_back(
+        std::bit_cast<float>(GetLittleEndian<std::uint32_t>(
+            payload, hidden_offset + index * sizeof(std::uint32_t))));
+  }
+
+  executor_->RestorePersistentSnapshot(
+      payload.subspan(gpu_offset, gpu_payload_bytes));
+  if (executor_->GetNextPosition() != valid_context) {
+    throw std::invalid_argument(
+        "MTP draft persistent context length is inconsistent");
+  }
+  if (primed) {
+    target_hidden_ = std::move(target_hidden);
+  } else {
+    std::ranges::fill(target_hidden_, 0.0F);
+  }
+  proposed_tokens_.clear();
+  proposal_target_hidden_.clear();
+  committed_target_hidden_.clear();
+  proposal_input_ = 0;
+  proposal_checkpoint_ = 0;
+  primed_ = primed;
+  proposal_active_ = false;
 }
 
 void QwenMtpGpuDraftBackend::Reset() noexcept {

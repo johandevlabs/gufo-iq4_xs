@@ -63,6 +63,46 @@ private:
   double pack_time_seconds_{0.0};
 };
 
+/// Frozen MTP attention cache at a committed proposal boundary. The
+/// authoritative cache is the FP32 plane, which is head-major: each key/value
+/// head owns a run of `max_context` positions, so the valid region is compacted
+/// per head instead of copied as a prefix of the plane.
+class QwenMtpGpuSnapshot final {
+public:
+  ~QwenMtpGpuSnapshot();
+
+  QwenMtpGpuSnapshot(const QwenMtpGpuSnapshot&) = delete;
+  QwenMtpGpuSnapshot& operator=(const QwenMtpGpuSnapshot&) = delete;
+  QwenMtpGpuSnapshot(QwenMtpGpuSnapshot&&) = delete;
+  QwenMtpGpuSnapshot& operator=(QwenMtpGpuSnapshot&&) = delete;
+
+  /// Packed key plane followed by the packed value plane.
+  [[nodiscard]] std::size_t PayloadBytes() const noexcept {
+    return payload_bytes_;
+  }
+  /// Draft context length this snapshot restores, one behind the target's
+  /// position: the cache holds a hidden row for every token but the last.
+  [[nodiscard]] std::uint32_t ValidContext() const noexcept {
+    return valid_context_;
+  }
+  [[nodiscard]] std::size_t PersistentPayloadBytes() const;
+  [[nodiscard]] std::size_t SerializePersistent(
+      std::span<std::uint8_t> destination) const;
+
+private:
+  QwenMtpGpuSnapshot() = default;
+
+  void* d_kv_{nullptr};
+  std::uint32_t valid_context_{0};
+  std::uint32_t max_context_{0};
+  std::uint32_t kv_width_{0};
+  std::uint32_t head_dim_{0};
+  std::uint32_t num_kv_heads_{0};
+  std::size_t payload_bytes_{0};
+
+  friend class QwenMtpGpuExecutor;
+};
+
 /// Mutable single-session executor for the Qwen3.8 layer-64 MTP graph.
 class QwenMtpGpuExecutor final {
 public:
@@ -97,6 +137,20 @@ public:
   [[nodiscard]] std::span<const float> CopyLastHidden();
   [[nodiscard]] std::span<const float> CopyLastLogits();
 
+  /// Captures the committed cache prefix. Requires a committed proposal
+  /// boundary; the cursor is the draft's own next position.
+  [[nodiscard]] std::unique_ptr<QwenMtpGpuSnapshot> SaveSnapshot() const;
+  void RestoreSnapshot(const QwenMtpGpuSnapshot& snapshot);
+  void RestorePersistentSnapshot(std::span<const std::uint8_t> payload);
+
+  /// Resident request state: both attention cache planes.
+  [[nodiscard]] std::size_t StateBytes() const noexcept;
+  [[nodiscard]] std::size_t SnapshotPayloadBytes() const noexcept;
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept;
+  /// Per-session estimate for admission control, before a session exists.
+  [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
+      const QwenMtpGpuModel& model, std::uint32_t max_context);
+
   [[nodiscard]] std::uint32_t GetNextPosition() const noexcept {
     return next_position_;
   }
@@ -119,6 +173,10 @@ private:
   void Free() noexcept;
   friend class models::qwen::ContinuationAdapter;
   models::qwen::ContinuationHooks* continuation_hooks_{};
+  /// Scatters a packed key plane/value plane pair into the head-major FP32
+  /// cache; the caller owns the decode cursor.
+  void RestoreCachePlanes(const std::uint8_t* packed,
+                          std::uint32_t valid_context, hipMemcpyKind kind);
 
   std::shared_ptr<const QwenMtpGpuModel> model_;
   std::uint32_t max_context_;
@@ -153,6 +211,7 @@ private:
       nullptr};  // owned by the target session
   std::vector<float> h_last_hidden_;
   std::vector<float> h_logits_;
+  std::size_t scratch_bytes_{0};
 };
 
 struct QwenMtpGpuDraftConfig {
@@ -196,6 +255,23 @@ public:
 
   void UpdateTargetHidden(std::span<const float> hidden) override;
   void Reset() noexcept override;
+
+  /// Drops an uncommitted proposal and rewinds the draft to the committed
+  /// frontier, so a cancelled verification resumes from `position`. MTP's cache
+  /// trails the target by one row, so `position` must equal
+  /// `GetNextPosition() + 1` once the proposal is discarded.
+  void DiscardPendingTargetContext(std::uint32_t position);
+
+  [[nodiscard]] std::size_t SnapshotPayloadBytes() const override;
+  [[nodiscard]] std::unique_ptr<speculative::IDraftBackendSnapshot> Snapshot()
+      const override;
+  void RestoreSnapshot(
+      const speculative::IDraftBackendSnapshot& snapshot) override;
+  void RestorePersistentSnapshot(std::span<const std::uint8_t> payload) override;
+
+  [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
+    return executor_->GetMemoryUsage();
+  }
 
   [[nodiscard]] const std::string& GetLastError() const noexcept {
     return last_error_;

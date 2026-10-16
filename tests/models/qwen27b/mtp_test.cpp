@@ -212,6 +212,134 @@ int main(int argc, const char* const* argv) {
     Expect(
         second_proposal.tokens == expected_proposal.tokens,
         "feedback replay must match teacher-forced committed target features");
+
+    // ── Snapshot gates ──────────────────────────────────────────────────────
+    // Admission control sizes a session before it exists, so the estimate must
+    // equal what the executor actually reserves.
+    const auto estimate =
+        gufo::hip::QwenMtpGpuExecutor::EstimateMemoryUsage(*mtp_model, 8);
+    const auto actual = executor->GetMemoryUsage();
+    Expect(estimate.request_state_bytes == actual.request_state_bytes,
+           "MTP state estimate must match the allocation");
+    Expect(estimate.temporary_scratch_bytes == actual.temporary_scratch_bytes,
+           "MTP scratch estimate must match the allocation");
+
+    const auto& execution_config = mtp_model->GetConfig();
+    const std::size_t kv_width =
+        static_cast<std::size_t>(execution_config.num_key_value_heads) *
+        execution_config.head_dim;
+
+    // Executor level: a restored boundary must reproduce the next step's token
+    // and logits bit for bit, which is what byte-identical output requires.
+    executor->Reset();
+    for (std::uint32_t position = 0; position < 3; ++position) {
+      (void)executor->ForwardTargetHidden(
+          static_cast<gufo::tokenization::TokenId>(11 + position),
+          target_hidden, position, true);
+    }
+    Expect(executor->GetNextPosition() == 3, "MTP snapshot prefix cursor");
+    auto snapshot = executor->SaveSnapshot();
+    Expect(snapshot != nullptr, "MTP executor snapshot");
+    Expect(snapshot->ValidContext() == 3, "MTP snapshot valid context");
+    Expect(snapshot->PayloadBytes() == 2U * kv_width * 3U * sizeof(float),
+           "MTP snapshot payload is the exact packed plane");
+
+    const auto boundary_token =
+        executor->ForwardTargetHidden(19, target_hidden, 3, true);
+    const auto boundary_span = executor->CopyLastLogits();
+    const std::vector<float> boundary_logits(boundary_span.begin(),
+                                             boundary_span.end());
+
+    for (std::uint32_t extra = 0; extra < 3; ++extra) {
+      (void)executor->ForwardTargetHidden(
+          static_cast<gufo::tokenization::TokenId>(23 + extra), target_hidden,
+          4 + extra, true);
+    }
+    Expect(executor->GetNextPosition() == 7, "MTP dirty prefix cursor");
+    executor->RestoreSnapshot(*snapshot);
+    Expect(executor->GetNextPosition() == 3, "MTP restored cursor");
+    const auto replayed_token =
+        executor->ForwardTargetHidden(19, target_hidden, 3, true);
+    const auto replayed_span = executor->CopyLastLogits();
+    Expect(replayed_token == boundary_token, "MTP restored token determinism");
+    Expect(std::vector<float>(replayed_span.begin(), replayed_span.end()) ==
+               boundary_logits,
+           "MTP restored logits must be bit-identical");
+
+    // Persistent form: the same boundary after a device-memory round trip,
+    // which is the disk-cache restore path.
+    std::vector<std::uint8_t> persistent(snapshot->PersistentPayloadBytes());
+    Expect(snapshot->SerializePersistent(persistent) == persistent.size(),
+           "MTP persistent serialize size");
+    executor->Reset();
+    executor->RestorePersistentSnapshot(persistent);
+    Expect(executor->GetNextPosition() == 3, "MTP persistent restored cursor");
+    const auto persisted_token =
+        executor->ForwardTargetHidden(19, target_hidden, 3, true);
+    const auto persisted_span = executor->CopyLastLogits();
+    Expect(persisted_token == boundary_token,
+           "MTP persistent restored token determinism");
+    Expect(std::vector<float>(persisted_span.begin(), persisted_span.end()) ==
+               boundary_logits,
+           "MTP persistent restored logits must be bit-identical");
+
+    // Draft level: the boundary carries the last committed target hidden row as
+    // well as the cache, so a restored draft must propose identically.
+    auto snapshot_backend =
+        gufo::hip::QwenMtpGpuDraftBackend::Create(mtp_model, draft_config,
+                                                  &error);
+    Expect(snapshot_backend != nullptr, error);
+    Expect(snapshot_backend->PrimeTargetContext(draft_context),
+           snapshot_backend->GetLastError());
+    const std::vector<gufo::tokenization::TokenId> anchored_sequence{
+        prompt_tokens[0], prompt_tokens[1], token};
+    const auto anchored_proposal =
+        snapshot_backend->Propose(anchored_sequence, 2, 2);
+    Expect(anchored_proposal.tokens.size() == 2, "MTP anchored proposal");
+    snapshot_backend->UpdateTargetHidden(anchor_hidden);
+    snapshot_backend->UpdateTargetHidden(committed_hidden);
+    snapshot_backend->AcceptFeedback(
+        std::span<const gufo::tokenization::TokenId>(
+            anchored_proposal.tokens.data(), 1),
+        42);
+    std::vector<gufo::tokenization::TokenId> committed_anchored(
+        anchored_sequence);
+    committed_anchored.push_back(anchored_proposal.tokens.front());
+
+    const auto committed_bytes = snapshot_backend->SnapshotPayloadBytes();
+    auto draft_snapshot = snapshot_backend->Snapshot();
+    Expect(draft_snapshot != nullptr, "MTP draft snapshot");
+    Expect(draft_snapshot->PayloadBytes() == committed_bytes,
+           "MTP draft snapshot payload must equal the reservation");
+    const auto probe =
+        snapshot_backend->Propose(committed_anchored, 4, 2);
+
+    // Move the live backend past the captured boundary, then rewind.
+    snapshot_backend->UpdateTargetHidden(anchor_hidden);
+    snapshot_backend->UpdateTargetHidden(committed_hidden);
+    snapshot_backend->AcceptFeedback(
+        std::span<const gufo::tokenization::TokenId>(probe.tokens.data(), 1),
+        7);
+    snapshot_backend->RestoreSnapshot(*draft_snapshot);
+    const auto restored_probe =
+        snapshot_backend->Propose(committed_anchored, 4, 2);
+    Expect(restored_probe.tokens == probe.tokens,
+           "MTP draft snapshot restore must propose identically");
+
+    std::vector<std::uint8_t> draft_persistent(
+        draft_snapshot->PersistentPayloadBytes());
+    Expect(draft_snapshot->SerializePersistent(draft_persistent) ==
+               draft_persistent.size(),
+           "MTP draft persistent serialize size");
+    auto persisted_backend = gufo::hip::QwenMtpGpuDraftBackend::Create(
+        mtp_model, draft_config, &error);
+    Expect(persisted_backend != nullptr, error);
+    persisted_backend->RestorePersistentSnapshot(draft_persistent);
+    const auto persisted_probe =
+        persisted_backend->Propose(committed_anchored, 4, 2);
+    Expect(persisted_probe.tokens == probe.tokens,
+           "MTP draft persistent restore must propose identically");
+
     draft_backend->Reset();
 
     std::cout << "qwen_mtp_gpu_test: token=" << token

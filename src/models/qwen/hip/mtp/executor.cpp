@@ -1,19 +1,87 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
+#include <gufo/ext/experimental/hip_utils.hpp>
+#include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 
 namespace gufo::hip {
 namespace {
+
+constexpr std::array<std::uint8_t, 8> kMtpGpuPersistentMagic = {
+    'G', 'M', 'T', 'P', 'G', 'P', 'U', '0'};
+constexpr std::uint32_t kMtpGpuPersistentVersion = 1;
+constexpr std::size_t kMtpGpuPersistentHeaderBytes = 64;
+
+template<typename T>
+  requires(std::is_unsigned_v<T>)
+void PutLittleEndian(std::span<std::uint8_t> destination, std::size_t offset,
+                     T value) {
+  if (offset > destination.size() || sizeof(T) > destination.size() - offset) {
+    throw std::length_error("MTP GPU persistent header is truncated");
+  }
+  for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
+    destination[offset + byte] =
+        static_cast<std::uint8_t>(value >> (byte * 8U));
+  }
+}
+
+template<typename T>
+  requires(std::is_unsigned_v<T>)
+[[nodiscard]] T GetLittleEndian(std::span<const std::uint8_t> source,
+                                std::size_t offset) {
+  if (offset > source.size() || sizeof(T) > source.size() - offset) {
+    throw std::invalid_argument("MTP GPU persistent header is truncated");
+  }
+  T value = 0;
+  for (std::size_t byte = 0; byte < sizeof(T); ++byte) {
+    value |= static_cast<T>(source[offset + byte]) << (byte * 8U);
+  }
+  return value;
+}
+
+[[nodiscard]] std::size_t CheckedPersistentAdd(std::size_t left,
+                                               std::size_t right) {
+  if (right > std::numeric_limits<std::size_t>::max() - left) {
+    throw std::overflow_error("MTP GPU persistent size overflows");
+  }
+  return left + right;
+}
+
+[[nodiscard]] std::size_t PersistentSizeFromU64(std::uint64_t value) {
+  if (value > std::numeric_limits<std::size_t>::max()) {
+    throw std::overflow_error("MTP GPU persistent size overflows");
+  }
+  return static_cast<std::size_t>(value);
+}
+
+[[nodiscard]] std::size_t MtpCachePlaneElements(
+    const core::ModelConfig& config, std::uint32_t max_context) {
+  return static_cast<std::size_t>(config.num_key_value_heads) * max_context *
+         config.head_dim;
+}
+
+/// Resident request state: the FP32 attention plane the decode path reads, plus
+/// the FP16 plane the fused KV-write kernel also fills.
+[[nodiscard]] std::size_t MtpStateBytes(const core::ModelConfig& config,
+                                        std::uint32_t max_context) {
+  const std::size_t total_kv = MtpCachePlaneElements(config, max_context);
+  return 2U * total_kv * sizeof(float) +
+         2U * total_kv * sizeof(std::uint16_t);
+}
 
 template<typename T>
 void AllocateBuffer(T*& pointer, std::size_t elements) {
@@ -21,6 +89,77 @@ void AllocateBuffer(T*& pointer, std::size_t elements) {
 }
 
 }  // namespace
+
+QwenMtpGpuSnapshot::~QwenMtpGpuSnapshot() {
+  if (d_kv_ != nullptr) {
+    (void)hipFree(d_kv_);
+  }
+}
+
+std::size_t QwenMtpGpuSnapshot::PersistentPayloadBytes() const {
+  return CheckedPersistentAdd(kMtpGpuPersistentHeaderBytes, payload_bytes_);
+}
+
+std::size_t QwenMtpGpuSnapshot::SerializePersistent(
+    std::span<std::uint8_t> destination) const {
+  const std::size_t expected_bytes = PersistentPayloadBytes();
+  const std::size_t head_dim = head_dim_;
+  const std::size_t num_kv_heads = num_kv_heads_;
+  if (destination.size() != expected_bytes || head_dim == 0 ||
+      num_kv_heads == 0 || kv_width_ != num_kv_heads * head_dim ||
+      max_context_ == 0 || valid_context_ > max_context_ ||
+      valid_context_ >
+          std::numeric_limits<std::size_t>::max() / head_dim ||
+      valid_context_ >
+          std::numeric_limits<std::size_t>::max() / num_kv_heads) {
+    throw std::invalid_argument("MTP GPU snapshot metadata is malformed");
+  }
+  const std::size_t elements_per_head =
+      static_cast<std::size_t>(valid_context_) * head_dim;
+  const std::size_t plane_elements = num_kv_heads * elements_per_head;
+  if (plane_elements >
+      std::numeric_limits<std::size_t>::max() / (2U * sizeof(float))) {
+    throw std::overflow_error("MTP GPU persistent size overflows");
+  }
+  const std::size_t plane_bytes = plane_elements * sizeof(float);
+  if (payload_bytes_ != plane_bytes + plane_bytes ||
+      (plane_bytes != 0 && d_kv_ == nullptr)) {
+    throw std::invalid_argument("MTP GPU snapshot payload is malformed");
+  }
+
+  std::fill(destination.begin(), destination.end(), std::uint8_t{0});
+  std::copy(kMtpGpuPersistentMagic.begin(), kMtpGpuPersistentMagic.end(),
+            destination.begin());
+  PutLittleEndian<std::uint32_t>(destination, 8, kMtpGpuPersistentVersion);
+  PutLittleEndian<std::uint32_t>(
+      destination, 12,
+      static_cast<std::uint32_t>(kMtpGpuPersistentHeaderBytes));
+  PutLittleEndian<std::uint32_t>(destination, 16, kv_width_);
+  PutLittleEndian<std::uint32_t>(destination, 20,
+                                 static_cast<std::uint32_t>(head_dim));
+  PutLittleEndian<std::uint32_t>(destination, 24,
+                                 static_cast<std::uint32_t>(num_kv_heads));
+  PutLittleEndian<std::uint32_t>(destination, 28, max_context_);
+  PutLittleEndian<std::uint32_t>(destination, 32, valid_context_);
+  PutLittleEndian<std::uint32_t>(destination, 36, 0);
+  PutLittleEndian<std::uint64_t>(
+      destination, 40, static_cast<std::uint64_t>(elements_per_head));
+  PutLittleEndian<std::uint64_t>(destination, 48,
+                                 static_cast<std::uint64_t>(payload_bytes_));
+  PutLittleEndian<std::uint64_t>(destination, 56,
+                                 static_cast<std::uint64_t>(expected_bytes));
+
+  if (plane_bytes != 0) {
+    const auto* packed = static_cast<const std::uint8_t*>(d_kv_);
+    SnapshotTransfer transfer;
+    transfer.Copy(destination.data() + kMtpGpuPersistentHeaderBytes, packed,
+                  plane_bytes);
+    transfer.Copy(destination.data() + kMtpGpuPersistentHeaderBytes +
+                      plane_bytes,
+                  packed + plane_bytes, plane_bytes);
+  }
+  return destination.size();
+}
 
 QwenMtpGpuExecutor::QwenMtpGpuExecutor(
     std::shared_ptr<const QwenMtpGpuModel> model, std::uint32_t max_context)
@@ -72,44 +211,110 @@ void QwenMtpGpuExecutor::Allocate() {
   const std::size_t kv =
       static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
   const std::size_t intermediate = config.intermediate_size;
-  const std::size_t total_kv =
-      static_cast<std::size_t>(config.num_key_value_heads) * max_context_ *
-      config.head_dim;
+  const std::size_t total_kv = MtpCachePlaneElements(config, max_context_);
 
   const auto stream_error = hipStreamCreate(&stream_);
   if (stream_error != hipSuccess) {
     throw std::runtime_error(std::string("MTP stream creation failed: ") +
                              hipGetErrorString(stream_error));
   }
-  AllocateBuffer(d_target_hidden_, hidden);
-  AllocateBuffer(d_embedding_, hidden);
-  AllocateBuffer(d_fusion_, 2 * hidden);
-  AllocateBuffer(d_hidden_, hidden);
-  AllocateBuffer(d_normed_, hidden);
-  AllocateBuffer(d_qg_, 2 * attention);
-  AllocateBuffer(d_q_, attention);
-  AllocateBuffer(d_k_, kv);
-  AllocateBuffer(d_v_, kv);
-  AllocateBuffer(d_gate_, attention);
-  AllocateBuffer(d_context_, attention);
-  AllocateBuffer(d_attn_out_, hidden);
+  scratch_bytes_ = 0;
+  const auto allocate_scratch = [this](auto*& pointer, std::size_t elements) {
+    AllocateBuffer(pointer, elements);
+    scratch_bytes_ += elements * sizeof(*pointer);
+  };
+  allocate_scratch(d_target_hidden_, hidden);
+  allocate_scratch(d_embedding_, hidden);
+  allocate_scratch(d_fusion_, 2 * hidden);
+  allocate_scratch(d_hidden_, hidden);
+  allocate_scratch(d_normed_, hidden);
+  allocate_scratch(d_qg_, 2 * attention);
+  allocate_scratch(d_q_, attention);
+  allocate_scratch(d_k_, kv);
+  allocate_scratch(d_v_, kv);
+  allocate_scratch(d_gate_, attention);
+  allocate_scratch(d_context_, attention);
+  allocate_scratch(d_attn_out_, hidden);
   if (config.IsMoE()) {
-    d_moe_ = static_cast<std::uint8_t*>(
-        detail::AllocateDevice(MoeScratchBytes(config, 1)));
+    const std::size_t moe_bytes = MoeScratchBytes(config, 1);
+    d_moe_ = static_cast<std::uint8_t*>(detail::AllocateDevice(moe_bytes));
     moe_ = CarveMoeScratch(d_moe_, config, 1);
+    scratch_bytes_ += moe_bytes;
   } else {
-    AllocateBuffer(d_ffn_act_, intermediate);
+    allocate_scratch(d_ffn_act_, intermediate);
   }
-  AllocateBuffer(d_ffn_out_, hidden);
-  AllocateBuffer(d_feedback_hidden_, hidden);
-  AllocateBuffer(d_logits_, config.vocab_size);
+  allocate_scratch(d_ffn_out_, hidden);
+  allocate_scratch(d_feedback_hidden_, hidden);
+  allocate_scratch(d_logits_, config.vocab_size);
+  // The attention cache is request state, not scratch.
   AllocateBuffer(d_kv_cache_, 2 * total_kv);
   d_kv_cache_f16_ =
       detail::AllocateDevice(2 * total_kv * sizeof(std::uint16_t));
-  AllocateBuffer(d_split_k_scratch_,
-                 detail::DecodeAttentionScratchElements(
-                     config.num_attention_heads, config.head_dim));
-  AllocateBuffer(d_out_token_, 1);
+  allocate_scratch(d_split_k_scratch_,
+                   detail::DecodeAttentionScratchElements(
+                       config.num_attention_heads, config.head_dim));
+  allocate_scratch(d_out_token_, 1);
+}
+
+std::size_t QwenMtpGpuExecutor::StateBytes() const noexcept {
+  return MtpStateBytes(model_->GetConfig(), max_context_);
+}
+
+std::size_t QwenMtpGpuExecutor::SnapshotPayloadBytes() const noexcept {
+  const auto& config = model_->GetConfig();
+  const std::size_t kv_width =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  return 2U * kv_width * next_position_ * sizeof(float);
+}
+
+QwenGpuMemoryUsage QwenMtpGpuExecutor::GetMemoryUsage() const noexcept {
+  return {StateBytes(), scratch_bytes_};
+}
+
+QwenGpuMemoryUsage QwenMtpGpuExecutor::EstimateMemoryUsage(
+    const QwenMtpGpuModel& model, std::uint32_t max_context) {
+  const auto& config = model.GetConfig();
+  if (max_context == 0 || max_context > config.context_length) {
+    throw std::invalid_argument("MTP memory estimate has invalid limits");
+  }
+  // Mirrors Allocate(); the snapshot round-trip test asserts the two agree.
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t attention = config.AttentionSize();
+  const std::size_t kv =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  std::size_t scratch = 0;
+  const auto add = [&scratch](std::size_t elements,
+                              std::size_t element_bytes) {
+    scratch += elements * element_bytes;
+  };
+  add(hidden, sizeof(float));
+  add(hidden, sizeof(float));
+  add(2 * hidden, sizeof(float));
+  add(hidden, sizeof(float));
+  add(hidden, sizeof(float));
+  add(2 * attention, sizeof(float));
+  add(attention, sizeof(float));
+  add(kv, sizeof(float));
+  add(kv, sizeof(float));
+  add(attention, sizeof(float));
+  add(attention, sizeof(float));
+  add(hidden, sizeof(float));
+  if (config.IsMoE()) {
+    scratch += MoeScratchBytes(config, 1);
+  } else {
+    add(config.intermediate_size, sizeof(float));
+  }
+  add(hidden, sizeof(float));
+  add(hidden, sizeof(float));
+  add(config.vocab_size, sizeof(float));
+  add(detail::DecodeAttentionScratchElements(config.num_attention_heads,
+                                             config.head_dim),
+      sizeof(float));
+  add(1, sizeof(std::uint32_t));
+  return {
+      .request_state_bytes = MtpStateBytes(config, max_context),
+      .temporary_scratch_bytes = scratch,
+  };
 }
 
 void QwenMtpGpuExecutor::Free() noexcept {
@@ -307,6 +512,146 @@ std::span<const float> QwenMtpGpuExecutor::CopyLastLogits() {
     throw std::runtime_error("MTP logit synchronization failed");
   }
   return h_logits_;
+}
+
+void QwenMtpGpuExecutor::RestoreCachePlanes(const std::uint8_t* packed,
+                                            std::uint32_t valid_context,
+                                            hipMemcpyKind kind) {
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeDraftWrite(0, valid_context);
+  const auto& config = model_->GetConfig();
+  const std::size_t head_dim = config.head_dim;
+  const std::size_t heads = config.num_key_value_heads;
+  const std::size_t row_elements =
+      static_cast<std::size_t>(valid_context) * head_dim;
+  const std::size_t plane_elements = heads * row_elements;
+  const std::size_t total_kv = MtpCachePlaneElements(config, max_context_);
+  const auto* source = reinterpret_cast<const float*>(packed);
+  for (std::size_t head = 0; head < heads; ++head) {
+    if (row_elements == 0) {
+      continue;
+    }
+    const std::size_t destination =
+        head * static_cast<std::size_t>(max_context_) * head_dim;
+    const std::size_t offset = head * row_elements;
+    HIP_CHECK(hipMemcpyAsync(d_kv_cache_ + destination, source + offset,
+                             row_elements * sizeof(float), kind, stream_));
+    HIP_CHECK(hipMemcpyAsync(d_kv_cache_ + total_kv + destination,
+                             source + plane_elements + offset,
+                             row_elements * sizeof(float), kind, stream_));
+  }
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  // The FP16 plane is rewritten on every decode step but never read while the
+  // FP32 plane is supplied, so it is deliberately left stale here.
+}
+
+std::unique_ptr<QwenMtpGpuSnapshot> QwenMtpGpuExecutor::SaveSnapshot() const {
+  const auto& config = model_->GetConfig();
+  const std::size_t head_dim = config.head_dim;
+  const std::size_t heads = config.num_key_value_heads;
+  const std::size_t kv_width = heads * head_dim;
+
+  auto snapshot = std::unique_ptr<QwenMtpGpuSnapshot>(new QwenMtpGpuSnapshot());
+  snapshot->valid_context_ = next_position_;
+  snapshot->max_context_ = max_context_;
+  snapshot->kv_width_ = static_cast<std::uint32_t>(kv_width);
+  snapshot->head_dim_ = static_cast<std::uint32_t>(head_dim);
+  snapshot->num_kv_heads_ = static_cast<std::uint32_t>(heads);
+  snapshot->payload_bytes_ = SnapshotPayloadBytes();
+
+  const std::size_t row_elements =
+      static_cast<std::size_t>(next_position_) * head_dim;
+  const std::size_t plane_elements = heads * row_elements;
+  if (plane_elements == 0) {
+    return snapshot;
+  }
+  const std::size_t plane_bytes = plane_elements * sizeof(float);
+  HIP_CHECK(hipMalloc(&snapshot->d_kv_, plane_bytes + plane_bytes));
+  auto* destination = static_cast<float*>(snapshot->d_kv_);
+  const std::size_t total_kv = MtpCachePlaneElements(config, max_context_);
+  // The FP32 cache is head-major: each head owns a run of `max_context`
+  // positions, so the valid rows are gathered per head into a packed plane.
+  for (std::size_t head = 0; head < heads; ++head) {
+    const std::size_t source =
+        head * static_cast<std::size_t>(max_context_) * head_dim;
+    const std::size_t offset = head * row_elements;
+    HIP_CHECK(hipMemcpyAsync(destination + offset, d_kv_cache_ + source,
+                             row_elements * sizeof(float),
+                             hipMemcpyDeviceToDevice, stream_));
+    HIP_CHECK(hipMemcpyAsync(destination + plane_elements + offset,
+                             d_kv_cache_ + total_kv + source,
+                             row_elements * sizeof(float),
+                             hipMemcpyDeviceToDevice, stream_));
+  }
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  return snapshot;
+}
+
+void QwenMtpGpuExecutor::RestoreSnapshot(
+    const QwenMtpGpuSnapshot& snapshot) {
+  const auto& config = model_->GetConfig();
+  const std::size_t heads = config.num_key_value_heads;
+  const std::size_t row_elements =
+      static_cast<std::size_t>(snapshot.valid_context_) * config.head_dim;
+  const std::size_t plane_elements = heads * row_elements;
+  if (snapshot.num_kv_heads_ != heads ||
+      snapshot.kv_width_ != heads * config.head_dim ||
+      snapshot.head_dim_ != config.head_dim ||
+      snapshot.max_context_ != max_context_ ||
+      snapshot.valid_context_ > max_context_ ||
+      snapshot.payload_bytes_ != 2U * plane_elements * sizeof(float)) {
+    throw std::invalid_argument(
+        "MTP snapshot is incompatible with the executor");
+  }
+  if (plane_elements != 0 && snapshot.d_kv_ == nullptr) {
+    throw std::invalid_argument("MTP snapshot payload is incomplete");
+  }
+  RestoreCachePlanes(static_cast<const std::uint8_t*>(snapshot.d_kv_),
+                     snapshot.valid_context_, hipMemcpyDeviceToDevice);
+  next_position_ = snapshot.valid_context_;
+}
+
+void QwenMtpGpuExecutor::RestorePersistentSnapshot(
+    std::span<const std::uint8_t> payload) {
+  if (payload.size() < kMtpGpuPersistentHeaderBytes ||
+      !std::equal(kMtpGpuPersistentMagic.begin(), kMtpGpuPersistentMagic.end(),
+                  payload.begin()) ||
+      GetLittleEndian<std::uint32_t>(payload, 8) != kMtpGpuPersistentVersion ||
+      GetLittleEndian<std::uint32_t>(payload, 12) !=
+          kMtpGpuPersistentHeaderBytes ||
+      GetLittleEndian<std::uint32_t>(payload, 36) != 0) {
+    throw std::invalid_argument("MTP GPU persistent header is invalid");
+  }
+  const std::uint32_t kv_width = GetLittleEndian<std::uint32_t>(payload, 16);
+  const std::uint32_t head_dim = GetLittleEndian<std::uint32_t>(payload, 20);
+  const std::uint32_t num_kv_heads = GetLittleEndian<std::uint32_t>(payload, 24);
+  const std::uint32_t max_context = GetLittleEndian<std::uint32_t>(payload, 28);
+  const std::uint32_t valid_context = GetLittleEndian<std::uint32_t>(payload, 32);
+  const std::size_t elements_per_head =
+      PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 40));
+  const std::size_t payload_bytes =
+      PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 48));
+  const std::size_t total_bytes =
+      PersistentSizeFromU64(GetLittleEndian<std::uint64_t>(payload, 56));
+
+  const auto& config = model_->GetConfig();
+  const std::size_t expected_heads = config.num_key_value_heads;
+  const std::size_t expected_width = expected_heads * config.head_dim;
+  if (head_dim == 0 || num_kv_heads == 0 || head_dim != config.head_dim ||
+      num_kv_heads != expected_heads || kv_width != expected_width ||
+      max_context != max_context_ || valid_context > max_context_ ||
+      elements_per_head !=
+          static_cast<std::size_t>(valid_context) * head_dim ||
+      total_bytes != payload.size() ||
+      payload_bytes != 2U * num_kv_heads * elements_per_head * sizeof(float) ||
+      CheckedPersistentAdd(kMtpGpuPersistentHeaderBytes, payload_bytes) !=
+          payload.size()) {
+    throw std::invalid_argument(
+        "MTP GPU persistent metadata is incompatible");
+  }
+  RestoreCachePlanes(payload.data() + kMtpGpuPersistentHeaderBytes,
+                     valid_context, hipMemcpyHostToDevice);
+  next_position_ = valid_context;
 }
 
 }  // namespace gufo::hip
