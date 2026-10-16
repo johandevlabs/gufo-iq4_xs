@@ -179,7 +179,8 @@ std::unique_ptr<QwenMtpGpuDraftBackend> QwenMtpGpuDraftBackend::Create(
     return nullptr;
   }
   auto executor = QwenMtpGpuExecutor::Create(std::move(model),
-                                             config.max_context, error_msg);
+                                             config.max_context,
+                                             config.prime_chunk, error_msg);
   if (executor == nullptr) {
     return nullptr;
   }
@@ -224,13 +225,24 @@ bool QwenMtpGpuDraftBackend::PrimeTargetContext(
   }
 
   try {
-    for (std::size_t index = 0; index + 1 < context.prompt_tokens.size();
-         ++index) {
-      const auto hidden = context.prompt_hidden_states.subspan(
-          index * context.hidden_size, context.hidden_size);
-      (void)executor_->ForwardTargetHidden(
-          context.prompt_tokens[index + 1], hidden,
-          static_cast<std::uint32_t>(index), false);
+    if (config_.prime_chunk != 0) {
+      // Batched, projection-only prime: the same rows the loop below writes
+      // (position `i` consumes token `i + 1` and the trunk hidden of `i`), with
+      // no attention, MoE or logits, because nothing downstream of the KV write
+      // is consumed by the draft.
+      const std::size_t rows = context.prompt_tokens.size() - 1;
+      executor_->PrimeTargetHiddenBatch(
+          0, context.prompt_tokens.subspan(1),
+          context.prompt_hidden_states.first(rows * context.hidden_size));
+    } else {
+      for (std::size_t index = 0; index + 1 < context.prompt_tokens.size();
+           ++index) {
+        const auto hidden = context.prompt_hidden_states.subspan(
+            index * context.hidden_size, context.hidden_size);
+        (void)executor_->ForwardTargetHidden(
+            context.prompt_tokens[index + 1], hidden,
+            static_cast<std::uint32_t>(index), false);
+      }
     }
     // The prompt rows may be pinned and reused by the next target prefill.
     executor_->Synchronize();
@@ -261,6 +273,32 @@ bool QwenMtpGpuDraftBackend::AppendTargetContext(
       context.prompt_hidden_states.size() !=
           context.prompt_tokens.size() * context.hidden_size) {
     return false;
+  }
+  if (context.prompt_tokens.empty()) {
+    return true;
+  }
+  if (config_.prime_chunk != 0) {
+    // Batched extension of the primed draft sequence: the row at draft
+    // position `position - 1 + j` consumes suffix token `j` and the trunk
+    // hidden of suffix row `j - 1` (the previously appended rolling hidden for
+    // `j == 0`), which is exactly what the per-row loop below computes one
+    // ForwardTargetHidden at a time. Projection-only like the prompt prime:
+    // no attention, MoE or logits, because the proposal path consumes only the
+    // draft KV write and the final trunk hidden.
+    const std::size_t hidden_size = context.hidden_size;
+    append_hidden_rows_.assign(target_hidden_.begin(), target_hidden_.end());
+    append_hidden_rows_.insert(
+        append_hidden_rows_.end(), context.prompt_hidden_states.begin(),
+        context.prompt_hidden_states.begin() +
+            static_cast<std::ptrdiff_t>(
+                (context.prompt_tokens.size() - 1) * hidden_size));
+    executor_->PrimeTargetHiddenBatch(position - 1, context.prompt_tokens,
+                                      append_hidden_rows_);
+    std::ranges::copy(
+        context.prompt_hidden_states.subspan(
+            (context.prompt_tokens.size() - 1) * hidden_size, hidden_size),
+        target_hidden_.begin());
+    return true;
   }
   for (std::size_t row = 0; row < context.prompt_tokens.size(); ++row) {
     (void)executor_->ForwardTargetHidden(

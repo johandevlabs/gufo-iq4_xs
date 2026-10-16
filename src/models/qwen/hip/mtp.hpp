@@ -18,6 +18,11 @@
 
 namespace gufo::hip {
 
+/// Row budget for one MTP prompt-prime slice. The prime scratch is sized by it,
+/// so it trades a bounded scratch reservation against the number of batched
+/// GEMM launches. `0` selects the legacy per-token serial prime.
+inline constexpr std::uint32_t kMtpDefaultPrimeChunk = 1024;
+
 /// Immutable GPU-visible MTP layer weights. Current GGUF K-quant matrices are
 /// expanded once to BF16; the tied embedding and LM head remain shared with
 /// the target model.
@@ -115,6 +120,7 @@ public:
 
   [[nodiscard]] static std::unique_ptr<QwenMtpGpuExecutor> Create(
       std::shared_ptr<const QwenMtpGpuModel> model, std::uint32_t max_context,
+      std::uint32_t prime_chunk = kMtpDefaultPrimeChunk,
       std::string* error_msg = nullptr);
 
   void SetVisionInput(models::qwen::vision::DeviceInput* input) noexcept {
@@ -134,6 +140,27 @@ public:
       tokenization::TokenId input_token, std::uint32_t position,
       bool compute_logits = true);
 
+  /// Batched, projection-only prompt prime (MTP priming plan, stage A). Writes
+  /// KV rows for `count` consecutive positions beginning at `start_position`,
+  /// from the trunk hidden rows that own those positions; `successor_tokens[i]`
+  /// is the token that follows the position owning `hidden_rows[i]`. Attention,
+  /// MoE, the output norm and the logits are not computed: nothing downstream of
+  /// the KV write is consumed by the draft, so the reduction is exact rather
+  /// than an approximation. On return the decode cursor is
+  /// `start_position + count`; the caller owns sequencing and the cache base.
+  void PrimeTargetHiddenBatch(
+      std::uint32_t start_position,
+      std::span<const tokenization::TokenId> successor_tokens,
+      std::span<const float> hidden_rows);
+
+  /// Device-resident form: the rows already live on the device, so only the KV
+  /// write is enqueued. Unused until stage D (the device-resident hidden ring);
+  /// it exists now so that D becomes a caller change rather than a rewrite.
+  void PrimeTargetHiddenBatchDevice(
+      std::uint32_t start_position,
+      std::span<const tokenization::TokenId> successor_tokens,
+      const float* hidden_rows_device, std::size_t row_stride);
+
   [[nodiscard]] std::span<const float> CopyLastHidden();
   [[nodiscard]] std::span<const float> CopyLastLogits();
 
@@ -149,7 +176,8 @@ public:
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept;
   /// Per-session estimate for admission control, before a session exists.
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
-      const QwenMtpGpuModel& model, std::uint32_t max_context);
+      const QwenMtpGpuModel& model, std::uint32_t max_context,
+      std::uint32_t prime_chunk = kMtpDefaultPrimeChunk);
 
   [[nodiscard]] std::uint32_t GetNextPosition() const noexcept {
     return next_position_;
@@ -163,7 +191,7 @@ public:
 
 private:
   QwenMtpGpuExecutor(std::shared_ptr<const QwenMtpGpuModel> model,
-                     std::uint32_t max_context);
+                     std::uint32_t max_context, std::uint32_t prime_chunk);
 
   [[nodiscard]] tokenization::TokenId Run(tokenization::TokenId input_token,
                                           const float* hidden_input,
@@ -173,6 +201,15 @@ private:
   void Free() noexcept;
   friend class models::qwen::ContinuationAdapter;
   models::qwen::ContinuationHooks* continuation_hooks_{};
+  void AllocatePrimeScratch();
+  /// Shared body of both prime entry points. The two row sources are mutually
+  /// exclusive: `device_rows` is read directly, `host_rows` is staged through
+  /// `d_prime_hidden_` a slice at a time.
+  void PrimeRowsBatched(std::uint32_t start_position,
+                        std::span<const tokenization::TokenId> successor_tokens,
+                        const float* device_rows,
+                        std::size_t device_row_stride,
+                        const float* host_rows, std::size_t host_row_stride);
   /// Scatters a packed key plane/value plane pair into the head-major FP32
   /// cache; the caller owns the decode cursor.
   void RestoreCachePlanes(const std::uint8_t* packed,
@@ -180,6 +217,7 @@ private:
 
   std::shared_ptr<const QwenMtpGpuModel> model_;
   std::uint32_t max_context_;
+  std::uint32_t prime_chunk_;
   std::uint32_t next_position_{0};
   hipStream_t stream_{nullptr};
 
@@ -209,6 +247,16 @@ private:
 
   models::qwen::vision::DeviceInput* vision_input_{
       nullptr};  // owned by the target session
+  // Batched-prime scratch, sized by prime_chunk_ and empty when it is zero.
+  std::uint32_t* d_prime_tokens_{nullptr};
+  float* d_prime_hidden_{nullptr};
+  float* d_prime_embed_{nullptr};
+  float* d_prime_fusion_{nullptr};
+  float* d_prime_fusion_out_{nullptr};
+  float* d_prime_normed_{nullptr};
+  float* d_prime_k_{nullptr};
+  float* d_prime_v_{nullptr};
+  std::vector<std::uint32_t> h_prime_tokens_;
   std::vector<float> h_last_hidden_;
   std::vector<float> h_logits_;
   std::size_t scratch_bytes_{0};
@@ -217,6 +265,8 @@ private:
 struct QwenMtpGpuDraftConfig {
   std::uint32_t max_context{4096};
   std::uint32_t max_draft_tokens{4};
+  /// Rows per batched prime slice; `0` restores the legacy serial prime.
+  std::uint32_t prime_chunk{kMtpDefaultPrimeChunk};
   models::qwen::vision::DeviceInput* vision_input{nullptr};
 };
 
@@ -287,6 +337,7 @@ private:
   std::vector<float> target_hidden_;
   std::vector<float> proposal_target_hidden_;
   std::vector<float> committed_target_hidden_;
+  std::vector<float> append_hidden_rows_;
   std::vector<tokenization::TokenId> proposed_tokens_;
   tokenization::TokenId proposal_input_{0};
   std::uint32_t proposal_checkpoint_{0};

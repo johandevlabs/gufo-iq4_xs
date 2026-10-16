@@ -17,6 +17,7 @@
 #include "src/core/hip/snapshot_transfer.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
+#include "src/families/qwen/kernels/ops/moe.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -81,6 +82,53 @@ template<typename T>
   const std::size_t total_kv = MtpCachePlaneElements(config, max_context);
   return 2U * total_kv * sizeof(float) +
          2U * total_kv * sizeof(std::uint16_t);
+}
+
+/// Bytes of batched-prime scratch for `prime_chunk` rows. Mirrors
+/// AllocatePrimeScratch(); the two are asserted equal at construction so the
+/// "estimate == actual" gate cannot drift.
+[[nodiscard]] std::size_t MtpPrimeScratchBytes(const core::ModelConfig& config,
+                                               std::uint32_t prime_chunk) {
+  const std::size_t rows = prime_chunk;
+  if (rows == 0) {
+    return 0;
+  }
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t kv =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  return rows * sizeof(std::uint32_t) +        // d_prime_tokens_
+         rows * hidden * sizeof(float) * 4 +   // hidden_, embed_, out_, normed_
+         rows * 2 * hidden * sizeof(float) +   // fusion_
+         rows * 2 * kv * sizeof(float);        // k_, v_
+}
+
+/// Rows from which a prime projection switches to the WMMA GEMM, matching the
+/// DFlash2 context-injection threshold.
+constexpr std::size_t kMtpPrimeWmmaMinRows = 128;
+/// Rows per exact BF16 GEMM group below that threshold. The exact kernel's
+/// accumulation order matches the decode GEMV and does not depend on the batch
+/// width, so a one-row prime reproduces the legacy per-token arithmetic.
+constexpr std::size_t kMtpPrimeExactRows = 16;
+
+/// `out[rows, m] = x[rows, k] * weight[m, k]^T` for the BF16 MTP weights.
+void PrimeGemm(const models::QwenTensorRef& weight, const float* x, float* out,
+               std::size_t rows, std::size_t m, std::size_t k,
+               hipStream_t stream) {
+  if (weight.data == nullptr || rows == 0) {
+    return;
+  }
+  if (weight.type != core::GgmlType::kBF16) {
+    throw std::invalid_argument("MTP prime requires BF16 weights");
+  }
+  if (rows >= kMtpPrimeWmmaMinRows && IsMoeGroupedBf16GemmSupported(m, k, 1)) {
+    LaunchBf16WmmaGemm(weight.data, x, out, rows, m, k, stream);
+    return;
+  }
+  for (std::size_t offset = 0; offset < rows; offset += kMtpPrimeExactRows) {
+    const std::size_t group = std::min(kMtpPrimeExactRows, rows - offset);
+    LaunchExactBf16GEMMFp32SmallBatch(weight.data, x + (offset * k),
+                                      out + (offset * m), group, m, k, stream);
+  }
 }
 
 template<typename T>
@@ -162,9 +210,11 @@ std::size_t QwenMtpGpuSnapshot::SerializePersistent(
 }
 
 QwenMtpGpuExecutor::QwenMtpGpuExecutor(
-    std::shared_ptr<const QwenMtpGpuModel> model, std::uint32_t max_context)
+    std::shared_ptr<const QwenMtpGpuModel> model, std::uint32_t max_context,
+    std::uint32_t prime_chunk)
     : model_(std::move(model)),
       max_context_(max_context),
+      prime_chunk_(std::min(prime_chunk, max_context)),
       h_last_hidden_(model_->GetConfig().hidden_size),
       h_logits_(model_->GetConfig().vocab_size) {
   try {
@@ -185,7 +235,7 @@ QwenMtpGpuExecutor::~QwenMtpGpuExecutor() {
 
 std::unique_ptr<QwenMtpGpuExecutor> QwenMtpGpuExecutor::Create(
     std::shared_ptr<const QwenMtpGpuModel> model, std::uint32_t max_context,
-    std::string* error_msg) {
+    std::uint32_t prime_chunk, std::string* error_msg) {
   if (model == nullptr || max_context == 0 ||
       max_context > model->GetConfig().context_length) {
     if (error_msg != nullptr) {
@@ -193,9 +243,15 @@ std::unique_ptr<QwenMtpGpuExecutor> QwenMtpGpuExecutor::Create(
     }
     return nullptr;
   }
+  if (prime_chunk > max_context) {
+    // A chunk wider than the context is a single slice; clamping keeps the
+    // scratch proportional to the context, and EstimateMemoryUsage clamps
+    // identically.
+    prime_chunk = max_context;
+  }
   try {
     return std::unique_ptr<QwenMtpGpuExecutor>(
-        new QwenMtpGpuExecutor(std::move(model), max_context));
+        new QwenMtpGpuExecutor(std::move(model), max_context, prime_chunk));
   } catch (const std::exception& exception) {
     if (error_msg != nullptr) {
       *error_msg = exception.what();
@@ -254,6 +310,35 @@ void QwenMtpGpuExecutor::Allocate() {
                    detail::DecodeAttentionScratchElements(
                        config.num_attention_heads, config.head_dim));
   allocate_scratch(d_out_token_, 1);
+  AllocatePrimeScratch();
+}
+
+void QwenMtpGpuExecutor::AllocatePrimeScratch() {
+  if (prime_chunk_ == 0) {
+    return;
+  }
+  const auto& config = model_->GetConfig();
+  const std::size_t rows = prime_chunk_;
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t kv =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  const std::size_t before = scratch_bytes_;
+  const auto allocate = [this](auto*& pointer, std::size_t elements) {
+    AllocateBuffer(pointer, elements);
+    scratch_bytes_ += elements * sizeof(*pointer);
+  };
+  allocate(d_prime_tokens_, rows);
+  allocate(d_prime_hidden_, rows * hidden);
+  allocate(d_prime_embed_, rows * hidden);
+  allocate(d_prime_fusion_, rows * 2 * hidden);
+  allocate(d_prime_fusion_out_, rows * hidden);
+  allocate(d_prime_normed_, rows * hidden);
+  allocate(d_prime_k_, rows * kv);
+  allocate(d_prime_v_, rows * kv);
+  h_prime_tokens_.assign(rows, 0);
+  if (scratch_bytes_ - before != MtpPrimeScratchBytes(config, prime_chunk_)) {
+    throw std::logic_error("MTP prime scratch disagrees with its estimate");
+  }
 }
 
 std::size_t QwenMtpGpuExecutor::StateBytes() const noexcept {
@@ -272,7 +357,8 @@ QwenGpuMemoryUsage QwenMtpGpuExecutor::GetMemoryUsage() const noexcept {
 }
 
 QwenGpuMemoryUsage QwenMtpGpuExecutor::EstimateMemoryUsage(
-    const QwenMtpGpuModel& model, std::uint32_t max_context) {
+    const QwenMtpGpuModel& model, std::uint32_t max_context,
+    std::uint32_t prime_chunk) {
   const auto& config = model.GetConfig();
   if (max_context == 0 || max_context > config.context_length) {
     throw std::invalid_argument("MTP memory estimate has invalid limits");
@@ -311,6 +397,7 @@ QwenGpuMemoryUsage QwenMtpGpuExecutor::EstimateMemoryUsage(
                                              config.head_dim),
       sizeof(float));
   add(1, sizeof(std::uint32_t));
+  scratch += MtpPrimeScratchBytes(config, std::min(prime_chunk, max_context));
   return {
       .request_state_bytes = MtpStateBytes(config, max_context),
       .temporary_scratch_bytes = scratch,
@@ -346,6 +433,14 @@ void QwenMtpGpuExecutor::Free() noexcept {
   free_buffer(d_kv_cache_f16_);
   free_buffer(d_split_k_scratch_);
   free_buffer(d_out_token_);
+  free_buffer(d_prime_tokens_);
+  free_buffer(d_prime_hidden_);
+  free_buffer(d_prime_embed_);
+  free_buffer(d_prime_fusion_);
+  free_buffer(d_prime_fusion_out_);
+  free_buffer(d_prime_normed_);
+  free_buffer(d_prime_k_);
+  free_buffer(d_prime_v_);
   if (stream_ != nullptr) {
     (void)hipStreamDestroy(stream_);
     stream_ = nullptr;
@@ -492,6 +587,121 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
     throw std::runtime_error("MTP GPU result synchronization failed");
   }
   return CheckedSampleToken(result, config.vocab_size);
+}
+
+void QwenMtpGpuExecutor::PrimeTargetHiddenBatch(
+    std::uint32_t start_position,
+    std::span<const tokenization::TokenId> successor_tokens,
+    std::span<const float> hidden_rows) {
+  const std::size_t hidden = model_->GetConfig().hidden_size;
+  if (hidden_rows.size() != successor_tokens.size() * hidden) {
+    throw std::invalid_argument("MTP prime hidden rows are the wrong shape");
+  }
+  PrimeRowsBatched(start_position, successor_tokens, nullptr, 0,
+                   hidden_rows.data(), hidden);
+}
+
+void QwenMtpGpuExecutor::PrimeTargetHiddenBatchDevice(
+    std::uint32_t start_position,
+    std::span<const tokenization::TokenId> successor_tokens,
+    const float* hidden_rows_device, std::size_t row_stride) {
+  if (hidden_rows_device == nullptr) {
+    throw std::invalid_argument("MTP prime device rows are null");
+  }
+  PrimeRowsBatched(start_position, successor_tokens, hidden_rows_device,
+                   row_stride, nullptr, 0);
+}
+
+void QwenMtpGpuExecutor::PrimeRowsBatched(
+    std::uint32_t start_position,
+    std::span<const tokenization::TokenId> successor_tokens,
+    const float* device_rows, std::size_t device_row_stride,
+    const float* host_rows, std::size_t host_row_stride) {
+  const std::size_t count = successor_tokens.size();
+  if (count == 0) {
+    return;
+  }
+  if (prime_chunk_ == 0) {
+    throw std::logic_error("MTP batched prime needs a non-zero chunk");
+  }
+  if (start_position > max_context_ || count > max_context_ - start_position) {
+    throw std::out_of_range("MTP prime exceeds the executor context");
+  }
+  if ((device_rows == nullptr) == (host_rows == nullptr)) {
+    throw std::invalid_argument("MTP prime needs exactly one row source");
+  }
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeDraftWrite(
+        start_position, start_position + static_cast<std::uint32_t>(count));
+  const auto& weights = model_->GetWeights();
+  const auto& config = weights.config;
+  const auto& layer = weights.layer;
+  const std::size_t hidden = config.hidden_size;
+  const std::size_t kv =
+      static_cast<std::size_t>(config.num_key_value_heads) * config.head_dim;
+  const std::size_t total_kv = kv * max_context_;
+
+  for (std::size_t offset = 0; offset < count; offset += prime_chunk_) {
+    const std::size_t rows = std::min<std::size_t>(prime_chunk_, count - offset);
+    const std::uint32_t row_base =
+        start_position + static_cast<std::uint32_t>(offset);
+    // The stride-aware copy keeps the slice's activations packed, which every
+    // downstream kernel assumes.
+    const bool device_source = device_rows != nullptr;
+    const float* source_rows =
+        device_source ? device_rows + (offset * device_row_stride)
+                      : host_rows + (offset * host_row_stride);
+    const std::size_t source_stride =
+        device_source ? device_row_stride : host_row_stride;
+    HIP_CHECK(hipMemcpy2DAsync(
+        d_prime_hidden_, hidden * sizeof(float), source_rows,
+        source_stride * sizeof(float), hidden * sizeof(float), rows,
+        device_source ? hipMemcpyDeviceToDevice : hipMemcpyHostToDevice,
+        stream_));
+    std::copy_n(successor_tokens.begin() + offset, rows,
+                h_prime_tokens_.begin());
+    HIP_CHECK(hipMemcpyAsync(d_prime_tokens_, h_prime_tokens_.data(),
+                             rows * sizeof(std::uint32_t), hipMemcpyHostToDevice,
+                             stream_));
+
+    LaunchBatchedEmbeddingLookup(weights.token_embedding.data,
+                                 weights.token_embedding.type, d_prime_tokens_,
+                                 d_prime_embed_, rows, hidden, stream_);
+    if (vision_input_ != nullptr) {
+      // Mirrors Run()'s per-row offset: the MTP row at position `p` injects at
+      // `p + 1`, so a slice beginning at `row_base` injects from `row_base + 1`.
+      vision_input_->Inject(d_prime_embed_, row_base + 1,
+                            static_cast<std::uint32_t>(rows),
+                            static_cast<std::uint32_t>(hidden), 1, stream_);
+    }
+    LaunchBatchedRMSNormStrided(
+        d_prime_embed_, static_cast<const float*>(weights.embedding_norm.data),
+        d_prime_fusion_, 2 * hidden, rows, hidden, 1.0e-6F, stream_);
+    LaunchBatchedRMSNormStrided(
+        d_prime_hidden_, static_cast<const float*>(weights.hidden_norm.data),
+        d_prime_fusion_ + hidden, 2 * hidden, rows, hidden, 1.0e-6F, stream_);
+    PrimeGemm(weights.fusion_projection, d_prime_fusion_, d_prime_fusion_out_,
+              rows, hidden, 2 * hidden, stream_);
+    LaunchBatchedRMSNorm(
+        d_prime_fusion_out_, static_cast<const float*>(layer.attn_norm.data),
+        d_prime_normed_, nullptr, rows, hidden, 1.0e-6F, stream_);
+    PrimeGemm(layer.attn_k, d_prime_normed_, d_prime_k_, rows, kv, hidden,
+              stream_);
+    PrimeGemm(layer.attn_v, d_prime_normed_, d_prime_v_, rows, kv, hidden,
+              stream_);
+    // K/V write only: `num_heads = 0` disables the fused kernel's Q branch, and
+    // both f16 planes stay null because the FP32 plane is authoritative on the
+    // MTP path. The normed K lands back in `d_prime_k_`; attention reads the
+    // cache, not that buffer.
+    LaunchBatchedFusedQKNormRoPEKvWrite(
+        nullptr, d_prime_k_, d_prime_v_, nullptr,
+        static_cast<const float*>(layer.attn_k_norm.data), nullptr, d_prime_k_,
+        d_kv_cache_, d_kv_cache_ + total_kv, nullptr, nullptr, 0, row_base, rows,
+        max_context_, 0, config.num_key_value_heads, config.head_dim,
+        config.rotary_dim, config.rope_theta, 1.0e-6F, stream_,
+        vision_input_ != nullptr ? vision_input_->rope() : nullptr);
+  }
+  next_position_ = start_position + static_cast<std::uint32_t>(count);
 }
 
 std::span<const float> QwenMtpGpuExecutor::CopyLastHidden() {

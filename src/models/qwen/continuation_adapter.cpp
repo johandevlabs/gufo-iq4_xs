@@ -385,6 +385,7 @@ ContinuationAdapter::ContinuationAdapter(
     add(ContinuationPart::kMtpValue, row, 0);
     put(0x4d5450);
     put(mtp_config_.max_draft_tokens);
+    put(mtp_config_.prime_chunk);
     put(m.num_key_value_heads);
     put(m.head_dim);
     put(m.hidden_size);

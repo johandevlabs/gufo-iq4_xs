@@ -104,7 +104,8 @@ int main(int argc, const char* const* argv) {
     auto mtp_model =
         gufo::hip::QwenMtpGpuModel::Create(mtp_reader, target_model, &error);
     Expect(mtp_model != nullptr, error);
-    auto executor = gufo::hip::QwenMtpGpuExecutor::Create(mtp_model, 8, &error);
+    auto executor = gufo::hip::QwenMtpGpuExecutor::Create(
+        mtp_model, 8, gufo::hip::kMtpDefaultPrimeChunk, &error);
     Expect(executor != nullptr, error);
     const double setup_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() -
@@ -223,6 +224,181 @@ int main(int argc, const char* const* argv) {
            "MTP state estimate must match the allocation");
     Expect(estimate.temporary_scratch_bytes == actual.temporary_scratch_bytes,
            "MTP scratch estimate must match the allocation");
+
+    // ── Batched prompt prime (stage A) ──────────────────────────────────────
+    // The batched prime must reproduce the legacy per-token loop: the same KV
+    // rows, the same cursor, and the same next token and logits.
+    {
+      const std::size_t prompt_width = mtp_model->GetConfig().hidden_size;
+      constexpr std::size_t kPromptRows = 5;
+      std::vector<gufo::tokenization::TokenId> prompt_tokens;
+      std::vector<float> prompt_hidden;
+      for (std::size_t row = 0; row <= kPromptRows; ++row) {
+        prompt_tokens.push_back(
+            static_cast<gufo::tokenization::TokenId>(31 + row));
+        auto hidden = MakeTargetHidden(prompt_width);
+        for (auto& value : hidden) {
+          value += static_cast<float>(row);
+        }
+        prompt_hidden.insert(prompt_hidden.end(), hidden.begin(), hidden.end());
+      }
+      // Primed rows own positions [0, kPromptRows) and each contributes the
+      // hidden of its own position; the final prompt row stays uncached and
+      // seeds the next step, exactly as the backend's Propose does.
+      const auto prime_rows = std::span<const float>(
+          prompt_hidden.data(), kPromptRows * prompt_width);
+      const auto successor_tokens =
+          std::span<const gufo::tokenization::TokenId>(prompt_tokens.data() + 1,
+                                                       kPromptRows);
+      const auto last_hidden = std::span<const float>(
+          prompt_hidden.data() + (kPromptRows * prompt_width), prompt_width);
+      const auto decode =
+          [&](gufo::hip::QwenMtpGpuExecutor& target,
+              gufo::tokenization::TokenId input) {
+            const auto step = target.ForwardTargetHidden(
+                input, last_hidden, static_cast<std::uint32_t>(kPromptRows),
+                true);
+            const auto logits = target.CopyLastLogits();
+            return std::make_pair(
+                step, std::vector<float>(logits.begin(), logits.end()));
+          };
+
+      std::string prime_error;
+      auto legacy =
+          gufo::hip::QwenMtpGpuExecutor::Create(mtp_model, 8, 0, &prime_error);
+      Expect(legacy != nullptr, prime_error);
+      for (std::size_t row = 0; row < kPromptRows; ++row) {
+        (void)legacy->ForwardTargetHidden(
+            successor_tokens[row],
+            prime_rows.subspan(row * prompt_width, prompt_width),
+            static_cast<std::uint32_t>(row), false);
+      }
+      Expect(legacy->GetNextPosition() == kPromptRows, "legacy prime cursor");
+      const auto legacy_step = decode(*legacy, prompt_tokens.front());
+
+      // Chunk invariance: one row at a time, the prompt at once, and a chunk
+      // wider than both. This is what catches an off-by-one in the slice
+      // arithmetic.
+      for (const std::uint32_t chunk : {1U, 5U, 8U}) {
+        auto batched = gufo::hip::QwenMtpGpuExecutor::Create(mtp_model, 8, chunk,
+                                                             &prime_error);
+        Expect(batched != nullptr, prime_error);
+        batched->PrimeTargetHiddenBatch(0, successor_tokens, prime_rows);
+        Expect(batched->GetNextPosition() == kPromptRows,
+               "batched prime cursor");
+        const auto batched_step = decode(*batched, prompt_tokens.front());
+        Expect(batched_step.first == legacy_step.first,
+               "batched prime must reproduce the legacy next token");
+        const auto logit_comparison =
+            Compare(batched_step.second, legacy_step.second);
+        Expect(logit_comparison.cosine > 0.99999,
+               "batched prime logit cosine");
+        Expect(logit_comparison.max_abs < 1.0e-2F,
+               "batched prime logit drift");
+      }
+
+      // The estimate must track the chunk it is sized for, including the
+      // legacy (zero-chunk) and clamped configurations.
+      for (const std::uint32_t chunk : {0U, 1U, 3U, 8U}) {
+        auto sized = gufo::hip::QwenMtpGpuExecutor::Create(mtp_model, 8, chunk,
+                                                           &prime_error);
+        Expect(sized != nullptr, prime_error);
+        const auto sized_estimate =
+            gufo::hip::QwenMtpGpuExecutor::EstimateMemoryUsage(*mtp_model, 8,
+                                                               chunk);
+        const auto sized_actual = sized->GetMemoryUsage();
+        Expect(sized_estimate.temporary_scratch_bytes ==
+                   sized_actual.temporary_scratch_bytes,
+               "MTP prime scratch estimate must match the allocation");
+        Expect(sized_estimate.request_state_bytes ==
+                   sized_actual.request_state_bytes,
+               "MTP prime state estimate must match the allocation");
+      }
+
+      // Append identity: extending a primed prefix with more rows must
+      // reproduce the per-row extension's cursor, next token and logits. This
+      // is what the backend's batched AppendTargetContext rides on: the row at
+      // draft position `pos + j` consumes the suffix token at `j` and the
+      // trunk hidden of `j - 1`, with the primed prefix's own final hidden
+      // reaching row `start_position`.
+      constexpr std::size_t kExtendRows = 2;
+      std::vector<gufo::tokenization::TokenId> extend_tokens;
+      std::vector<float> extend_hidden;
+      for (std::size_t row = 0; row < kExtendRows; ++row) {
+        extend_tokens.push_back(
+            static_cast<gufo::tokenization::TokenId>(41 + row));
+        auto hidden = MakeTargetHidden(prompt_width);
+        for (auto& value : hidden) {
+          value -= 17.0F * static_cast<float>(row + 1);
+        }
+        extend_hidden.insert(extend_hidden.end(), hidden.begin(),
+                             hidden.end());
+      }
+      const auto extend_last_hidden = std::span<const float>(
+          extend_hidden.data() + ((kExtendRows - 1) * prompt_width),
+          prompt_width);
+      const auto extend_step =
+          [&](gufo::hip::QwenMtpGpuExecutor& target) {
+            const auto token = target.ForwardTargetHidden(
+                extend_tokens.front() + kExtendRows + 1, extend_last_hidden,
+                static_cast<std::uint32_t>(kPromptRows + kExtendRows), true);
+            const auto logits = target.CopyLastLogits();
+            return std::make_pair(
+                token, std::vector<float>(logits.begin(), logits.end()));
+          };
+      std::vector<float> append_seed(last_hidden.begin(), last_hidden.end());
+      auto extended_legacy =
+          gufo::hip::QwenMtpGpuExecutor::Create(mtp_model, 8, 8, &prime_error);
+      Expect(extended_legacy != nullptr, prime_error);
+      extended_legacy->PrimeTargetHiddenBatch(0, successor_tokens, prime_rows);
+      std::vector<float> extend_rolling(append_seed);
+      for (std::size_t row = 0; row < kExtendRows; ++row) {
+        (void)extended_legacy->ForwardTargetHidden(
+            extend_tokens[row],
+            std::span<const float>(extend_rolling.data(), prompt_width),
+            static_cast<std::uint32_t>(kPromptRows + row), false);
+        extend_rolling.assign(
+            extend_hidden.begin() +
+                static_cast<std::ptrdiff_t>(row * prompt_width),
+            extend_hidden.begin() +
+                static_cast<std::ptrdiff_t>((row + 1) * prompt_width));
+      }
+      Expect(extended_legacy->GetNextPosition() == kPromptRows + kExtendRows,
+             "legacy append cursor");
+      Expect(std::vector<float>(extend_rolling.begin(), extend_rolling.end()) ==
+                 std::vector<float>(extend_last_hidden.begin(),
+                                    extend_last_hidden.end()),
+             "legacy append rolling hidden");
+      const auto extended_legacy_step = extend_step(*extended_legacy);
+      for (const std::uint32_t chunk : {1U, 5U, 8U}) {
+        auto extended_batched = gufo::hip::QwenMtpGpuExecutor::Create(
+            mtp_model, 8, chunk, &prime_error);
+        Expect(extended_batched != nullptr, prime_error);
+        extended_batched->PrimeTargetHiddenBatch(0, successor_tokens,
+                                                 prime_rows);
+        // The backend's append ladder: the primed prefix's rolling hidden,
+        // then the suffix hiddens 0..kExtendRows-2.
+        std::vector<float> append_rows(append_seed);
+        append_rows.insert(append_rows.end(), extend_hidden.begin(),
+                           extend_hidden.begin() +
+                               static_cast<std::ptrdiff_t>(
+                                   (kExtendRows - 1) * prompt_width));
+        extended_batched->PrimeTargetHiddenBatch(
+            static_cast<std::uint32_t>(kPromptRows), extend_tokens,
+            append_rows);
+        Expect(extended_batched->GetNextPosition() == kPromptRows + kExtendRows,
+               "batched append cursor");
+        const auto extended_batched_step = extend_step(*extended_batched);
+        Expect(extended_batched_step.first == extended_legacy_step.first,
+               "batched append must reproduce the legacy next token");
+        const auto extend_comparison =
+            Compare(extended_batched_step.second, extended_legacy_step.second);
+        Expect(extend_comparison.cosine > 0.99999,
+               "batched append logit cosine");
+        Expect(extend_comparison.max_abs < 1.0e-2F,
+               "batched append logit drift");
+      }
+    }
 
     const auto& execution_config = mtp_model->GetConfig();
     const std::size_t kv_width =
