@@ -104,6 +104,126 @@ The compiler matters on its own: the same source built with the ROCm 7.1
 compiler prefills about 2% slower (pp4096 2952 against 3004 t/s before the BF16
 route) and decodes at 54.2 against 55.5 t/s.
 
+## MTP decode
+
+| Quant, draft tokens | tg128-mtp (t/s) | tg128 without MTP (t/s) | gain |
+| --- | ---: | ---: | ---: |
+| UD-Q8_K_XL, n=1 | 60.23 ± 0.08 | 51.59 | +16.7% |
+| UD-Q8_K_XL, n=2 | 65.01 ± 0.08 | 51.59 | +26.0% |
+| UD-Q6_K_XL, n=1 | 63.53 ± 0.21 | 54.02 | +17.6% |
+| UD-Q6_K_XL, n=2 | 68.39 ± 0.54 | 54.02 | +26.6% |
+
+MTP uses the draft head embedded in the same GGUF (`--speculative mtp
+--mtp-model <same file> --draft-tokens N --min-draft-tokens N`). Acceptance
+depends on the generated text; these numbers use the benchmark's synthetic
+prompt. The draft step costs about the same on both quants; an earlier
+UD-Q8_K_XL run favoured n=1, so treat the n=1/n=2 gap on that quant as
+run-dependent.
+
+## llama.cpp Vulkan comparison
+
+The ROCm fork above is not llama.cpp's fastest backend on this chip. Against
+upstream llama.cpp `b81c99b47` on Vulkan (RADV, Mesa 26.1.7, `-fa 1`, no mmap;
+prefill is the better of the default ubatch and `-ub 2048 -b 2048`), measured
+September 27, 2026 with the same GGUFs, 3 repetitions:
+
+| Test | UD-Q6_K_XL gufo | llama.cpp | gain | UD-Q8_K_XL gufo | llama.cpp | gain |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pp512 | 1789.6 | 1074.2 | +66.6% | 1483.6 | 1114.1 | +33.2% |
+| pp2048 | 2579.7 | 1230.6 | +109.6% | 2325.7 | 1256.7 | +85.1% |
+| pp4096 | 2702.1 | 1202.0 | +124.8% | 2383.6 | 1225.4 | +94.5% |
+| pp16384 | 2409.2 | 1057.1 | +127.9% | 2175.1 | 1072.3 | +102.8% |
+| tg128 | 54.5 | 56.4 | −3.3% | 50.8 | 46.2 | +9.9% |
+| tg128 @ d16384 | 47.6 | 50.8 | −6.3% | 45.5 | 43.2 | +5.3% |
+| tg128 @ d32768 | 42.3 | 46.6 | −9.4% | 40.5 | 39.7 | +2.0% |
+
+Plain UD-Q6_K_XL decode trails Vulkan llama.cpp by 3-9%.
+
+## Serving
+
+### MTP and DFlash2 on v0.17.1, October 2026
+
+`gufo serve --sessions 4`, UD-Q6_K_XL, context 262144, `--prefill-chunk 2048
+--prefill-decode-rounds 8`, rebased on upstream `ef15911`, measured October 19,
+2026 over HTTP, greedy, thinking off, one run per row. Short prompts generate
+300 tokens; the cold rows feed that many tokens of a source-code corpus with
+a prose question and generate 400. DFlash2 uses the Q8_0 draft with
+`--draft-tokens 7 --draft-policy adaptive`; MTP uses the GGUF's own head with
+`--draft-tokens 2`. Every MTP output is byte-identical to the DFlash2 output
+for the same prompt.
+
+| Workload | DFlash2 prefill (t/s) | MTP prefill (t/s) | DFlash2 decode (t/s) | MTP decode (t/s) |
+| --- | ---: | ---: | ---: | ---: |
+| short prompts (code, prose, explain, JSON) | — | — | 117 / 60 / 85 / 136 | 82 / 62 / 76 / 86 |
+| cold 4K | 2819 | 3143 | 75.3 | 69.5 |
+| cold 16K | 2770 | 2841 | 67.1 | 67.3 |
+| cold 32K | 2523 | 2671 | 63.7 | 62.9 |
+| cold 64K | 2221 | 2203 | 63.8 | 56.6 |
+| cold 128K | 1670 | 1671 | 54.4 | 45.1 |
+| 2 / 4 concurrent short requests, total | — | — | 95.6 / 122.3 | 83.1 / 114.2 |
+
+MTP skips the draft's context projection during prefill, which is why it
+prefills short and medium prompts faster. With two or more active requests the
+server only speculates with DFlash2, so MTP decodes at the plain rate there.
+
+The same day, on the same workload, the build before the rebase (identical
+35B code, older base) swept the MTP draft cap. Decode t/s:
+
+| Workload | no draft | MTP n=1 | MTP n=2 | MTP n=3 |
+| --- | ---: | ---: | ---: | ---: |
+| cold 4K | 54.5 | 65.9 | 69.4 | 66.6 |
+| cold 16K | 51.9 | 63.2 | 67.2 | 64.0 |
+| cold 32K | 48.7 | 58.0 | 62.7 | 61.7 |
+| cold 64K | 43.5 | 52.4 | 52.6 | 55.6 |
+| cold 128K | 36.3 | 43.3 | 45.0 | 42.5 |
+
+n=2 is the best cap on this workload; n=3 only wins at 64K and on short code
+and JSON answers.
+
+### DFlash2, September 2026
+
+`gufo serve` on the September branch, with the concurrent draft cap and BF16
+context injection as they first landed (draft caps 3 / 2 / 1), 4 sessions,
+context 262144, DFlash2 Q8_0 draft,
+`--draft-tokens 7 --draft-policy adaptive`), UD-Q6_K_XL, over HTTP with a
+synchronized client, thinking off. Measured September 27, 2026.
+
+Single-request prefill (fresh random prompt per request, one output token),
+before and after moving the draft's context injection to the BF16 WMMA GEMM:
+
+| Prompt (tokens) | no draft | DFlash2 before | DFlash2 after |
+| ---: | ---: | ---: | ---: |
+| 520 | 1882 | 1451 | 1752 |
+| 1630 | 2672 | 1871 | 2357 |
+| 6420 | 2706 | 2104 | 2521 |
+| 16000 | 2495 | 2076 | 2386 |
+
+Concurrent decode, 512 sampled tokens (temperature 0.6, top-p 0.95, top-k 20)
+from four mixed prompts (story, TCP explanation, Python module, Markdown
+table), rotated so each level sees the same mix. Rates are the sum of
+individual request decode rates per concurrent group, averaged over groups;
+the concurrent draft cap shortens drafts to 3 / 2 / 1 tokens at 2 / 3 / 4
+active requests:
+
+| Concurrent requests | DFlash2 (t/s) | no draft (t/s) |
+| ---: | ---: | ---: |
+| 1 | 62.7 | 53.9 |
+| 2 | 94.1 | not measured |
+| 3 | 98.8 | not measured |
+| 4 | 109.4 | 108.4 |
+
+Without the cap (7-token drafts), 4 concurrent requests reached 88.7 t/s in
+whole-request throughput, against 106.1 with it.
+
+Prefill while other sessions decode is bounded by `--prefill-chunk`. A
+6.5K-token prompt arriving while one session streams:
+
+| `--prefill-chunk` | new prompt TTFT (s) | its prefill (t/s) | longest decode stall (s) |
+| ---: | ---: | ---: | ---: |
+| 512 (default) | 4.20 | 1862 | 0.37 |
+| 1024 | 3.37 | 2190 | 0.52 |
+| 2048 | 3.09 | 2330 | 0.89 |
+
 ## Qwen3.8 27B regression (UD-Q8_K_XL)
 
 Confirms the shared attention/GDN path is unchanged by the MoE work.
