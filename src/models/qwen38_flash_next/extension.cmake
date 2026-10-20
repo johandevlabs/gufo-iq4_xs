@@ -88,7 +88,7 @@ if (ENGINE_ENABLE_HIP)
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR}
     ${ROCWMMA_INCLUDE_DIR})
-  target_link_libraries(gufo_qwen38_flash_next_kernels PUBLIC hip::host)
+  target_link_libraries(gufo_qwen38_flash_next_kernels PUBLIC hip::host roc::hipblas)
 endif()
 
 gufo_extension_target(
