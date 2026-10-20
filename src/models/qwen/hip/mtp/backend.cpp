@@ -350,6 +350,118 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
   return proposal;
 }
 
+std::vector<speculative::DraftProposal>
+QwenMtpGpuDraftBackend::ProposeBatch(
+    std::span<const speculative::DraftProposalRequest> requests) {
+  if (requests.size() < 2 || requests.size() > kMtpMaxChainTokens)
+    return IDraftBackend::ProposeBatch(requests);
+  // First cut: greedy cohorts only. A sampled or mixed cohort keeps the
+  // serial per-session path so its lossless semantics stay untouched.
+  for (const auto& request : requests) {
+    if (request.temperature != 0.0F)
+      return IDraftBackend::ProposeBatch(requests);
+  }
+  std::array<QwenMtpGpuDraftBackend*, kMtpMaxChainTokens> backends{};
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    auto* backend =
+        dynamic_cast<QwenMtpGpuDraftBackend*>(requests[index].backend);
+    if (backend == nullptr || &backend->executor_->GetModel() !=
+                                  &executor_->GetModel())
+      return IDraftBackend::ProposeBatch(requests);
+    backends[index] = backend;
+  }
+  // Validate every request before any cache or cursor mutation. The checks
+  // reproduce serial Propose's invariants so a rejected cohort matches what
+  // the per-session path would have rejected.
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    const auto& backend = *backends[index];
+    if (!backend.primed_ || request.tokens.empty() || request.position == 0 ||
+        backend.proposal_active_ ||
+        backend.executor_->GetNextPosition() + 1 != request.position)
+      throw std::invalid_argument("MTP proposal batch has an invalid request");
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      if (backends[previous] == backends[index])
+        throw std::invalid_argument("MTP proposal batch repeats a session");
+    }
+  }
+  struct SessionState {
+    speculative::DraftProposal proposal;
+    tokenization::TokenId input{0};
+    std::uint32_t checkpoint{0};
+    std::uint32_t count{0};
+  };
+  std::vector<SessionState> sessions(requests.size());
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& request = requests[index];
+    const auto& backend = *backends[index];
+    const auto count = std::min(request.max_tokens, backend.config_.max_draft_tokens);
+    if (backend.executor_->GetNextPosition() + count >
+        backend.executor_->GetMaxContext()) {
+      throw std::invalid_argument(
+          "MTP proposal batch exceeds a session context limit");
+    }
+    sessions[index].proposal.start_pos = request.position;
+    sessions[index].input = request.tokens.back();
+    sessions[index].checkpoint = backend.executor_->GetNextPosition();
+    sessions[index].count = count;
+  }
+  // Stage the per-session serial Propose state, enqueue both chains, and only
+  // then perform the single collect synchronization per executor.
+  try {
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+      auto& backend = *backends[index];
+      auto& session = sessions[index];
+      backend.proposal_checkpoint_ = session.checkpoint;
+      backend.proposal_input_ = session.input;
+      backend.proposal_target_hidden_ = backend.target_hidden_;
+      backend.committed_target_hidden_.clear();
+      backend.proposed_tokens_.clear();
+      if (session.count == 0) {
+        continue;
+      }
+      backend.executor_->StartDraftChain(
+          session.input, backend.target_hidden_, session.count);
+    }
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+      auto& backend = *backends[index];
+      auto& session = sessions[index];
+      if (session.count == 0) {
+        continue;
+      }
+      backend.proposed_tokens_ = backend.executor_->CollectChainTokens();
+      session.proposal.tokens = backend.proposed_tokens_;
+      backend.proposal_active_ = true;
+    }
+  } catch (...) {
+    // A failed batch must leave every touched session at its committed
+    // frontier, exactly as a cancelled proposal discards its rows.
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+      auto& backend = *backends[index];
+      auto& session = sessions[index];
+      try {
+        if (backend.proposal_active_ ||
+            backend.executor_->GetNextPosition() != session.checkpoint) {
+          backend.executor_->Rewind(session.checkpoint);
+        }
+      } catch (const std::exception& rollback_error) {
+        backend.last_error_ = rollback_error.what();
+      }
+      backend.committed_target_hidden_.clear();
+      backend.proposal_target_hidden_.clear();
+      backend.proposed_tokens_.clear();
+      backend.proposal_active_ = false;
+    }
+    throw;
+  }
+  std::vector<speculative::DraftProposal> proposals;
+  proposals.reserve(requests.size());
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    proposals.push_back(std::move(sessions[index].proposal));
+  }
+  return proposals;
+}
+
 void QwenMtpGpuDraftBackend::AcceptFeedback(
     std::span<const tokenization::TokenId> accepted,
     tokenization::TokenId correction_token) {

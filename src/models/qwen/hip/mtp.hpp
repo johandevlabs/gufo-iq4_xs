@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <gufo/ext/draft_backend.hpp>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -22,6 +23,12 @@ namespace gufo::hip {
 /// so it trades a bounded scratch reservation against the number of batched
 /// GEMM launches. `0` selects the legacy per-token serial prime.
 inline constexpr std::uint32_t kMtpDefaultPrimeChunk = 1024;
+
+/// Device slot budget for one batched draft chain. The chain stages every
+/// proposed token on the device so that successive steps embed the previous
+/// step's argmax without a host round trip; either `8` covers every supported
+/// per-request cap today.
+inline constexpr std::uint32_t kMtpMaxChainTokens = 8;
 
 /// Immutable GPU-visible MTP layer weights. Current GGUF K-quant matrices are
 /// expanded once to BF16; the tied embedding and LM head remain shared with
@@ -140,6 +147,20 @@ public:
       tokenization::TokenId input_token, std::uint32_t position,
       bool compute_logits = true);
 
+  /// Enqueues `count` draft steps that mirror the serial Propose loop without
+  /// the per-token host round trip. Step 0 embeds `input_token` against the
+  /// host `target_hidden` (staged once, as ForwardTargetHidden does); every
+  /// later step embeds the device-resident argmax token of its predecessor.
+  /// The per-step arithmetic, launch order and cursor semantics equal the
+  /// serial path bit for bit, so batched and serial proposals agree exactly.
+  /// `CollectChainTokens()` performs the single synchronization that lands the
+  /// proposal tokens on the host, and nothing but `GetNextPosition()` may be
+  /// called on this executor between the two calls.
+  void StartDraftChain(tokenization::TokenId input_token,
+                       std::span<const float> target_hidden,
+                       std::uint32_t count);
+  [[nodiscard]] std::vector<tokenization::TokenId> CollectChainTokens();
+
   /// Batched, projection-only prompt prime (MTP priming plan, stage A). Writes
   /// KV rows for `count` consecutive positions beginning at `start_position`,
   /// from the trunk hidden rows that own those positions; `successor_tokens[i]`
@@ -185,6 +206,9 @@ public:
   [[nodiscard]] std::uint32_t GetMaxContext() const noexcept {
     return max_context_;
   }
+  [[nodiscard]] const QwenMtpGpuModel& GetModel() const noexcept {
+    return *model_;
+  }
   [[nodiscard]] std::size_t GetHiddenSize() const noexcept {
     return model_->GetConfig().hidden_size;
   }
@@ -215,6 +239,22 @@ private:
   void RestoreCachePlanes(const std::uint8_t* packed,
                           std::uint32_t valid_context, hipMemcpyKind kind);
 
+  /// Throws while a batched draft chain is between StartDraftChain and
+  /// CollectChainTokens: nothing may touch the chain's device state or cursor.
+  void RequireChainIdle() const;
+
+  /// One full draft forward. `source.d_token` selects the device-token
+  /// embedding path used by chain steps 1..n-1; otherwise `source.h_token` is
+  /// embedded by value as today. `argmax_slot` below kMtpMaxChainTokens
+  /// redirects the argmax into that proposal slot and skips the legacy
+  /// synchronizing readback; kChainNoSlot keeps the serial behavior exactly.
+  static constexpr std::uint32_t kChainNoSlot = std::numeric_limits<
+      std::uint32_t>::max();
+  void RunDraftForward(const std::uint32_t* source_d_token,
+                       tokenization::TokenId source_h_token,
+                       const float* hidden_input, std::uint32_t position,
+                       std::uint32_t argmax_slot, bool compute_logits);
+
   std::shared_ptr<const QwenMtpGpuModel> model_;
   std::uint32_t max_context_;
   std::uint32_t prime_chunk_;
@@ -241,6 +281,11 @@ private:
   void* d_kv_cache_f16_{nullptr};
   float* d_split_k_scratch_{nullptr};
   std::uint32_t* d_out_token_{nullptr};
+  // Device proposal-token slots for batched draft chains; sized
+  // kMtpMaxChainTokens so estimate and allocation stay exact.
+  std::uint32_t* d_chain_tokens_{nullptr};
+  std::uint32_t chain_slots_{0};
+  bool chain_active_{false};
   // One-token MoE FFN scratch; allocated only for MoE targets.
   std::uint8_t* d_moe_{nullptr};
   QwenMoeScratch moe_{};
@@ -299,6 +344,14 @@ public:
   [[nodiscard]] speculative::DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) override;
+
+  /// Batched greedy proposal across sessions, mirroring the DFlash2 backend
+  /// contract: two to eight primed backends on one shared model, validated
+  /// before any state changes, with per-session launch-free device chaining
+  /// between steps. Greedy cohorts only in this first cut; mixed or sampled
+  /// cohorts take the serial default so their semantics stay untouched.
+  [[nodiscard]] std::vector<speculative::DraftProposal> ProposeBatch(
+      std::span<const speculative::DraftProposalRequest> requests) override;
 
   void AcceptFeedback(std::span<const tokenization::TokenId> accepted,
                       tokenization::TokenId correction_token) override;
