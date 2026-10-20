@@ -160,11 +160,16 @@ for the same prompt.
 | cold 32K | 2523 | 2671 | 63.7 | 62.9 |
 | cold 64K | 2221 | 2203 | 63.8 | 56.6 |
 | cold 128K | 1670 | 1671 | 54.4 | 45.1 |
-| 2 / 4 concurrent short requests, total | — | — | 95.6 / 122.3 | 83.1 / 114.2 |
+| 2 / 4 concurrent short requests, total | — | — | 95.6 / 122.3 | 85.4 / 111.0 |
 
 MTP skips the draft's context projection during prefill, which is why it
-prefills short and medium prompts faster. With two or more active requests the
-server only speculates with DFlash2, so MTP decodes at the plain rate there.
+prefills short and medium prompts faster. Concurrent MTP requests verify in one
+batched step: at 2 / 3 / 4 requests they total 85.4 / 99.1 / 111.0 t/s against
+83.0 / 101.7 / 114.2 without a draft, with completions byte-identical to the
+same prompts sent alone. Before that, concurrent MTP sessions took the
+single-token path, which rejects speculative sessions and does not advance the
+draft: requests with stop strings, a JSON schema or the batch endpoint failed,
+and some returned corrupted text.
 
 The same day, on the same workload, the build before the rebase (identical
 35B code, older base) swept the MTP draft cap. Decode t/s:
