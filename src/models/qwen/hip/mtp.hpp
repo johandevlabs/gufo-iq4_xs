@@ -6,12 +6,14 @@
 #include <gufo/ext/draft_backend.hpp>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/mtp_draft_vocab.hpp"
 #include "src/models/qwen/mtp_reference.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
@@ -59,13 +61,29 @@ public:
   [[nodiscard]] double GetPackTimeSeconds() const noexcept {
     return pack_time_seconds_;
   }
+  /// Whether proposals may score the small draft head (mtp_draft_vocab.hpp).
+  [[nodiscard]] bool HasDraftVocab() const noexcept {
+    return draft_specials_.has_value();
+  }
+  /// The special tokens that open every session's draft table.
+  [[nodiscard]] std::span<const std::int32_t> GetDraftSpecials()
+      const noexcept {
+    return draft_specials_ ? std::span<const std::int32_t>(*draft_specials_)
+                           : std::span<const std::int32_t>();
+  }
+  /// Bytes of one output-head row; nonzero when HasDraftVocab().
+  [[nodiscard]] std::size_t GetOutputRowBytes() const noexcept {
+    return output_row_bytes_;
+  }
 
 private:
   QwenMtpGpuModel(std::shared_ptr<const core::GgufReader> mtp_reader,
                   std::shared_ptr<const QwenGpuModel> target_model,
                   speculative::QwenMtpWeights weights,
                   std::vector<void*> allocations,
-                  std::size_t packed_weight_bytes, double pack_time_seconds);
+                  std::size_t packed_weight_bytes, double pack_time_seconds,
+                  std::optional<std::vector<std::int32_t>> draft_specials,
+                  std::size_t output_row_bytes);
 
   std::shared_ptr<const core::GgufReader> mtp_reader_;
   std::shared_ptr<const QwenGpuModel> target_model_;
@@ -73,6 +91,8 @@ private:
   std::vector<void*> allocations_;
   std::size_t packed_weight_bytes_{0};
   double pack_time_seconds_{0.0};
+  std::optional<std::vector<std::int32_t>> draft_specials_;
+  std::size_t output_row_bytes_{0};
 };
 
 /// Frozen MTP attention cache at a committed proposal boundary. The
@@ -139,13 +159,16 @@ public:
   /// the caller may reuse once this returns.
   void Synchronize();
 
+  /// `small_head` scores the prefix rows and this executor's draft table
+  /// instead of the full output head; it needs HasDraftVocab().
   [[nodiscard]] tokenization::TokenId ForwardTargetHidden(
       tokenization::TokenId input_token, std::span<const float> target_hidden,
-      std::uint32_t position, bool compute_logits = true);
+      std::uint32_t position, bool compute_logits = true,
+      bool small_head = false);
 
   [[nodiscard]] tokenization::TokenId ForwardFeedback(
       tokenization::TokenId input_token, std::uint32_t position,
-      bool compute_logits = true);
+      bool compute_logits = true, bool small_head = false);
 
   /// Enqueues `count` draft steps that mirror the serial Propose loop without
   /// the per-token host round trip. Step 0 embeds `input_token` against the
@@ -158,8 +181,20 @@ public:
   /// called on this executor between the two calls.
   void StartDraftChain(tokenization::TokenId input_token,
                        std::span<const float> target_hidden,
-                       std::uint32_t count);
+                       std::uint32_t count, bool small_head = false);
   [[nodiscard]] std::vector<tokenization::TokenId> CollectChainTokens();
+
+  /// Draft-table rows in use: the model's special tokens, then the rows
+  /// appended since the last ResetDraftRows(). Zero without a draft table.
+  [[nodiscard]] std::uint32_t GetDraftRows() const noexcept {
+    return draft_rows_;
+  }
+  /// Keeps only the special-token rows. Later rows stay on the device
+  /// unread until they are overwritten.
+  void ResetDraftRows();
+  /// Copies the output-head rows of `ids` into the table after the rows in
+  /// use.
+  void AppendDraftRows(std::span<const std::int32_t> ids);
 
   /// Batched, projection-only prompt prime (MTP priming plan, stage A). Writes
   /// KV rows for `count` consecutive positions beginning at `start_position`,
@@ -183,6 +218,7 @@ public:
       const float* hidden_rows_device, std::size_t row_stride);
 
   [[nodiscard]] std::span<const float> CopyLastHidden();
+  /// The full head's logits; a small-head forward leaves them partial.
   [[nodiscard]] std::span<const float> CopyLastLogits();
 
   /// Captures the committed cache prefix. Requires a committed proposal
@@ -220,7 +256,7 @@ private:
   [[nodiscard]] tokenization::TokenId Run(tokenization::TokenId input_token,
                                           const float* hidden_input,
                                           std::uint32_t position,
-                                          bool compute_logits);
+                                          bool compute_logits, bool small_head);
   void Allocate();
   void Free() noexcept;
   friend class models::qwen::ContinuationAdapter;
@@ -252,7 +288,8 @@ private:
   void RunDraftForward(const std::uint32_t* source_d_token,
                        tokenization::TokenId source_h_token,
                        const float* hidden_input, std::uint32_t position,
-                       std::uint32_t argmax_slot, bool compute_logits);
+                       std::uint32_t argmax_slot, bool compute_logits,
+                       bool small_head);
 
   std::shared_ptr<const QwenMtpGpuModel> model_;
   std::uint32_t max_context_;
@@ -285,6 +322,11 @@ private:
   std::uint32_t* d_chain_tokens_{nullptr};
   std::uint32_t chain_slots_{0};
   bool chain_active_{false};
+  // Draft table (mtp_draft_vocab.hpp): kMtpDraftExtraRows output-head rows
+  // and their token IDs; allocated only when the model HasDraftVocab().
+  std::uint8_t* d_draft_rows_{nullptr};
+  std::int32_t* d_draft_ids_{nullptr};
+  std::uint32_t draft_rows_{0};
   // One-token MoE FFN scratch; allocated only for MoE targets.
   std::uint8_t* d_moe_{nullptr};
   QwenMoeScratch moe_{};
@@ -357,6 +399,7 @@ public:
 
   void UpdateTargetHidden(std::span<const float> hidden) override;
   void Reset() noexcept override;
+  void BeginRequest() noexcept override;
 
   /// Drops an uncommitted proposal and rewinds the draft to the committed
   /// frontier, so a cancelled verification resumes from `position`. MTP's cache
@@ -385,6 +428,11 @@ private:
                          QwenMtpGpuDraftConfig config);
   friend class models::qwen::ContinuationAdapter;
 
+  /// Brings the draft table up to `tokens` (the proposal's sequence, ending
+  /// in its anchor) and returns whether the proposal scores the small head.
+  [[nodiscard]] bool SyncDraftVocab(
+      std::span<const tokenization::TokenId> tokens);
+
   std::unique_ptr<QwenMtpGpuExecutor> executor_;
   QwenMtpGpuDraftConfig config_;
   std::vector<float> target_hidden_;
@@ -394,6 +442,7 @@ private:
   std::vector<tokenization::TokenId> proposed_tokens_;
   tokenization::TokenId proposal_input_{0};
   std::uint32_t proposal_checkpoint_{0};
+  std::optional<speculative::QwenMtpDraftTable> draft_table_;
   bool primed_{false};
   bool proposal_active_{false};
   std::string last_error_;

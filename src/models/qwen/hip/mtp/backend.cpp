@@ -9,6 +9,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -164,7 +165,45 @@ QwenMtpGpuDraftBackend::QwenMtpGpuDraftBackend(
     std::unique_ptr<QwenMtpGpuExecutor> executor, QwenMtpGpuDraftConfig config)
     : executor_(std::move(executor)),
       config_(config),
-      target_hidden_(executor_->GetHiddenSize()) {}
+      target_hidden_(executor_->GetHiddenSize()) {
+  const auto& model = executor_->GetModel();
+  if (model.HasDraftVocab()) {
+    const auto specials = model.GetDraftSpecials();
+    draft_table_.emplace(
+        std::vector<std::int32_t>(specials.begin(), specials.end()));
+  }
+}
+
+bool QwenMtpGpuDraftBackend::SyncDraftVocab(
+    std::span<const tokenization::TokenId> tokens) {
+  if (!draft_table_) {
+    return false;
+  }
+  // Table upkeep never fails a proposal: an inconsistent table drafts over
+  // the full head and rebuilds next time. Device errors still propagate.
+  const auto fall_back = [&](std::string_view reason) {
+    draft_table_->Forget();
+    last_error_ = reason;
+    return false;
+  };
+  try {
+    const auto update = draft_table_->Sync(tokens);
+    if (update.restart) {
+      executor_->ResetDraftRows();
+    }
+    executor_->AppendDraftRows(update.added);
+  } catch (const std::logic_error& error) {
+    return fall_back(error.what());
+  } catch (...) {
+    // The device table may hold part of the update; rebuild it next time.
+    draft_table_->Forget();
+    throw;
+  }
+  if (executor_->GetDraftRows() != draft_table_->rows()) {
+    return fall_back("MTP draft table disagrees with its device rows");
+  }
+  return draft_table_->Fits(tokens.back());
+}
 
 std::unique_ptr<QwenMtpGpuDraftBackend> QwenMtpGpuDraftBackend::Create(
     std::shared_ptr<const QwenMtpGpuModel> model, QwenMtpGpuDraftConfig config,
@@ -333,12 +372,13 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
   proposed_tokens_.clear();
   proposed_tokens_.reserve(count);
 
-  auto token = executor_->ForwardTargetHidden(proposal_input_, target_hidden_,
-                                              proposal_checkpoint_, true);
+  const bool small_head = SyncDraftVocab(prompt_tokens);
+  auto token = executor_->ForwardTargetHidden(
+      proposal_input_, target_hidden_, proposal_checkpoint_, true, small_head);
   proposed_tokens_.push_back(token);
   for (std::uint32_t index = 1; index < count; ++index) {
-    token =
-        executor_->ForwardFeedback(token, proposal_checkpoint_ + index, true);
+    token = executor_->ForwardFeedback(token, proposal_checkpoint_ + index,
+                                       true, small_head);
     proposed_tokens_.push_back(token);
   }
   proposal.tokens = proposed_tokens_;
@@ -385,6 +425,7 @@ std::vector<speculative::DraftProposal> QwenMtpGpuDraftBackend::ProposeBatch(
     tokenization::TokenId input{0};
     std::uint32_t checkpoint{0};
     std::uint32_t count{0};
+    bool small_head{false};
   };
   std::vector<SessionState> sessions(requests.size());
   for (std::size_t index = 0; index < requests.size(); ++index) {
@@ -402,6 +443,14 @@ std::vector<speculative::DraftProposal> QwenMtpGpuDraftBackend::ProposeBatch(
     sessions[index].checkpoint = backend.executor_->GetNextPosition();
     sessions[index].count = count;
   }
+  // Choose every head, as serial Propose would from the same history, before
+  // any chain starts: an error here leaves no chain in flight.
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    if (sessions[index].count != 0) {
+      sessions[index].small_head =
+          backends[index]->SyncDraftVocab(requests[index].tokens);
+    }
+  }
   // Stage the per-session serial Propose state, enqueue both chains, and only
   // then perform the single collect synchronization per executor.
   try {
@@ -417,7 +466,7 @@ std::vector<speculative::DraftProposal> QwenMtpGpuDraftBackend::ProposeBatch(
         continue;
       }
       backend.executor_->StartDraftChain(session.input, backend.target_hidden_,
-                                         session.count);
+                                         session.count, session.small_head);
     }
     for (std::size_t index = 0; index < requests.size(); ++index) {
       auto& backend = *backends[index];
@@ -558,6 +607,11 @@ void QwenMtpGpuDraftBackend::RestoreSnapshot(
   }
   executor_->RestoreSnapshot(*mtp_snapshot->gpu_snapshot);
   target_hidden_ = mtp_snapshot->target_hidden;
+  // The draft table is not saved; it rebuilds from the next proposal's
+  // sequence.
+  if (draft_table_) {
+    draft_table_->Forget();
+  }
   proposed_tokens_.clear();
   proposal_target_hidden_.clear();
   committed_target_hidden_.clear();
@@ -633,6 +687,9 @@ void QwenMtpGpuDraftBackend::RestorePersistentSnapshot(
   } else {
     std::ranges::fill(target_hidden_, 0.0F);
   }
+  if (draft_table_) {
+    draft_table_->Forget();
+  }
   proposed_tokens_.clear();
   proposal_target_hidden_.clear();
   committed_target_hidden_.clear();
@@ -653,6 +710,16 @@ void QwenMtpGpuDraftBackend::Reset() noexcept {
   primed_ = false;
   proposal_active_ = false;
   last_error_.clear();
+  if (draft_table_) {
+    draft_table_->Forget();
+  }
+}
+
+void QwenMtpGpuDraftBackend::BeginRequest() noexcept {
+  // A reused prefix can continue with other tokens than the ones scanned.
+  if (draft_table_) {
+    draft_table_->Forget();
+  }
 }
 
 }  // namespace gufo::hip

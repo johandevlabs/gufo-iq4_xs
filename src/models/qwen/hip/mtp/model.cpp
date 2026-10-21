@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <gufo/ext/experimental/ggml_dequant.hpp>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -227,13 +228,17 @@ QwenMtpGpuModel::QwenMtpGpuModel(
     std::shared_ptr<const core::GgufReader> mtp_reader,
     std::shared_ptr<const QwenGpuModel> target_model,
     speculative::QwenMtpWeights weights, std::vector<void*> allocations,
-    std::size_t packed_weight_bytes, double pack_time_seconds)
+    std::size_t packed_weight_bytes, double pack_time_seconds,
+    std::optional<std::vector<std::int32_t>> draft_specials,
+    std::size_t output_row_bytes)
     : mtp_reader_(std::move(mtp_reader)),
       target_model_(std::move(target_model)),
       weights_(std::move(weights)),
       allocations_(std::move(allocations)),
       packed_weight_bytes_(packed_weight_bytes),
-      pack_time_seconds_(pack_time_seconds) {}
+      pack_time_seconds_(pack_time_seconds),
+      draft_specials_(std::move(draft_specials)),
+      output_row_bytes_(output_row_bytes) {}
 
 QwenMtpGpuModel::~QwenMtpGpuModel() {
   ReleaseAllocations(allocations_);
@@ -281,9 +286,27 @@ std::shared_ptr<const QwenMtpGpuModel> QwenMtpGpuModel::Create(
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
           .count();
 
+  // The draft table copies whole output rows, so the head must be
+  // row-addressable; the table's IDs come from the target's tokenizer.
+  const auto& output = weights->output;
+  const std::size_t vocab = weights->config.vocab_size;
+  const std::size_t output_bytes = output.EncodedSizeBytes();
+  auto draft_specials = speculative::QwenMtpDraftSpecials(
+      target_weights.config.architecture, weights->config.vocab_size,
+      target_model->GetTokenizer().SpecialTokens());
+  std::size_t output_row_bytes = 0;
+  if (draft_specials &&
+      output.num_elements == vocab * weights->config.hidden_size &&
+      output_bytes != 0 && output_bytes % vocab == 0) {
+    output_row_bytes = output_bytes / vocab;
+  } else {
+    draft_specials.reset();
+  }
+
   return std::shared_ptr<const QwenMtpGpuModel>(new QwenMtpGpuModel(
       std::move(mtp_reader), std::move(target_model), std::move(*weights),
-      std::move(allocations), packed_bytes, pack_seconds));
+      std::move(allocations), packed_bytes, pack_seconds,
+      std::move(draft_specials), output_row_bytes));
 }
 
 }  // namespace gufo::hip

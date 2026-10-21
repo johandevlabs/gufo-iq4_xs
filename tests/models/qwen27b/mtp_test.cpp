@@ -8,6 +8,7 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -507,6 +508,101 @@ int main(int argc, const char* const* argv) {
         persisted_backend->Propose(committed_anchored, 4, 2);
     Expect(persisted_probe.tokens == probe.tokens,
            "MTP draft persistent restore must propose identically");
+
+    // ── Small draft head (mtp_draft_vocab.hpp) ──────────────────────────────
+    // Only Qwen3.6 35B-A3B drafts through it, so the block runs for that GGUF
+    // alone. The head scores the prefix and the table rows of the full head,
+    // so its proposal is the full head's best token among them, and a table
+    // row comes back as its own token ID (see also qwen_sampling_hip_test).
+    Expect(mtp_model->HasDraftVocab() ==
+               (target_model->GetConfig().architecture ==
+                    gufo::speculative::kQwenMtpDraftArchitecture &&
+                execution_config.vocab_size ==
+                    gufo::speculative::kQwenMtpDraftVocabRows),
+           "MTP draft vocabulary gate");
+    if (mtp_model->HasDraftVocab()) {
+      const auto specials = mtp_model->GetDraftSpecials();
+      const std::uint32_t prefix = gufo::speculative::kMtpDraftVocab;
+      Expect(executor->GetDraftRows() == specials.size(),
+             "MTP draft table opens with the special tokens");
+      executor->Reset();
+      (void)executor->ForwardTargetHidden(17, target_hidden, 0, true);
+      const auto full_span = executor->CopyLastLogits();
+      const std::vector<float> full_logits(full_span.begin(), full_span.end());
+      // The best ordinary token above the prefix goes into the table.
+      std::uint32_t rare = prefix;
+      for (std::uint32_t id = prefix; id < full_logits.size(); ++id) {
+        if (!std::ranges::binary_search(specials,
+                                        static_cast<std::int32_t>(id)) &&
+            full_logits[id] > full_logits[rare])
+          rare = id;
+      }
+      const auto best_of = [&](bool with_rare) {
+        std::vector<std::uint32_t> ids(prefix);
+        std::iota(ids.begin(), ids.end(), 0U);
+        ids.insert(ids.end(), specials.begin(), specials.end());
+        if (with_rare)
+          ids.push_back(rare);
+        std::ranges::sort(ids, [&](std::uint32_t a, std::uint32_t b) {
+          return full_logits[a] > full_logits[b];
+        });
+        // A near tie may resolve either way under the head's own row order.
+        return full_logits[ids[0]] - full_logits[ids[1]] > 1.0e-3F
+                   ? std::optional<std::uint32_t>(ids[0])
+                   : std::nullopt;
+      };
+      const auto small_step = [&]() {
+        executor->Reset();
+        return executor->ForwardTargetHidden(17, target_hidden, 0, true, true);
+      };
+      if (const auto expected = best_of(false))
+        Expect(small_step() == *expected,
+               "MTP small head must propose the best prefix or special token");
+      const std::array<std::int32_t, 1> rare_row{
+          static_cast<std::int32_t>(rare)};
+      executor->AppendDraftRows(rare_row);
+      Expect(executor->GetDraftRows() == specials.size() + 1,
+             "MTP draft table append");
+      if (const auto expected = best_of(true))
+        Expect(small_step() == *expected,
+               "MTP small head must return a table row as its token ID");
+      executor->ResetDraftRows();
+      Expect(executor->GetDraftRows() == specials.size(),
+             "MTP draft table reset keeps the special tokens");
+
+      // Batched proposals take the serial head choice and match it exactly,
+      // including a history that tables a rare token.
+      const std::vector<gufo::tokenization::TokenId> rare_sequence{
+          rare, prompt_tokens[1], token};
+      const std::array<std::vector<gufo::tokenization::TokenId>, 2> sequences{
+          anchored_sequence, rare_sequence};
+      std::array<std::unique_ptr<gufo::hip::QwenMtpGpuDraftBackend>, 2> serial;
+      std::array<std::unique_ptr<gufo::hip::QwenMtpGpuDraftBackend>, 2> batched;
+      std::array<gufo::speculative::DraftProposalRequest, 2> requests;
+      for (std::size_t index = 0; index < 2; ++index) {
+        serial[index] = gufo::hip::QwenMtpGpuDraftBackend::Create(
+            mtp_model, draft_config, &error);
+        batched[index] = gufo::hip::QwenMtpGpuDraftBackend::Create(
+            mtp_model, draft_config, &error);
+        Expect(serial[index] != nullptr && batched[index] != nullptr, error);
+        Expect(serial[index]->PrimeTargetContext(draft_context) &&
+                   batched[index]->PrimeTargetContext(draft_context),
+               "MTP small-head batch prime");
+        requests[index] = {
+            .backend = batched[index].get(),
+            .tokens = sequences[index],
+            .position = 2,
+            .max_tokens = 2,
+        };
+      }
+      const auto proposals = batched[0]->ProposeBatch(requests);
+      Expect(proposals.size() == 2, "MTP small-head batch size");
+      for (std::size_t index = 0; index < 2; ++index) {
+        const auto expected = serial[index]->Propose(sequences[index], 2, 2);
+        Expect(proposals[index].tokens == expected.tokens,
+               "MTP batched small-head proposals must match the serial path");
+      }
+    }
 
     draft_backend->Reset();
 

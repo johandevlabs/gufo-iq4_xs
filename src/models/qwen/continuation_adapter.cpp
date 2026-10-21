@@ -1129,6 +1129,10 @@ bool ContinuationAdapter::Validate(
       mtp.proposed_tokens_.clear();
       mtp.proposal_target_hidden_.clear();
       mtp.committed_target_hidden_.clear();
+      // The draft table is not a component; it rebuilds from the next
+      // proposal's sequence.
+      if (mtp.draft_table_)
+        mtp.draft_table_->Forget();
     }
     struct Scope {
       bool& flag;

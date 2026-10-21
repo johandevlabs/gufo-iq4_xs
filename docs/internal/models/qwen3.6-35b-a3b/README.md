@@ -48,6 +48,13 @@ In the September 26, 2026 sweep n=2 was fastest for both quants: tg128
 without MTP (+26%). An earlier UD-Q8_K_XL run favoured n=1, and acceptance
 depends on the generated text, so re-check n on your own workload.
 
+As in Qwen3.8 Flash-Next, each MTP draft token scores only the first 98,304
+output rows plus a per-request table of 1,024 output rows (about 2–4 MB per
+session, depending on the head's quant): the special tokens and the request's
+own rarer tokens. A request that keeps bringing new rare tokens drafts over the
+full head. Only proposals change; the target still verifies over the full
+vocabulary.
+
 ### Speculative decoding (DFlash2)
 
 No DFlash2 GGUF is published for this model. Convert

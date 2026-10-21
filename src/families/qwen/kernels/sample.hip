@@ -9,7 +9,7 @@
 #include <hipcub/hipcub.hpp>
 #include <stdexcept>
 
-#include "src/core/hip/hip_utils.hpp"
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include "src/families/qwen/kernels/ops/token.hpp"
 
 namespace gufo::hip {
@@ -1053,6 +1053,21 @@ __global__ void ArgmaxKernel(const float* __restrict__ logits,
 void LaunchGPUArgmax(const float* logits, std::uint32_t* out_token,
                      std::size_t vocab_size, hipStream_t stream) {
   ArgmaxKernel<<<1, 256, 0, stream>>>(logits, out_token, vocab_size);
+}
+
+__global__ void RemapDraftTokenKernel(std::uint32_t* __restrict__ token,
+                                      std::uint32_t prefix,
+                                      const std::int32_t* __restrict__ table,
+                                      std::uint32_t rows) {
+  const std::uint32_t index = *token;
+  if (index >= prefix && index - prefix < rows)
+    *token = static_cast<std::uint32_t>(table[index - prefix]);
+}
+
+void LaunchRemapDraftToken(std::uint32_t* token, std::uint32_t prefix,
+                           const std::int32_t* table, std::uint32_t rows,
+                           hipStream_t stream) {
+  RemapDraftTokenKernel<<<1, 1, 0, stream>>>(token, prefix, table, rows);
 }
 
 template<bool Partial = false, bool MapIndices = false>

@@ -101,6 +101,14 @@ template<typename T>
          rows * 2 * kv * sizeof(float);       // k_, v_
 }
 
+/// Bytes of the draft table's rows, plus the 4 KiB of slack Flash-Next keeps
+/// past its table (#603).
+[[nodiscard]] std::size_t MtpDraftTableBytes(const QwenMtpGpuModel& model) {
+  return (std::size_t{speculative::kMtpDraftExtraRows} *
+          model.GetOutputRowBytes()) +
+         4096;
+}
+
 /// Rows from which a prime projection switches to the WMMA GEMM, matching the
 /// DFlash2 context-injection threshold.
 constexpr std::size_t kMtpPrimeWmmaMinRows = 128;
@@ -309,6 +317,13 @@ void QwenMtpGpuExecutor::Allocate() {
   allocate_scratch(d_out_token_, 1);
   allocate_scratch(d_chain_tokens_, kMtpMaxChainTokens);
   AllocatePrimeScratch();
+  if (model_->HasDraftVocab()) {
+    allocate_scratch(d_draft_rows_, MtpDraftTableBytes(*model_));
+    allocate_scratch(d_draft_ids_, speculative::kMtpDraftExtraRows);
+    // The table opens with the special tokens; every request keeps them.
+    AppendDraftRows(model_->GetDraftSpecials());
+    HIP_CHECK(hipStreamSynchronize(stream_));
+  }
 }
 
 void QwenMtpGpuExecutor::AllocatePrimeScratch() {
@@ -396,6 +411,10 @@ QwenGpuMemoryUsage QwenMtpGpuExecutor::EstimateMemoryUsage(
   add(1, sizeof(std::uint32_t));
   add(kMtpMaxChainTokens, sizeof(std::uint32_t));
   scratch += MtpPrimeScratchBytes(config, std::min(prime_chunk, max_context));
+  if (model.HasDraftVocab()) {
+    add(MtpDraftTableBytes(model), 1);
+    add(speculative::kMtpDraftExtraRows, sizeof(std::int32_t));
+  }
   return {
       .request_state_bytes = MtpStateBytes(config, max_context),
       .temporary_scratch_bytes = scratch,
@@ -432,6 +451,9 @@ void QwenMtpGpuExecutor::Free() noexcept {
   free_buffer(d_split_k_scratch_);
   free_buffer(d_out_token_);
   free_buffer(d_chain_tokens_);
+  free_buffer(d_draft_rows_);
+  free_buffer(d_draft_ids_);
+  draft_rows_ = 0;
   free_buffer(d_prime_tokens_);
   free_buffer(d_prime_hidden_);
   free_buffer(d_prime_embed_);
@@ -470,7 +492,7 @@ void QwenMtpGpuExecutor::Rewind(std::uint32_t position) {
 
 tokenization::TokenId QwenMtpGpuExecutor::ForwardTargetHidden(
     tokenization::TokenId input_token, std::span<const float> target_hidden,
-    std::uint32_t position, bool compute_logits) {
+    std::uint32_t position, bool compute_logits, bool small_head) {
   RequireChainIdle();
   if (target_hidden.size() != model_->GetConfig().hidden_size) {
     throw std::invalid_argument("MTP target hidden width is invalid");
@@ -482,14 +504,16 @@ tokenization::TokenId QwenMtpGpuExecutor::ForwardTargetHidden(
     throw std::runtime_error(std::string("MTP hidden copy failed: ") +
                              hipGetErrorString(copy_error));
   }
-  return Run(input_token, d_target_hidden_, position, compute_logits);
+  return Run(input_token, d_target_hidden_, position, compute_logits,
+             small_head);
 }
 
 tokenization::TokenId QwenMtpGpuExecutor::ForwardFeedback(
     tokenization::TokenId input_token, std::uint32_t position,
-    bool compute_logits) {
+    bool compute_logits, bool small_head) {
   RequireChainIdle();
-  return Run(input_token, d_feedback_hidden_, position, compute_logits);
+  return Run(input_token, d_feedback_hidden_, position, compute_logits,
+             small_head);
 }
 
 void QwenMtpGpuExecutor::RequireChainIdle() const {
@@ -500,7 +524,7 @@ void QwenMtpGpuExecutor::RequireChainIdle() const {
 
 void QwenMtpGpuExecutor::StartDraftChain(tokenization::TokenId input_token,
                                          std::span<const float> target_hidden,
-                                         std::uint32_t count) {
+                                         std::uint32_t count, bool small_head) {
   if (chain_active_) {
     throw std::logic_error("MTP GPU draft chain is already active");
   }
@@ -524,10 +548,10 @@ void QwenMtpGpuExecutor::StartDraftChain(tokenization::TokenId input_token,
   // steps equal ForwardFeedback but read the predecessor's device argmax
   // token, so every step matches the serial arithmetic exactly.
   RunDraftForward(nullptr, input_token, d_target_hidden_, next_position_, 0,
-                  true);
+                  true, small_head);
   for (std::uint32_t step = 1; step < count; ++step) {
     RunDraftForward(d_chain_tokens_ + step - 1, 0, d_feedback_hidden_,
-                    next_position_, step, true);
+                    next_position_, step, true, small_head);
   }
   chain_active_ = true;
   chain_slots_ = count;
@@ -555,14 +579,15 @@ std::vector<tokenization::TokenId> QwenMtpGpuExecutor::CollectChainTokens() {
 tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
                                               const float* hidden_input,
                                               std::uint32_t position,
-                                              bool compute_logits) {
+                                              bool compute_logits,
+                                              bool small_head) {
   if (position != next_position_ || position >= max_context_) {
     throw std::out_of_range("MTP GPU position is not sequential");
   }
   // Serial path: embed the host token, keep the argmax in d_out_token_, and
   // round-trip exactly as before this refactor.
   RunDraftForward(nullptr, input_token, hidden_input, position, kChainNoSlot,
-                  compute_logits);
+                  compute_logits, small_head);
   if (!compute_logits) {
     return 0;
   }
@@ -580,9 +605,12 @@ void QwenMtpGpuExecutor::RunDraftForward(const std::uint32_t* source_d_token,
                                          const float* hidden_input,
                                          std::uint32_t position,
                                          std::uint32_t argmax_slot,
-                                         bool compute_logits) {
+                                         bool compute_logits, bool small_head) {
   if (position != next_position_ || position >= max_context_) {
     throw std::out_of_range("MTP GPU position is not sequential");
+  }
+  if (small_head && d_draft_rows_ == nullptr) {
+    throw std::logic_error("MTP GPU small draft head needs a draft table");
   }
   // The attention below writes this position's cache row.
   if (continuation_hooks_)
@@ -672,20 +700,71 @@ void QwenMtpGpuExecutor::RunDraftForward(const std::uint32_t* source_d_token,
   if (!compute_logits) {
     return;
   }
-  LaunchGEMV(weights.output.data, weights.output.type, d_feedback_hidden_,
-             d_logits_, config.vocab_size, hidden, stream_,
-             models::qwen::QwenGemmMode::kHipMtp);
-  if (argmax_slot != kChainNoSlot) {
-    // Chain step: land the argmax in this step's proposal slot; the caller
-    // performs the single CollectChainTokens synchronization.
-    if (argmax_slot >= kMtpMaxChainTokens) {
-      throw std::out_of_range("MTP GPU chain slot is outside the budget");
-    }
-    LaunchGPUArgmax(d_logits_, d_chain_tokens_ + argmax_slot, config.vocab_size,
-                    stream_);
+  // Chain step: land the argmax in this step's proposal slot; the caller
+  // performs the single CollectChainTokens synchronization.
+  if (argmax_slot != kChainNoSlot && argmax_slot >= kMtpMaxChainTokens) {
+    throw std::out_of_range("MTP GPU chain slot is outside the budget");
+  }
+  std::uint32_t* const out_token = argmax_slot != kChainNoSlot
+                                       ? d_chain_tokens_ + argmax_slot
+                                       : d_out_token_;
+  if (!small_head) {
+    LaunchGEMV(weights.output.data, weights.output.type, d_feedback_hidden_,
+               d_logits_, config.vocab_size, hidden, stream_,
+               models::qwen::QwenGemmMode::kHipMtp);
+    LaunchGPUArgmax(d_logits_, out_token, config.vocab_size, stream_);
     return;
   }
-  LaunchGPUArgmax(d_logits_, d_out_token_, config.vocab_size, stream_);
+  // The small head (mtp_draft_vocab.hpp): the prefix is the output head's
+  // leading rows, read in place, and the table rows follow it in the logits.
+  // Only the candidate set changes; the remap turns a table index back into
+  // its token ID, so chain steps embed the real token.
+  const std::uint32_t prefix = speculative::kMtpDraftVocab;
+  LaunchGEMV(weights.output.data, weights.output.type, d_feedback_hidden_,
+             d_logits_, prefix, hidden, stream_,
+             models::qwen::QwenGemmMode::kHipMtp);
+  if (draft_rows_ != 0) {
+    LaunchGEMV(d_draft_rows_, weights.output.type, d_feedback_hidden_,
+               d_logits_ + prefix, draft_rows_, hidden, stream_,
+               models::qwen::QwenGemmMode::kHipMtp);
+  }
+  LaunchGPUArgmax(d_logits_, out_token, prefix + draft_rows_, stream_);
+  LaunchRemapDraftToken(out_token, prefix, d_draft_ids_, draft_rows_, stream_);
+}
+
+void QwenMtpGpuExecutor::ResetDraftRows() {
+  RequireChainIdle();
+  draft_rows_ = static_cast<std::uint32_t>(model_->GetDraftSpecials().size());
+}
+
+void QwenMtpGpuExecutor::AppendDraftRows(std::span<const std::int32_t> ids) {
+  RequireChainIdle();
+  if (ids.empty()) {
+    return;
+  }
+  if (d_draft_rows_ == nullptr ||
+      ids.size() > speculative::kMtpDraftExtraRows - draft_rows_) {
+    throw std::logic_error("MTP GPU draft table append is invalid");
+  }
+  const auto& output = model_->GetWeights().output;
+  const std::size_t vocab = model_->GetConfig().vocab_size;
+  const std::size_t row_bytes = model_->GetOutputRowBytes();
+  for (const std::int32_t id : ids) {
+    if (id < 0 || static_cast<std::size_t>(id) >= vocab) {
+      throw std::out_of_range("MTP GPU draft table token is out of range");
+    }
+    // The head may be mapped host memory, so the runtime picks the copy kind.
+    // The ID goes by value: no host buffer has to outlive the call.
+    HIP_CHECK(
+        hipMemcpyAsync(d_draft_rows_ + std::size_t{draft_rows_} * row_bytes,
+                       static_cast<const std::uint8_t*>(output.data) +
+                           static_cast<std::size_t>(id) * row_bytes,
+                       row_bytes, hipMemcpyDefault, stream_));
+    HIP_CHECK(hipMemsetD32Async(
+        reinterpret_cast<hipDeviceptr_t>(d_draft_ids_ + draft_rows_), id, 1,
+        stream_));
+    ++draft_rows_;
+  }
 }
 
 void QwenMtpGpuExecutor::PrimeTargetHiddenBatch(
