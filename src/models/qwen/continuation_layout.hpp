@@ -22,7 +22,11 @@ enum class ContinuationPart {
   kDraftMetadata,
   kDraftKey,
   kDraftValue,
-  kDraftFeatures
+  kDraftFeatures,
+  kMtpMetadata,
+  kMtpHidden,
+  kMtpKey,
+  kMtpValue
 };
 struct ContinuationComponent {
   cache::ComponentDescriptor descriptor;

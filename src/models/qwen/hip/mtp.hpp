@@ -117,6 +117,8 @@ private:
                                           bool compute_logits);
   void Allocate();
   void Free() noexcept;
+  friend class models::qwen::ContinuationAdapter;
+  models::qwen::ContinuationHooks* continuation_hooks_{};
 
   std::shared_ptr<const QwenMtpGpuModel> model_;
   std::uint32_t max_context_;
@@ -202,6 +204,7 @@ public:
 private:
   QwenMtpGpuDraftBackend(std::unique_ptr<QwenMtpGpuExecutor> executor,
                          QwenMtpGpuDraftConfig config);
+  friend class models::qwen::ContinuationAdapter;
 
   std::unique_ptr<QwenMtpGpuExecutor> executor_;
   QwenMtpGpuDraftConfig config_;

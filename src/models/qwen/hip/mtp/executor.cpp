@@ -196,6 +196,9 @@ tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
   if (position != next_position_ || position >= max_context_) {
     throw std::out_of_range("MTP GPU position is not sequential");
   }
+  // The attention below writes this position's cache row.
+  if (continuation_hooks_)
+    continuation_hooks_->BeforeDraftWrite(position, position + 1);
   const auto& weights = model_->GetWeights();
   const auto& config = weights.config;
   const auto& layer = weights.layer;
