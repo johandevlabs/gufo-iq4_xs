@@ -252,16 +252,14 @@ int main(int argc, const char* const* argv) {
                                                        kPromptRows);
       const auto last_hidden = std::span<const float>(
           prompt_hidden.data() + (kPromptRows * prompt_width), prompt_width);
-      const auto decode =
-          [&](gufo::hip::QwenMtpGpuExecutor& target,
-              gufo::tokenization::TokenId input) {
-            const auto step = target.ForwardTargetHidden(
-                input, last_hidden, static_cast<std::uint32_t>(kPromptRows),
-                true);
-            const auto logits = target.CopyLastLogits();
-            return std::make_pair(
-                step, std::vector<float>(logits.begin(), logits.end()));
-          };
+      const auto decode = [&](gufo::hip::QwenMtpGpuExecutor& target,
+                              gufo::tokenization::TokenId input) {
+        const auto step = target.ForwardTargetHidden(
+            input, last_hidden, static_cast<std::uint32_t>(kPromptRows), true);
+        const auto logits = target.CopyLastLogits();
+        return std::make_pair(step,
+                              std::vector<float>(logits.begin(), logits.end()));
+      };
 
       std::string prime_error;
       auto legacy =
@@ -280,8 +278,8 @@ int main(int argc, const char* const* argv) {
       // wider than both. This is what catches an off-by-one in the slice
       // arithmetic.
       for (const std::uint32_t chunk : {1U, 5U, 8U}) {
-        auto batched = gufo::hip::QwenMtpGpuExecutor::Create(mtp_model, 8, chunk,
-                                                             &prime_error);
+        auto batched = gufo::hip::QwenMtpGpuExecutor::Create(
+            mtp_model, 8, chunk, &prime_error);
         Expect(batched != nullptr, prime_error);
         batched->PrimeTargetHiddenBatch(0, successor_tokens, prime_rows);
         Expect(batched->GetNextPosition() == kPromptRows,
@@ -291,10 +289,8 @@ int main(int argc, const char* const* argv) {
                "batched prime must reproduce the legacy next token");
         const auto logit_comparison =
             Compare(batched_step.second, legacy_step.second);
-        Expect(logit_comparison.cosine > 0.99999,
-               "batched prime logit cosine");
-        Expect(logit_comparison.max_abs < 1.0e-2F,
-               "batched prime logit drift");
+        Expect(logit_comparison.cosine > 0.99999, "batched prime logit cosine");
+        Expect(logit_comparison.max_abs < 1.0e-2F, "batched prime logit drift");
       }
 
       // The estimate must track the chunk it is sized for, including the
@@ -331,21 +327,19 @@ int main(int argc, const char* const* argv) {
         for (auto& value : hidden) {
           value -= 17.0F * static_cast<float>(row + 1);
         }
-        extend_hidden.insert(extend_hidden.end(), hidden.begin(),
-                             hidden.end());
+        extend_hidden.insert(extend_hidden.end(), hidden.begin(), hidden.end());
       }
       const auto extend_last_hidden = std::span<const float>(
           extend_hidden.data() + ((kExtendRows - 1) * prompt_width),
           prompt_width);
-      const auto extend_step =
-          [&](gufo::hip::QwenMtpGpuExecutor& target) {
-            const auto token = target.ForwardTargetHidden(
-                extend_tokens.front() + kExtendRows + 1, extend_last_hidden,
-                static_cast<std::uint32_t>(kPromptRows + kExtendRows), true);
-            const auto logits = target.CopyLastLogits();
-            return std::make_pair(
-                token, std::vector<float>(logits.begin(), logits.end()));
-          };
+      const auto extend_step = [&](gufo::hip::QwenMtpGpuExecutor& target) {
+        const auto token = target.ForwardTargetHidden(
+            extend_tokens.front() + kExtendRows + 1, extend_last_hidden,
+            static_cast<std::uint32_t>(kPromptRows + kExtendRows), true);
+        const auto logits = target.CopyLastLogits();
+        return std::make_pair(token,
+                              std::vector<float>(logits.begin(), logits.end()));
+      };
       std::vector<float> append_seed(last_hidden.begin(), last_hidden.end());
       auto extended_legacy =
           gufo::hip::QwenMtpGpuExecutor::Create(mtp_model, 8, 8, &prime_error);
@@ -379,10 +373,10 @@ int main(int argc, const char* const* argv) {
         // The backend's append ladder: the primed prefix's rolling hidden,
         // then the suffix hiddens 0..kExtendRows-2.
         std::vector<float> append_rows(append_seed);
-        append_rows.insert(append_rows.end(), extend_hidden.begin(),
-                           extend_hidden.begin() +
-                               static_cast<std::ptrdiff_t>(
-                                   (kExtendRows - 1) * prompt_width));
+        append_rows.insert(
+            append_rows.end(), extend_hidden.begin(),
+            extend_hidden.begin() +
+                static_cast<std::ptrdiff_t>((kExtendRows - 1) * prompt_width));
         extended_batched->PrimeTargetHiddenBatch(
             static_cast<std::uint32_t>(kPromptRows), extend_tokens,
             append_rows);
@@ -461,9 +455,8 @@ int main(int argc, const char* const* argv) {
 
     // Draft level: the boundary carries the last committed target hidden row as
     // well as the cache, so a restored draft must propose identically.
-    auto snapshot_backend =
-        gufo::hip::QwenMtpGpuDraftBackend::Create(mtp_model, draft_config,
-                                                  &error);
+    auto snapshot_backend = gufo::hip::QwenMtpGpuDraftBackend::Create(
+        mtp_model, draft_config, &error);
     Expect(snapshot_backend != nullptr, error);
     Expect(snapshot_backend->PrimeTargetContext(draft_context),
            snapshot_backend->GetLastError());
@@ -487,8 +480,7 @@ int main(int argc, const char* const* argv) {
     Expect(draft_snapshot != nullptr, "MTP draft snapshot");
     Expect(draft_snapshot->PayloadBytes() == committed_bytes,
            "MTP draft snapshot payload must equal the reservation");
-    const auto probe =
-        snapshot_backend->Propose(committed_anchored, 4, 2);
+    const auto probe = snapshot_backend->Propose(committed_anchored, 4, 2);
 
     // Move the live backend past the captured boundary, then rewind.
     snapshot_backend->UpdateTargetHidden(anchor_hidden);

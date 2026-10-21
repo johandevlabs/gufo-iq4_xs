@@ -259,10 +259,9 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
   // launch, consecutive, where the later ones find its weights cached. The
   // paired kernel writes F16 only, so a layer whose down projection reads F32
   // rows keeps the unpaired launches.
-  const bool pair = routed_gate_up && routed_down &&
-                    batch_size >= kRoutedPairMinTokens &&
-                    *gate_type == *up_type &&
-                    routed::RoutedGatedF16Supported(*gate_type);
+  const bool pair =
+      routed_gate_up && routed_down && batch_size >= kRoutedPairMinTokens &&
+      *gate_type == *up_type && routed::RoutedGatedF16Supported(*gate_type);
   std::uint32_t tile_rows = 16;
   std::uint32_t n_tiles = 0;
   std::uint32_t n_pair = 0;

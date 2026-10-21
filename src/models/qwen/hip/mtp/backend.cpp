@@ -68,8 +68,7 @@ template<typename T>
 
 /// Committed-boundary MTP draft state: the packed attention cache plus the last
 /// committed target hidden row that seeds the next proposal.
-class QwenMtpDraftSnapshot final
-    : public speculative::IDraftBackendSnapshot {
+class QwenMtpDraftSnapshot final : public speculative::IDraftBackendSnapshot {
 public:
   QwenMtpDraftSnapshot(std::unique_ptr<QwenMtpGpuSnapshot> gpu_snapshot,
                        std::vector<float> target_hidden,
@@ -112,8 +111,7 @@ public:
     std::fill(destination.begin(), destination.end(), std::uint8_t{0});
     std::copy(kMtpDraftPersistentMagic.begin(), kMtpDraftPersistentMagic.end(),
               destination.begin());
-    PutLittleEndian<std::uint32_t>(destination, 8,
-                                   kMtpDraftPersistentVersion);
+    PutLittleEndian<std::uint32_t>(destination, 8, kMtpDraftPersistentVersion);
     PutLittleEndian<std::uint32_t>(
         destination, 12,
         static_cast<std::uint32_t>(kMtpDraftPersistentHeaderBytes));
@@ -149,8 +147,7 @@ public:
     if (CheckedPersistentAdd(hidden_offset,
                              target_hidden.size() * sizeof(std::uint32_t)) !=
         destination.size()) {
-      throw std::logic_error(
-          "MTP draft persistent serializer size mismatch");
+      throw std::logic_error("MTP draft persistent serializer size mismatch");
     }
     return destination.size();
   }
@@ -178,9 +175,8 @@ std::unique_ptr<QwenMtpGpuDraftBackend> QwenMtpGpuDraftBackend::Create(
     }
     return nullptr;
   }
-  auto executor = QwenMtpGpuExecutor::Create(std::move(model),
-                                             config.max_context,
-                                             config.prime_chunk, error_msg);
+  auto executor = QwenMtpGpuExecutor::Create(
+      std::move(model), config.max_context, config.prime_chunk, error_msg);
   if (executor == nullptr) {
     return nullptr;
   }
@@ -290,8 +286,8 @@ bool QwenMtpGpuDraftBackend::AppendTargetContext(
     append_hidden_rows_.insert(
         append_hidden_rows_.end(), context.prompt_hidden_states.begin(),
         context.prompt_hidden_states.begin() +
-            static_cast<std::ptrdiff_t>(
-                (context.prompt_tokens.size() - 1) * hidden_size));
+            static_cast<std::ptrdiff_t>((context.prompt_tokens.size() - 1) *
+                                        hidden_size));
     executor_->PrimeTargetHiddenBatch(position - 1, context.prompt_tokens,
                                       append_hidden_rows_);
     std::ranges::copy(
@@ -350,8 +346,7 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
   return proposal;
 }
 
-std::vector<speculative::DraftProposal>
-QwenMtpGpuDraftBackend::ProposeBatch(
+std::vector<speculative::DraftProposal> QwenMtpGpuDraftBackend::ProposeBatch(
     std::span<const speculative::DraftProposalRequest> requests) {
   if (requests.size() < 2 || requests.size() > kMtpMaxChainTokens)
     return IDraftBackend::ProposeBatch(requests);
@@ -365,8 +360,8 @@ QwenMtpGpuDraftBackend::ProposeBatch(
   for (std::size_t index = 0; index < requests.size(); ++index) {
     auto* backend =
         dynamic_cast<QwenMtpGpuDraftBackend*>(requests[index].backend);
-    if (backend == nullptr || &backend->executor_->GetModel() !=
-                                  &executor_->GetModel())
+    if (backend == nullptr ||
+        &backend->executor_->GetModel() != &executor_->GetModel())
       return IDraftBackend::ProposeBatch(requests);
     backends[index] = backend;
   }
@@ -395,7 +390,8 @@ QwenMtpGpuDraftBackend::ProposeBatch(
   for (std::size_t index = 0; index < requests.size(); ++index) {
     const auto& request = requests[index];
     const auto& backend = *backends[index];
-    const auto count = std::min(request.max_tokens, backend.config_.max_draft_tokens);
+    const auto count =
+        std::min(request.max_tokens, backend.config_.max_draft_tokens);
     if (backend.executor_->GetNextPosition() + count >
         backend.executor_->GetMaxContext()) {
       throw std::invalid_argument(
@@ -420,8 +416,8 @@ QwenMtpGpuDraftBackend::ProposeBatch(
       if (session.count == 0) {
         continue;
       }
-      backend.executor_->StartDraftChain(
-          session.input, backend.target_hidden_, session.count);
+      backend.executor_->StartDraftChain(session.input, backend.target_hidden_,
+                                         session.count);
     }
     for (std::size_t index = 0; index < requests.size(); ++index) {
       auto& backend = *backends[index];
@@ -585,7 +581,8 @@ void QwenMtpGpuDraftBackend::RestorePersistentSnapshot(
   }
   const std::uint32_t flags = GetLittleEndian<std::uint32_t>(payload, 16);
   const std::size_t hidden_size = GetLittleEndian<std::uint32_t>(payload, 20);
-  const std::uint32_t valid_context = GetLittleEndian<std::uint32_t>(payload, 24);
+  const std::uint32_t valid_context =
+      GetLittleEndian<std::uint32_t>(payload, 24);
   const std::uint32_t max_context = GetLittleEndian<std::uint32_t>(payload, 28);
   const std::uint32_t max_draft_tokens =
       GetLittleEndian<std::uint32_t>(payload, 32);
@@ -615,16 +612,14 @@ void QwenMtpGpuDraftBackend::RestorePersistentSnapshot(
       CheckedPersistentAdd(gpu_offset, gpu_payload_bytes);
   const std::size_t hidden_bytes = hidden_count * sizeof(std::uint32_t);
   if (CheckedPersistentAdd(hidden_offset, hidden_bytes) != payload.size()) {
-    throw std::invalid_argument(
-        "MTP draft persistent payload size is invalid");
+    throw std::invalid_argument("MTP draft persistent payload size is invalid");
   }
 
   std::vector<float> target_hidden;
   target_hidden.reserve(hidden_count);
   for (std::size_t index = 0; index < hidden_count; ++index) {
-    target_hidden.push_back(
-        std::bit_cast<float>(GetLittleEndian<std::uint32_t>(
-            payload, hidden_offset + index * sizeof(std::uint32_t))));
+    target_hidden.push_back(std::bit_cast<float>(GetLittleEndian<std::uint32_t>(
+        payload, hidden_offset + index * sizeof(std::uint32_t))));
   }
 
   executor_->RestorePersistentSnapshot(

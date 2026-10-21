@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "qfn_mmq.h"
 #include "src/core/gguf_reader.hpp"
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include "src/models/qwen/forward.hpp"
@@ -23,8 +24,6 @@
 #include "src/families/qwen/kernels/ops/swiglu.hpp"
 #include "src/models/qwen/modules/moe.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
-
-#include "qfn_mmq.h"
 
 namespace {
 using Token = gufo::tokenization::TokenId;
@@ -77,8 +76,8 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
                           view.shexp_down.EncodedSizeBytes());
 
   const std::size_t slots = n_used;
-  std::vector<float> zero_f(
-      std::max<std::size_t>(n_experts, hidden * slots), 0.0F);
+  std::vector<float> zero_f(std::max<std::size_t>(n_experts, hidden * slots),
+                            0.0F);
   HostBuffer d_logits(zero_f.data(), n_experts * sizeof(float));
   HostBuffer d_shexp_gate_scalar(zero_f.data(), sizeof(float));
   std::vector<std::int32_t> zero_i(slots, 0);
@@ -92,8 +91,9 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
   HostBuffer d_out(zero_f.data(), hidden * sizeof(float));
 
   // --- decode-style router: LaunchGEMV ---
-  gufo::hip::LaunchGEMV(d_router.data, view.router.type, static_cast<const float*>(d_x.data),
-                        static_cast<float*>(d_logits.data), n_experts, hidden, stream);
+  gufo::hip::LaunchGEMV(
+      d_router.data, view.router.type, static_cast<const float*>(d_x.data),
+      static_cast<float*>(d_logits.data), n_experts, hidden, stream);
   gufo::hip::LaunchGEMV(d_shexp_gi.data, view.shexp_gate_inp.type,
                         static_cast<const float*>(d_x.data),
                         static_cast<float*>(d_shexp_gate_scalar.data), 1,
@@ -103,7 +103,8 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
       static_cast<std::int32_t*>(d_ids.data),
       static_cast<float*>(d_weights.data), 1, n_experts, n_used, stream);
 
-  // --- prefill-style router: LaunchHipblasGEMM (batch 1) into a second buffer ---
+  // --- prefill-style router: LaunchHipblasGEMM (batch 1) into a second buffer
+  // ---
   HostBuffer d_logits2(zero_f.data(), n_experts * sizeof(float));
   hipblasHandle_t handle = nullptr;
   HIPBLAS_CHECK(hipblasCreate(&handle));
@@ -121,15 +122,15 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
   HIP_CHECK(hipMemcpy(logits.data(), d_logits.data, n_experts * sizeof(float),
                       hipMemcpyDeviceToHost));
   std::vector<float> logits2(n_experts);
-  HIP_CHECK(hipMemcpy(logits2.data(), d_logits2.data,
-                      n_experts * sizeof(float), hipMemcpyDeviceToHost));
+  HIP_CHECK(hipMemcpy(logits2.data(), d_logits2.data, n_experts * sizeof(float),
+                      hipMemcpyDeviceToHost));
   float router_max_diff = 0.0F;
   for (std::uint32_t e = 0; e < n_experts; ++e) {
     router_max_diff =
         std::max(router_max_diff, std::fabs(logits[e] - logits2[e]));
   }
-  std::cout << "layer " << layer_idx << " router GEMV-vs-blas max_diff="
-            << router_max_diff << "\n";
+  std::cout << "layer " << layer_idx
+            << " router GEMV-vs-blas max_diff=" << router_max_diff << "\n";
   Expect(router_max_diff < 0.05F, "router GEMM routes disagree");
 
   // --- shared expert: decode-style kernels ---
@@ -151,10 +152,9 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
                static_cast<int>(gufo::core::GgmlType::kQ8_0), d_gate.data,
                d_up.data, static_cast<const float*>(d_x.data),
                static_cast<const std::int32_t*>(d_ids.data),
-               static_cast<float*>(d_gate_e.data),
-               static_cast<int>(expert_ff), static_cast<int>(hidden), 1,
-               static_cast<int>(n_experts), static_cast<int>(n_used),
-               stream) == 0,
+               static_cast<float*>(d_gate_e.data), static_cast<int>(expert_ff),
+               static_cast<int>(hidden), 1, static_cast<int>(n_experts),
+               static_cast<int>(n_used), stream) == 0,
            "gated vec failed");
     Expect(qfn_mmq_moe_vec(
                static_cast<int>(gufo::core::GgmlType::kQ8_0), d_down.data,
@@ -162,8 +162,7 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
                static_cast<const std::int32_t*>(d_ids.data),
                static_cast<float*>(d_down_e.data), static_cast<int>(hidden),
                static_cast<int>(expert_ff), static_cast<int>(n_used),
-               static_cast<int>(n_experts), 1, stream, nullptr,
-               nullptr) == 0,
+               static_cast<int>(n_experts), 1, stream, nullptr, nullptr) == 0,
            "moe vec failed");
   } else {
     gufo::hip::LaunchMoeSlotSwigluGemv(
@@ -172,12 +171,11 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
         static_cast<const std::int32_t*>(d_ids.data),
         static_cast<float*>(d_gate_e.data), expert_ff, hidden, n_used, n_used,
         stream);
-    gufo::hip::LaunchMoeSlotGemv(
-        d_down.data, view.down_exps.type,
-        static_cast<const float*>(d_gate_e.data),
-        static_cast<const std::int32_t*>(d_ids.data),
-        static_cast<float*>(d_down_e.data), hidden, expert_ff, n_used, 1,
-        stream);
+    gufo::hip::LaunchMoeSlotGemv(d_down.data, view.down_exps.type,
+                                 static_cast<const float*>(d_gate_e.data),
+                                 static_cast<const std::int32_t*>(d_ids.data),
+                                 static_cast<float*>(d_down_e.data), hidden,
+                                 expert_ff, n_used, 1, stream);
   }
 
   gufo::hip::LaunchMoeEpilogue(
@@ -208,14 +206,14 @@ void CheckRealWeightsMoe(const gufo::models::QwenLayerWeights& layer,
     }
     sum_sq += d * d;
   }
-  const double cpu_scale =
-      std::sqrt(std::inner_product(cpu_out.begin(), cpu_out.end(),
-                                   cpu_out.begin(), 0.0) /
-                static_cast<double>(hidden));
-  std::cout << "layer " << layer_idx << " real-weights MoE vs CPU: max_abs="
-            << max_abs << " rmse=" << std::sqrt(sum_sq / hidden)
-            << " cpu_rms=" << cpu_scale << " worst_idx=" << worst << " gpu="
-            << gpu_out[worst] << " cpu=" << cpu_out[worst] << "\n";
+  const double cpu_scale = std::sqrt(
+      std::inner_product(cpu_out.begin(), cpu_out.end(), cpu_out.begin(), 0.0) /
+      static_cast<double>(hidden));
+  std::cout << "layer " << layer_idx
+            << " real-weights MoE vs CPU: max_abs=" << max_abs
+            << " rmse=" << std::sqrt(sum_sq / hidden)
+            << " cpu_rms=" << cpu_scale << " worst_idx=" << worst
+            << " gpu=" << gpu_out[worst] << " cpu=" << cpu_out[worst] << "\n";
   Expect(max_abs < 0.02 + 0.02 * cpu_scale + 0.05 * std::fabs(cpu_out[worst]),
          "real-weights MoE GPU/CPU mismatch");
 }
@@ -247,10 +245,10 @@ int main() {
     gufo::models::QwenKvCache kv(config.FullAttentionLayerCount(),
                                  config.num_key_value_heads, 8192,
                                  config.head_dim);
-    gufo::models::QwenSsmCache ssm(config.num_layers, config.SsmQkvSize(),
-                                   config.ssm_conv_kernel,
-                                   config.ssm_time_step_rank,
-                                   config.ssm_state_size, config.SsmValueSize());
+    gufo::models::QwenSsmCache ssm(
+        config.num_layers, config.SsmQkvSize(), config.ssm_conv_kernel,
+        config.ssm_time_step_rank, config.ssm_state_size,
+        config.SsmValueSize());
     gufo::models::QwenScratchArena arena(config);
 
     constexpr std::array<std::uint32_t, 4> kTaps{0, 1, 2, 3};
@@ -292,15 +290,14 @@ int main() {
       double ref_sq = 0.0;
       std::size_t worst = 0;
       for (std::size_t i = 0; i < hidden; ++i) {
-        const double d = std::fabs(
-            static_cast<double>(cpu_hidden[tap][i]) - gpu_row[i]);
+        const double d =
+            std::fabs(static_cast<double>(cpu_hidden[tap][i]) - gpu_row[i]);
         if (d > max_abs) {
           max_abs = d;
           worst = i;
         }
         sum_sq += d * d;
-        ref_sq += static_cast<double>(cpu_hidden[tap][i]) *
-                  cpu_hidden[tap][i];
+        ref_sq += static_cast<double>(cpu_hidden[tap][i]) * cpu_hidden[tap][i];
       }
       const double rmse = std::sqrt(sum_sq / hidden);
       const double ref_norm = std::sqrt(ref_sq / hidden);
@@ -322,13 +319,12 @@ int main() {
     Expect(qfn_mmq_init(0) == 0, "qfn_mmq_init failed");
     CheckRealWeightsMoe(cpu_weights->layers[0], config, layer0_normed, 0,
                         stream);
-    gufo::models::ForwardRMSNorm(arena.hidden,
-                                 cpu_weights->layers[1].attn_norm, 1e-6F,
-                                 arena.normed);
-    CheckRealWeightsMoe(cpu_weights->layers[1], config,
-                        std::vector<float>(arena.normed.begin(),
-                                           arena.normed.end()),
-                        1, stream);
+    gufo::models::ForwardRMSNorm(arena.hidden, cpu_weights->layers[1].attn_norm,
+                                 1e-6F, arena.normed);
+    CheckRealWeightsMoe(
+        cpu_weights->layers[1], config,
+        std::vector<float>(arena.normed.begin(), arena.normed.end()), 1,
+        stream);
     HIP_CHECK(hipStreamDestroy(stream));
   } catch (const std::exception& e) {
     std::cerr << "qwen35ba3b_layer_probe: " << e.what() << "\n";

@@ -52,10 +52,10 @@ int main() {
     gufo::models::QwenKvCache kv(config.FullAttentionLayerCount(),
                                  config.num_key_value_heads, 8192,
                                  config.head_dim);
-    gufo::models::QwenSsmCache ssm(config.num_layers, config.SsmQkvSize(),
-                                   config.ssm_conv_kernel,
-                                   config.ssm_time_step_rank,
-                                   config.ssm_state_size, config.SsmValueSize());
+    gufo::models::QwenSsmCache ssm(
+        config.num_layers, config.SsmQkvSize(), config.ssm_conv_kernel,
+        config.ssm_time_step_rank, config.ssm_state_size,
+        config.SsmValueSize());
     gufo::models::QwenScratchArena arena(config);
 
     constexpr std::array<std::uint32_t, 4> kTaps{0, 1, 2, 3};
@@ -94,15 +94,14 @@ int main() {
       double ref_sq = 0.0;
       std::size_t worst = 0;
       for (std::size_t i = 0; i < hidden; ++i) {
-        const double d = std::fabs(
-            static_cast<double>(cpu_hidden[tap][i]) - gpu_row[i]);
+        const double d =
+            std::fabs(static_cast<double>(cpu_hidden[tap][i]) - gpu_row[i]);
         if (d > max_abs) {
           max_abs = d;
           worst = i;
         }
         sum_sq += d * d;
-        ref_sq += static_cast<double>(cpu_hidden[tap][i]) *
-                  cpu_hidden[tap][i];
+        ref_sq += static_cast<double>(cpu_hidden[tap][i]) * cpu_hidden[tap][i];
       }
       const double rmse = std::sqrt(sum_sq / hidden);
       const double ref_norm = std::sqrt(ref_sq / hidden);

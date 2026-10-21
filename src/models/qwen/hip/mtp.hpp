@@ -165,8 +165,8 @@ public:
   /// KV rows for `count` consecutive positions beginning at `start_position`,
   /// from the trunk hidden rows that own those positions; `successor_tokens[i]`
   /// is the token that follows the position owning `hidden_rows[i]`. Attention,
-  /// MoE, the output norm and the logits are not computed: nothing downstream of
-  /// the KV write is consumed by the draft, so the reduction is exact rather
+  /// MoE, the output norm and the logits are not computed: nothing downstream
+  /// of the KV write is consumed by the draft, so the reduction is exact rather
   /// than an approximation. On return the decode cursor is
   /// `start_position + count`; the caller owns sequencing and the cache base.
   void PrimeTargetHiddenBatch(
@@ -231,8 +231,7 @@ private:
   /// `d_prime_hidden_` a slice at a time.
   void PrimeRowsBatched(std::uint32_t start_position,
                         std::span<const tokenization::TokenId> successor_tokens,
-                        const float* device_rows,
-                        std::size_t device_row_stride,
+                        const float* device_rows, std::size_t device_row_stride,
                         const float* host_rows, std::size_t host_row_stride);
   /// Scatters a packed key plane/value plane pair into the head-major FP32
   /// cache; the caller owns the decode cursor.
@@ -248,8 +247,8 @@ private:
   /// embedded by value as today. `argmax_slot` below kMtpMaxChainTokens
   /// redirects the argmax into that proposal slot and skips the legacy
   /// synchronizing readback; kChainNoSlot keeps the serial behavior exactly.
-  static constexpr std::uint32_t kChainNoSlot = std::numeric_limits<
-      std::uint32_t>::max();
+  static constexpr std::uint32_t kChainNoSlot =
+      std::numeric_limits<std::uint32_t>::max();
   void RunDraftForward(const std::uint32_t* source_d_token,
                        tokenization::TokenId source_h_token,
                        const float* hidden_input, std::uint32_t position,
@@ -370,7 +369,8 @@ public:
       const override;
   void RestoreSnapshot(
       const speculative::IDraftBackendSnapshot& snapshot) override;
-  void RestorePersistentSnapshot(std::span<const std::uint8_t> payload) override;
+  void RestorePersistentSnapshot(
+      std::span<const std::uint8_t> payload) override;
 
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const noexcept {
     return executor_->GetMemoryUsage();
