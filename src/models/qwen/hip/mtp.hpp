@@ -196,6 +196,14 @@ public:
   /// use.
   void AppendDraftRows(std::span<const std::int32_t> ids);
 
+  /// Drops a chain that is still between `StartDraftChain` and
+  /// `CollectChainTokens`, so a failed batched proposal can release every
+  /// session's executor before its rollback rewinds the cursor. Abandoning
+  /// leaves no proposal behind: the slots already written become scratch for
+  /// the next chain, and the stream is drained once so no kernel can land
+  /// behind the caller's rewind. A chain that is not active is a no-op.
+  void AbandonChain() noexcept;
+
   /// Batched, projection-only prompt prime (MTP priming plan, stage A). Writes
   /// KV rows for `count` consecutive positions beginning at `start_position`,
   /// from the trunk hidden rows that own those positions; `successor_tokens[i]`

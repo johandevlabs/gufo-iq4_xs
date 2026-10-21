@@ -215,6 +215,101 @@ int main(int argc, const char* const* argv) {
         second_proposal.tokens == expected_proposal.tokens,
         "feedback replay must match teacher-forced committed target features");
 
+    // ── Abandoned batched chains (error-path drain) ─────────────────────────
+    // A cohort member whose StartDraftChain throws must not strand another
+    // session's in-flight chain: the rollback Rewind would bail on
+    // RequireChainIdle, the executor would keep chain_active_ set, and the
+    // next noexcept Reset() would terminate the process on the next
+    // checkpoint. Abandoning every live chain first keeps the rollback clean.
+    {
+      auto chain_executor = gufo::hip::QwenMtpGpuExecutor::Create(
+          mtp_model, 64, gufo::hip::kMtpDefaultPrimeChunk, &error);
+      Expect(chain_executor != nullptr, error);
+      chain_executor->StartDraftChain(17, target_hidden, 2);
+      chain_executor->AbandonChain();
+      bool collect_rejected = false;
+      try {
+        (void)chain_executor->CollectChainTokens();
+      } catch (const std::exception&) {
+        collect_rejected = true;
+      }
+      Expect(collect_rejected, "abandoned chain must not be collectable");
+      chain_executor->Rewind(0);
+      const auto recovered_token =
+          chain_executor->ForwardTargetHidden(17, target_hidden, 0, true);
+      Expect(recovered_token == token,
+             "abandoned chain leaves the executor forward-deterministic");
+      const auto recovered_comparison =
+          Compare(chain_executor->CopyLastHidden(), first_gpu_hidden);
+      Expect(recovered_comparison.rmse == 0.0,
+             "abandoned chain leaves no hidden drift");
+    }
+
+    // ── Failed batch cohorts drain before rollback ─────────────────────────
+    // One oversized depth (past the slot budget) makes its StartDraftChain
+    // throw while the other session's chain is already in flight; the batch
+    // must rethrow and both executors must stay usable.
+    {
+      constexpr std::uint32_t kOverSlotDepth =
+          gufo::hip::kMtpMaxChainTokens + 4;
+      gufo::hip::QwenMtpGpuDraftConfig batch_config{
+          .max_context = 64,
+          .max_draft_tokens = 2,
+      };
+      gufo::hip::QwenMtpGpuDraftConfig oversized_config{
+          .max_context = 64,
+          .max_draft_tokens = kOverSlotDepth,
+      };
+      auto rejected_victim = gufo::hip::QwenMtpGpuDraftBackend::Create(
+          mtp_model, batch_config, &error);
+      Expect(rejected_victim != nullptr, error);
+      auto oversized_member = gufo::hip::QwenMtpGpuDraftBackend::Create(
+          mtp_model, oversized_config, &error);
+      Expect(oversized_member != nullptr, error);
+      auto pristine_peer = gufo::hip::QwenMtpGpuDraftBackend::Create(
+          mtp_model, batch_config, &error);
+      Expect(pristine_peer != nullptr, error);
+      for (auto* backend : {rejected_victim.get(), oversized_member.get(),
+                            pristine_peer.get()}) {
+        std::vector<float> prime_hidden(target_hidden.size() * 2);
+        std::ranges::copy(target_hidden, prime_hidden.begin());
+        for (std::size_t index = 0; index < target_hidden.size(); ++index) {
+          prime_hidden[target_hidden.size() + index] =
+              target_hidden[index] * 0.75F;
+        }
+        Expect(backend->PrimeTargetContext({
+                   .prompt_tokens = prompt_tokens,
+                   .prompt_hidden_states = prime_hidden,
+                   .hidden_size = target_hidden.size(),
+                   .first_token = token,
+               }),
+               "failed-batch cohorts must prime identically");
+      }
+      std::vector<gufo::tokenization::TokenId> request_tokens(
+          prompt_tokens.begin(), prompt_tokens.end());
+      request_tokens.push_back(token);
+      const std::array<gufo::speculative::DraftProposalRequest, 2> batch{{
+          {rejected_victim.get(), request_tokens, 2, 2, 0.0F, nullptr},
+          {oversized_member.get(), request_tokens, 2, kOverSlotDepth, 0.0F,
+           nullptr},
+      }};
+      bool batch_rejected = false;
+      try {
+        (void)rejected_victim->ProposeBatch(batch);
+      } catch (const std::invalid_argument&) {
+        batch_rejected = true;
+      }
+      Expect(batch_rejected, "an over-slot cohort member must abort the batch");
+      Expect(rejected_victim->GetLastError().empty(),
+             "a drained batch rollback must not surface chain errors");
+      const auto pristine_proposal =
+          pristine_peer->Propose(request_tokens, 2, 2);
+      const auto recovered_proposal =
+          rejected_victim->Propose(request_tokens, 2, 2);
+      Expect(recovered_proposal.tokens == pristine_proposal.tokens,
+             "an abandoned chain must leave the session recoverable");
+    }
+
     // ── Snapshot gates ──────────────────────────────────────────────────────
     // Admission control sizes a session before it exists, so the estimate must
     // equal what the executor actually reserves.

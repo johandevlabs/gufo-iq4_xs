@@ -576,6 +576,18 @@ std::vector<tokenization::TokenId> QwenMtpGpuExecutor::CollectChainTokens() {
   return tokens;
 }
 
+void QwenMtpGpuExecutor::AbandonChain() noexcept {
+  if (!chain_active_) {
+    return;
+  }
+  // Clear the guard first: the abandoned slots are scratch, the cursor rollback
+  // belongs to the caller's Rewind, and clearing before the drain keeps a
+  // failed synchronization from stranding chain_active_ again.
+  chain_slots_ = 0;
+  chain_active_ = false;
+  (void)hipStreamSynchronize(stream_);
+}
+
 tokenization::TokenId QwenMtpGpuExecutor::Run(tokenization::TokenId input_token,
                                               const float* hidden_input,
                                               std::uint32_t position,

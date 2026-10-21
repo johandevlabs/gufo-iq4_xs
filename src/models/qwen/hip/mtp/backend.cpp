@@ -481,6 +481,13 @@ std::vector<speculative::DraftProposal> QwenMtpGpuDraftBackend::ProposeBatch(
   } catch (...) {
     // A failed batch must leave every touched session at its committed
     // frontier, exactly as a cancelled proposal discards its rows.
+    // Abandon any chain still in flight first: a rollback Rewind with a live
+    // chain throws RequireChainIdle, the rollback error lands in last_error_
+    // in place of the true failure, and the executor stays wedged with
+    // chain_active_ set until a noexcept Reset() would terminate on it.
+    for (std::size_t index = 0; index < requests.size(); ++index) {
+      backends[index]->executor_->AbandonChain();
+    }
     for (std::size_t index = 0; index < requests.size(); ++index) {
       auto& backend = *backends[index];
       auto& session = sessions[index];
