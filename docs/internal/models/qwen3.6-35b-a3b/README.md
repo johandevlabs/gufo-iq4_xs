@@ -95,10 +95,10 @@ Concurrent requests share one batched verification step. Each extra row reads
 mostly different experts, so a step costs close to one decode step per
 stacked row; the server therefore shortens DFlash2 drafts as more requests are
 active (2 draft tokens at 2 requests, 1 at 3 or more) and a lone request keeps
-the full draft. MTP takes the same batched step with up to 2 draft tokens at
-2 requests and none at 3 or more, where one draft token no longer pays for its
-row; there it decodes within 3% of the plain rate, the cost of keeping each
-session's draft context current.
+the full draft. MTP takes the same batched step, with the sessions' drafts
+proposed in one batch, and keeps 1 draft token at 2 requests and none at 3 or
+more, where one draft token no longer pays for its row; there it decodes within
+3% of the plain rate, the cost of keeping each session's draft context current.
 
 Prefill is not batched across sessions: requests take turns, and while other
 sessions decode, a prompt is prefilled in `--prefill-chunk` token slices.

@@ -160,13 +160,17 @@ for the same prompt.
 | cold 32K | 2523 | 2671 | 63.7 | 62.9 |
 | cold 64K | 2221 | 2203 | 63.8 | 56.6 |
 | cold 128K | 1670 | 1671 | 54.4 | 45.1 |
-| 2 / 4 concurrent short requests, total | — | — | 95.6 / 122.3 | 85.4 / 111.0 |
+| 2 / 4 concurrent short requests, total | — | — | 95.6 / 122.3 | 87.0 / 110.5 |
 
 MTP skips the draft's context projection during prefill, which is why it
 prefills short and medium prompts faster. Concurrent MTP requests verify in one
-batched step: at 2 / 3 / 4 requests they total 85.4 / 99.1 / 111.0 t/s against
-83.0 / 101.7 / 114.2 without a draft, with completions byte-identical to the
-same prompts sent alone. Before that, concurrent MTP sessions took the
+batched step: at 2 / 3 / 4 requests they total 87.0 / 99.0 / 110.5 t/s against
+83.0 / 101.5 / 114.0 without a draft, with completions byte-identical to the
+same prompts sent alone. At 2 requests one draft token beats two: 87.0 against
+85.6 t/s on UD-Q6_K_XL, and 81.4 against 78.8 on UD-Q8_K_XL (74.7 without a
+draft). Proposing the sessions' drafts in one batch, with one host
+synchronization per round instead of one per draft token, measured within 0.2%
+of the per-session proposals on this machine, with identical outputs. Before that, concurrent MTP sessions took the
 single-token path, which rejects speculative sessions and does not advance the
 draft: requests with stop strings, a JSON schema or the batch endpoint failed,
 and some returned corrupted text.
