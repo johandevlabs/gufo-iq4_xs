@@ -18,6 +18,7 @@
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -307,6 +308,11 @@ void QwenMtpGpuExecutor::Allocate() {
   allocate_scratch(d_ffn_out_, hidden);
   allocate_scratch(d_feedback_hidden_, hidden);
   allocate_scratch(d_logits_, config.vocab_size);
+  const std::size_t candidate_workspace =
+      models::qwen38_flash_next::rocm::MtpCandidateWorkspaceSize(
+          config.vocab_size);
+  allocate_scratch(d_candidates_, candidate_workspace);
+  allocate_scratch(d_candidate_scratch_, candidate_workspace);
   // The attention cache is request state, not scratch.
   AllocateBuffer(d_kv_cache_, 2 * total_kv);
   d_kv_cache_f16_ =
@@ -405,6 +411,11 @@ QwenGpuMemoryUsage QwenMtpGpuExecutor::EstimateMemoryUsage(
   add(hidden, sizeof(float));
   add(hidden, sizeof(float));
   add(config.vocab_size, sizeof(float));
+  add(2 *
+          std::size_t{
+              models::qwen38_flash_next::rocm::MtpCandidateWorkspaceSize(
+                  config.vocab_size)},
+      sizeof(std::uint32_t));
   add(detail::DecodeAttentionScratchElements(config.num_attention_heads,
                                              config.head_dim),
       sizeof(float));
@@ -446,6 +457,8 @@ void QwenMtpGpuExecutor::Free() noexcept {
   moe_ = {};
   free_buffer(d_feedback_hidden_);
   free_buffer(d_logits_);
+  free_buffer(d_candidates_);
+  free_buffer(d_candidate_scratch_);
   free_buffer(d_kv_cache_);
   free_buffer(d_kv_cache_f16_);
   free_buffer(d_split_k_scratch_);
@@ -915,6 +928,27 @@ std::span<const float> QwenMtpGpuExecutor::CopyLastLogits() {
     throw std::runtime_error("MTP logit synchronization failed");
   }
   return h_logits_;
+}
+
+models::qwen38_flash_next::MtpCandidateLogits
+QwenMtpGpuExecutor::TopCandidates() {
+  namespace qfn = models::qwen38_flash_next;
+  const std::uint32_t vocab = model_->GetConfig().vocab_size;
+  auto* scores = reinterpret_cast<float*>(d_candidates_ + qfn::kMtpCandidates);
+  qfn::rocm::MtpTopCandidates(d_logits_, d_candidates_, d_candidate_scratch_,
+                              scores, vocab, stream_);
+  qfn::MtpCandidateLogits candidates;
+  candidates.size = std::min<std::size_t>(vocab, qfn::kMtpCandidates);
+  static_assert(offsetof(qfn::MtpCandidateLogits, logits) ==
+                qfn::kMtpCandidates * sizeof(std::uint32_t));
+  const auto bytes = offsetof(qfn::MtpCandidateLogits, logits) +
+                     candidates.size * sizeof(float);
+  const auto error = hipMemcpyAsync(&candidates, d_candidates_, bytes,
+                                    hipMemcpyDeviceToHost, stream_);
+  if (error != hipSuccess || hipStreamSynchronize(stream_) != hipSuccess) {
+    throw std::runtime_error("MTP candidate synchronization failed");
+  }
+  return candidates;
 }
 
 void QwenMtpGpuExecutor::RestoreCachePlanes(const std::uint8_t* packed,

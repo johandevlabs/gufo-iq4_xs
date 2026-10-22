@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -380,6 +381,89 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
     token = executor_->ForwardFeedback(token, proposal_checkpoint_ + index,
                                        true, small_head);
     proposed_tokens_.push_back(token);
+  }
+  proposal.tokens = proposed_tokens_;
+  proposal_active_ = true;
+  return proposal;
+}
+
+speculative::DraftProposal QwenMtpGpuDraftBackend::ProposeSampled(
+    std::span<const tokenization::TokenId> prompt_tokens,
+    std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+    std::uint64_t* rng_state) {
+  namespace qfn = models::qwen38_flash_next;
+  if (!std::isfinite(temperature) || temperature <= 0.0F) {
+    throw std::invalid_argument(
+        "MTP sampled proposal temperature must be finite and positive");
+  }
+  if (rng_state == nullptr) {
+    throw std::invalid_argument("MTP sampled proposal requires RNG state");
+  }
+  if (!primed_ || prompt_tokens.empty() || current_pos == 0) {
+    throw std::logic_error("MTP GPU draft backend is not primed");
+  }
+  if (proposal_active_) {
+    throw std::logic_error("MTP GPU proposal feedback is pending");
+  }
+  if (executor_->GetNextPosition() + 1 != current_pos) {
+    throw std::logic_error("MTP GPU draft position is inconsistent");
+  }
+
+  speculative::DraftProposal proposal;
+  proposal.start_pos = current_pos;
+  const std::uint32_t count = std::min(max_tokens, config_.max_draft_tokens);
+  if (count == 0) {
+    return proposal;
+  }
+
+  proposal_checkpoint_ = executor_->GetNextPosition();
+  proposal_input_ = prompt_tokens.back();
+  proposal_target_hidden_ = target_hidden_;
+  committed_target_hidden_.clear();
+  proposed_tokens_.clear();
+  proposed_tokens_.reserve(count);
+
+  // q is the temperature softmax over the full head's top candidates. Rows
+  // the distribution drops keep their IDs at probability zero, so every row
+  // has the same width and distinct IDs.
+  sampling::SamplingConfig config;
+  config.temperature = temperature;
+  const sampling::SamplerState sampler(config);
+  std::size_t width = 0;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    if (index == 0) {
+      (void)executor_->ForwardTargetHidden(proposal_input_, target_hidden_,
+                                           proposal_checkpoint_, true, false);
+    } else {
+      (void)executor_->ForwardFeedback(
+          proposed_tokens_.back(), proposal_checkpoint_ + index, true, false);
+    }
+    const auto candidates = executor_->TopCandidates();
+    if (width == 0) {
+      width = candidates.size;
+      proposal.candidates_per_token = width;
+      proposal.candidate_ids.reserve(count * width);
+      proposal.candidate_probabilities.reserve(count * width);
+    } else if (candidates.size != width) {
+      throw std::logic_error("MTP candidate width changed within a proposal");
+    }
+    const auto drawn = qfn::SampleMtpProposal(candidates, sampler, rng_state);
+    const std::size_t row = proposal.candidate_ids.size();
+    for (std::size_t i = 0; i < drawn.size; ++i) {
+      proposal.candidate_ids.push_back(drawn.ids[i]);
+      proposal.candidate_probabilities.push_back(drawn.probabilities[i]);
+    }
+    for (std::size_t i = 0;
+         i < width && proposal.candidate_ids.size() < row + width; ++i) {
+      const auto id = candidates.ids[i];
+      if (std::find(proposal.candidate_ids.begin() + row,
+                    proposal.candidate_ids.end(),
+                    id) == proposal.candidate_ids.end()) {
+        proposal.candidate_ids.push_back(id);
+        proposal.candidate_probabilities.push_back(0.0F);
+      }
+    }
+    proposed_tokens_.push_back(drawn.token);
   }
   proposal.tokens = proposed_tokens_;
   proposal_active_ = true;

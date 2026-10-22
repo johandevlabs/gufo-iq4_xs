@@ -15,6 +15,7 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/mtp_draft_vocab.hpp"
 #include "src/models/qwen/mtp_reference.hpp"
+#include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime.h>
@@ -228,6 +229,9 @@ public:
   [[nodiscard]] std::span<const float> CopyLastHidden();
   /// The full head's logits; a small-head forward leaves them partial.
   [[nodiscard]] std::span<const float> CopyLastLogits();
+  /// The exact top candidates of the full head's last logits, in descending
+  /// order with lowest-ID ties. Requires a full-head forward.
+  [[nodiscard]] models::qwen38_flash_next::MtpCandidateLogits TopCandidates();
 
   /// Captures the committed cache prefix. Requires a committed proposal
   /// boundary; the cursor is the draft's own next position.
@@ -321,6 +325,9 @@ private:
   float* d_ffn_out_{nullptr};
   float* d_feedback_hidden_{nullptr};
   float* d_logits_{nullptr};
+  // Candidate IDs, then their scores from offset kMtpCandidates on.
+  std::uint32_t* d_candidates_{nullptr};
+  std::uint32_t* d_candidate_scratch_{nullptr};
   float* d_kv_cache_{nullptr};
   void* d_kv_cache_f16_{nullptr};
   float* d_split_k_scratch_{nullptr};
@@ -393,6 +400,17 @@ public:
   [[nodiscard]] speculative::DraftProposal Propose(
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t current_pos, std::uint32_t max_tokens) override;
+
+  /// Draws each draft token from the full head's top candidates at
+  /// `temperature` and returns that exact distribution with the proposal,
+  /// so the verifier's rejection sampling stays lossless.
+  [[nodiscard]] speculative::DraftProposal ProposeSampled(
+      std::span<const tokenization::TokenId> prompt_tokens,
+      std::uint32_t current_pos, std::uint32_t max_tokens, float temperature,
+      std::uint64_t* rng_state) override;
+  [[nodiscard]] bool SupportsSampledProposals() const noexcept override {
+    return true;
+  }
 
   /// Batched greedy proposal across sessions, mirroring the DFlash2 backend
   /// contract: two to eight primed backends on one shared model, validated
