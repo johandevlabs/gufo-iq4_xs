@@ -8,7 +8,7 @@ Production target is the **UD-Q8_K_XL** GGUF (37 GiB weights); request state
 and KV/SSM caches need additional memory. **UD-Q6_K_XL** (30.5 GiB) is faster
 for both prefill and decode, see [Benchmarks](BENCHMARKS.md). Both GGUFs carry
 an MTP head (`blk.40.nextn.*`) that Gufo uses as a speculative draft; a
-separate DFlash2 draft can be converted from the published checkpoint (below).
+separate DFlash2 draft is published as a GGUF or can be converted (below).
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -57,11 +57,14 @@ vocabulary.
 
 ### Speculative decoding (DFlash2)
 
-No DFlash2 GGUF is published for this model. Convert
+A Q8_0 conversion of
 [`incoai/Qwen3.6-35B-A3B-DFlash2`](https://huggingface.co/incoai/Qwen3.6-35B-A3B-DFlash2)
-with a llama.cpp checkout whose converter registers `DFlash2DraftModel`
-(tested at `b81c99b47`); the converter takes the tokenizer from the target
-checkpoint:
+is published as
+[`aminya/Qwen3.6-35B-A3B-DFlash2-GGUF`](https://huggingface.co/aminya/Qwen3.6-35B-A3B-DFlash2-GGUF)
+(`Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf`). The numbers below were measured with a
+local conversion of the same checkpoint, made with a llama.cpp checkout whose
+converter registers `DFlash2DraftModel` (tested at `b81c99b47`); the converter
+takes the tokenizer from the target checkpoint:
 
 ```sh
 nix develop -c hf download incoai/Qwen3.6-35B-A3B-DFlash2 --local-dir draft
@@ -73,6 +76,11 @@ python3 llama.cpp/convert_hf_to_gguf.py draft --target-model-dir target \
   --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 \
   --prompt "Explain virtual memory." --temperature 0
 ```
+
+Run the converter with numpy 2. With numpy 1.26 on Python 3.14, Q8_0
+conversion drops the sign of every quant in tensors with rows of 4,096 values
+or more (`attn_output`, `ffn_down`, `fc`). The draft still loads, but accepts
+no drafts.
 
 On UD-Q6_K_XL, 512 greedy tokens with thinking off, a prose explanation ran at
 73.5 tok/s with `--draft-tokens 3 --draft-policy fixed` and a code rewrite at
