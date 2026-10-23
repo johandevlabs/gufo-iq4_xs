@@ -83,6 +83,10 @@ tokenization::TokenId QwenGpuExecutor::ForwardSmallPromptChunk(
       scratch.decode.logits.data(),
       d_verification_logits_ + (prompt_tokens.size() - 1) * vocab_size,
       vocab_size * sizeof(float), hipMemcpyDeviceToDevice, arena_.stream));
+  // The verification forward commits without logits; the prompt frontier has
+  // them now, so a checkpoint captured here can decode its next token.
+  if (continuation_hooks_)
+    continuation_hooks_->AfterLogits();
   return predictions.back();
 }
 
