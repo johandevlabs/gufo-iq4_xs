@@ -61,16 +61,26 @@ RoutedHostState& GetRoutedHostState() {
 }
 
 /// The routed F16 GEMM's decode of an expert tensor, if it has one here:
-/// Q8_0 (whole 64-element blocks) and Q6_K (whole 256-element superblocks).
+/// Q8_0 (whole 64-element blocks) and Q4_K, Q5_K and Q6_K (whole 256-element
+/// superblocks).
 std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
                                                    std::size_t k) {
   if (type == core::GgmlType::kQ8_0 && k % 64 == 0) {
     return routed::WeightType::kQ8_0;
   }
-  if (type == core::GgmlType::kQ6_K && k % 256 == 0) {
-    return routed::WeightType::kQ6_K;
+  if (k % 256 != 0) {
+    return std::nullopt;
   }
-  return std::nullopt;
+  switch (type) {
+    case core::GgmlType::kQ4_K:
+      return routed::WeightType::kQ4_K;
+    case core::GgmlType::kQ5_K:
+      return routed::WeightType::kQ5_K;
+    case core::GgmlType::kQ6_K:
+      return routed::WeightType::kQ6_K;
+    default:
+      return std::nullopt;
+  }
 }
 
 /// Token rows per routed tile: the wide tile once the mean bucket fills
@@ -407,7 +417,10 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     auto* down_half = reinterpret_cast<__half*>(moe.down_e.data());
     // The kernel decodes an expert's weights once per tile, so a paired layer
     // sends the down projection over the mixed tile map it already built for
-    // gate/up: fewer tiles, each expert's rows unchanged.
+    // gate/up: fewer tiles, each expert's rows unchanged. Q4_K and Q5_K have
+    // no 64- or 128-row tiles and keep the regular map.
+    const bool down_mixed =
+        pair && routed::RoutedF16WideTilesSupported(*down_type);
     const auto down = [&](const std::int32_t* tiles, std::uint32_t count,
                           std::uint32_t rows) {
       return count == 0 ||
@@ -417,10 +430,11 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                                    nullptr, nullptr, down_half, hidden,
                                    expert_ff, stream);
     };
-    if (!(pair ? (down(moe.routed_tiles.data() + n_tiles, n_pair, kPairRows) &&
-                  down(moe.routed_tiles.data() + n_tiles + n_pair, n_narrow,
-                       kNarrowRows))
-               : down(moe.routed_tiles.data(), n_tiles, tile_rows))) {
+    if (!(down_mixed
+              ? (down(moe.routed_tiles.data() + n_tiles, n_pair, kPairRows) &&
+                 down(moe.routed_tiles.data() + n_tiles + n_pair, n_narrow,
+                      kNarrowRows))
+              : down(moe.routed_tiles.data(), n_tiles, tile_rows))) {
       throw std::runtime_error("routed F16 expert down GEMM failed");
     }
     routed::MoeEpilogueVec4F16(
