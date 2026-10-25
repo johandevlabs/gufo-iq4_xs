@@ -1,0 +1,54 @@
+{
+  "sha256": {
+    "Target UD-Q4_K_XL": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1",
+    "Target UD-Q6_K_XL": "35fce994cd36104a7dc1bd8a4bdf13778145664c00fdef6773aebc9246e5019c",
+    "Target UD-Q8_K_XL": "6c6b816537abad90b250a0972b345466028d861ddfe316d5f0de31ca6440f781",
+    "Draft DFlash2 Q8_0": "69bc81f5344dfeb67bcfc09277dd9617500fca1823f72e6e08d5df92e73a8b44"
+  },
+  "sources": {
+    "targets": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF, revision 5bc3e238d916f48a861bac2f8a1990a0e9b7e98d; each target's MTP head is the MTP draft",
+    "draft": "aminya/Qwen3.6-35B-A3B-DFlash2-GGUF, revision 1e26e3499d865b9d2fc55e019d65b3f0e8ab6846, Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf"
+  },
+  "scope": "Pinned artifacts for the October 25, 2026 benchmark tables.",
+  "benchmarks-2026-10-25": {
+    "gufo": {
+      "revision": "b43f7b4dc0bed7fff09e006b146a4e583145c816",
+      "dirty": false,
+      "build": "CMake release with the pinned Nix toolchain (GCC 15.3 / ROCm 7.2.3)",
+      "binarySha256": "2034927512b28d0fb4228db2bb7d684d0b4225e1f23e8ed491d8b01264765176",
+      "productionControl": "8e509128 (production, parent commit) shows the same Q6 multi-user AR and DFlash2 output differences"
+    },
+    "reference": {
+      "name": "llama.cpp",
+      "build": 11069,
+      "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+      "backend": "ROCm gfx1151, LLAMA_HIP_UMA=ON, pinned Nix ROCm 7.2.3 compiler",
+      "binarySha256": "7245ffffeb1166adcaa02cc3bfd8cd144069bd44739c19773c5dd9aab6d2985c",
+      "speculative": "DFlash2: --spec-type draft-dflash; MTP: --spec-type draft-mtp with the target as draft model; default draft length 3"
+    },
+    "targets": [
+      "Target UD-Q4_K_XL",
+      "Target UD-Q6_K_XL",
+      "Target UD-Q8_K_XL"
+    ],
+    "draft": "Draft DFlash2 Q8_0",
+    "scope": "HTTP AR, DFlash2 and MTP single-user depth grids and C1/2/4/6/8 concurrency tables, loading and memory for all three targets.",
+    "sampling": {
+      "temperature": 0,
+      "seed": 1,
+      "thinking": false
+    },
+    "timedRunsPerPoint": 1,
+    "gufoInexactMultiUser": {
+      "tables": [
+        "multi-ar-q6",
+        "multi-dflash2-q6",
+        "multi-mtp-q6",
+        "multi-ar-q8",
+        "multi-dflash2-q8",
+        "multi-mtp-q8"
+      ],
+      "driver": "b43f7b4d model-bench with the isolated-AR completion check printing a warning instead of stopping; each artifact's completionExactness records the matching requests"
+    }
+  }
+}

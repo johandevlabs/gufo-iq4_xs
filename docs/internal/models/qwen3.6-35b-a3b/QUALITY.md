@@ -66,9 +66,9 @@ width changes the MoE numeric route (see [README](README.md)).
 
 ## Scope of the target test for prefill changes
 
-The parity fixtures are 12-16 tokens, so the target test never reaches the
-routes that only large chunks take (the paired routed tile map). Changes there
-are qualified by comparing greedy completions on 6K and 12K prompts against the
+The parity fixtures are 12-16 tokens; only the long-chunk check reaches the
+routes that large chunks take (the paired routed tile map), and only at 1,100
+tokens. Changes there are also qualified by comparing greedy completions on 6K and 12K prompts against the
 previous build in server mode; the October 1, 2026 prefill changes keep them
 byte-identical on UD-Q6_K_XL and UD-Q8_K_XL, and both artifacts pass the target
 test and the MoE operator test.
@@ -94,13 +94,29 @@ an RMSE of 0.087 / 0.564 / 1.85 against 0.086 / 0.523 / 2.10 for the FP32 route.
 Both artifacts pass the target test. This bounds a loss to about one MMLU point;
 it does not measure long generations, tool calling or speculative decoding.
 
+## Benchmark output consistency
+
+The October 25, 2026 [benchmarks](BENCHMARKS.md) hash every greedy completion.
+Each multi-user request (pp2048 / tg128) is compared with the same prompt
+decoded alone with AR on the same build:
+
+| Target | AR, C2-C8 | DFlash2 / MTP, C1-C8 |
+| --- | --- | --- |
+| UD-Q4_K_XL | every request matches | every request matches |
+| UD-Q6_K_XL, UD-Q8_K_XL | none match (prose prompt) | mixed prompt: none match; repetitive: all match |
+
+Single-user DFlash2 and MTP agree with each other at depth 0 on all three
+targets. Production `8e509128` gives the same Q6 differences, so they predate
+the Q4_K/Q5_K changes. These hashes show which runs are numerically
+interchangeable; they do not measure accuracy.
+
 ## Reproduce
 
 Build the `gpu-test` preset and run the binaries inside the ROCm container:
 
 ```sh
 cmake --build --preset gpu-test --target qwen35ba3b_target_test qwen35ba3b_moe_ops_test qwen_mtp_gpu_test --parallel 16
-export GUFO_QWEN35BA3B_MODEL=path/to/Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL.gguf
+export GUFO_QWEN35BA3B_MODEL=path/to/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf
 ./build/gpu-test/bin/qwen35ba3b_target_test
 ./build/gpu-test/bin/qwen35ba3b_moe_ops_test
 ./build/gpu-test/bin/qwen_mtp_gpu_test "$GUFO_QWEN35BA3B_MODEL" "$GUFO_QWEN35BA3B_MODEL"

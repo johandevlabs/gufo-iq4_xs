@@ -1,0 +1,99 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-34-generic",
+      "memoryTotalBytes": 134307635200,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "fc9a031161170511545286fa0e767880e688de9c0af46c05dc9e21d2680b3fe5",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-25",
+  "mode": "dflash2",
+  "model": {
+    "id": "Qwen3.6-35B-A3B",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1-dev (build 11069, commit 68d9053a)",
+    "file cache reset before each launch with `echo 3 > /proc/sys/vm/drop_caches`",
+    "readiness = HTTP 200 on /health"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "q4": {
+      "command": "llama-server -m Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf -c 133760 -np 1 --port 36377 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --spec-draft-ngl 999",
+      "ready_s": 9.569,
+      "ready_s_sd": null,
+      "samples": 1
+    },
+    "q6": {
+      "command": "llama-server -m Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf -c 133760 -np 1 --port 38523 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --spec-draft-ngl 999",
+      "ready_s": 13.164,
+      "ready_s_sd": null,
+      "samples": 1
+    },
+    "q8": {
+      "command": "llama-server -m Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf -c 133760 -np 1 --port 58887 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0 --spec-type draft-dflash --spec-draft-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --spec-draft-ngl 999",
+      "ready_s": 15.344,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
+      "-c",
+      "133760",
+      "-np",
+      "1",
+      "--port",
+      "58887",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0",
+      "--spec-type",
+      "draft-dflash",
+      "--spec-draft-model",
+      "Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf",
+      "--spec-draft-ngl",
+      "999"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "b43f7b4dc0bed7fff09e006b146a4e583145c816"
+  },
+  "table": "loading",
+  "target": "reference"
+}

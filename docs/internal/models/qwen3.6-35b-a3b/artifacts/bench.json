@@ -1,0 +1,249 @@
+{
+  "schema": "gufo-model-bench/1",
+  "category": "llm",
+  "model": {
+    "id": "Qwen3.6-35B-A3B",
+    "docs": "qwen3.6-35b-a3b",
+    "label": "Qwen35B-A3B"
+  },
+  "files": {
+    "gguf": "target GGUF with its MTP head (UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL)",
+    "draft": "DFlash2 Q8_0 draft GGUF"
+  },
+  "variants": {
+    "q4": {
+      "label": "Q4",
+      "requires": [
+        "gguf"
+      ]
+    },
+    "q6": {
+      "label": "Q6",
+      "requires": [
+        "gguf"
+      ]
+    },
+    "q8": {
+      "label": "Q8",
+      "requires": [
+        "gguf"
+      ]
+    }
+  },
+  "sampling": {
+    "temperature": 0,
+    "seed": 1
+  },
+  "gufo": {
+    "serve": [],
+    "llm": [
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--prefill-chunk",
+      "2048",
+      "--prefill-decode-rounds",
+      "8"
+    ],
+    "readiness": "/ready"
+  },
+  "reference": {
+    "name": "llama.cpp",
+    "server": "llama-server",
+    "args": [
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ],
+    "endpoint_profile": "openai",
+    "readiness": "/health"
+  },
+  "speculative": {
+    "mode": "dflash2",
+    "label": "DFlash2",
+    "gufo_args": [
+      "--speculative",
+      "dflash2",
+      "--dflash-model",
+      "{draft}",
+      "--draft-tokens",
+      "7",
+      "--draft-policy",
+      "adaptive"
+    ],
+    "reference": {
+      "args": [
+        "--spec-type",
+        "draft-dflash",
+        "--spec-draft-model",
+        "{draft}",
+        "--spec-draft-ngl",
+        "999"
+      ]
+    }
+  },
+  "tables": {
+    "single-ar": {
+      "title": "Single user, autoregressive",
+      "per_variant": true,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 133760,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher"
+    },
+    "single-dflash2": {
+      "title": "Single user, DFlash2",
+      "per_variant": true,
+      "speculative": true,
+      "prompt_tokens": 2048,
+      "output_tokens": 128,
+      "depths": [
+        0,
+        4096,
+        8192,
+        12288,
+        16384,
+        32768,
+        65536,
+        131072
+      ],
+      "context": 133760,
+      "depth_tolerance": 0.005,
+      "prefix": {
+        "generator": "synthetic-paragraphs",
+        "seed": 1
+      },
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "workloads": {
+        "single-dflash2": {
+          "label": "mixed",
+          "workload": "prose"
+        },
+        "single-dflash2-repetition": {
+          "label": "repetitive",
+          "workload": "repetition"
+        }
+      }
+    },
+    "multi-ar": {
+      "title": "Multiple users, autoregressive",
+      "per_variant": true,
+      "modes": [
+        "ar"
+      ],
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "prompt_tokens": 2048,
+      "prefill_first": true,
+      "corpus_layout": "homogeneous",
+      "workload": "prose"
+    },
+    "multi-dflash2": {
+      "title": "Multiple users, DFlash2",
+      "per_variant": true,
+      "modes": [
+        "dflash2"
+      ],
+      "concurrency": [
+        1,
+        2,
+        4,
+        6,
+        8
+      ],
+      "context": 4096,
+      "output_tokens": 128,
+      "cache_prompt": true,
+      "warmup": 1,
+      "repetitions": 1,
+      "metric": "tok/s",
+      "better": "higher",
+      "prompt_tokens": 2048,
+      "prefill_first": true,
+      "workloads": {
+        "multi-mixed": {
+          "label": "mixed",
+          "corpus_layout": "homogeneous",
+          "workload": "prose"
+        },
+        "multi-repetition": {
+          "label": "repetitive",
+          "corpus_layout": "homogeneous",
+          "workload": "repetition"
+        }
+      }
+    },
+    "loading": {
+      "title": "Loading time",
+      "per_variant": false,
+      "context": 133760,
+      "sessions": 1,
+      "repetitions": 1,
+      "metric": "seconds",
+      "better": "lower",
+      "rows": "variants"
+    },
+    "memory": {
+      "title": "Memory occupation",
+      "per_variant": true,
+      "context": 133760,
+      "workloads": [
+        {
+          "id": "pp2048 + tg128",
+          "depth": 0,
+          "prompt_tokens": 2048,
+          "output_tokens": 128
+        },
+        {
+          "id": "16K prefix, pp4096 + tg128",
+          "depth": 16384,
+          "prompt_tokens": 4096,
+          "output_tokens": 128
+        }
+      ],
+      "metric": "GiB",
+      "better": "lower",
+      "mode": "ar"
+    }
+  }
+}

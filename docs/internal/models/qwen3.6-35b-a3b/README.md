@@ -4,11 +4,22 @@ Sparse Mixture-of-Experts text model (`qwen35moe`) on gfx1151. 256 routed
 experts with 8 active per token, plus one always-on shared expert. Layers
 alternate gated-delta-net (GDN) recurrence and full attention in a 3:1 ratio;
 the attention layers use 16 query / 2 key-value heads at `head_dim` 256.
-Production target is the **UD-Q8_K_XL** GGUF (37 GiB weights); request state
-and KV/SSM caches need additional memory. **UD-Q6_K_XL** (30.5 GiB) is faster
-for both prefill and decode, see [Benchmarks](BENCHMARKS.md). Both GGUFs carry
-an MTP head (`blk.40.nextn.*`) that Gufo uses as a speculative draft; a
-separate DFlash2 draft is published as a GGUF or can be converted (below).
+Three Unsloth GGUFs from
+[`unsloth/Qwen3.6-35B-A3B-MTP-GGUF`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/tree/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d)
+are supported; request state and KV/SSM caches need memory on top of the
+weights:
+
+| File | Weights | Routed experts |
+| --- | ---: | --- |
+| [`Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) | 21.3 GiB | gate/up Q4_K (layer 39 Q5_K); down Q5_K (layers 34, 38, 39 Q6_K) |
+| [`Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf) | 30.4 GiB | gate/up Q6_K (layer 39 Q8_0); down Q8_0 |
+| [`Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf) | 36.4 GiB | gate/up Q8_0 (layer 39 BF16); down Q8_0 (layers 34, 38, 39 BF16) |
+
+UD-Q4_K_XL prefills fastest (3,169 tok/s at pp2048, versus 3,079 for
+UD-Q6_K_XL and 2,832 for UD-Q8_K_XL) and UD-Q8_K_XL decodes slowest; see
+[Benchmarks](BENCHMARKS.md). Every file carries an MTP head
+(`blk.40.nextn.*`) that Gufo uses as a speculative draft; a separate DFlash2
+draft is published as a GGUF or can be converted (below).
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -16,16 +27,19 @@ separate DFlash2 draft is published as a GGUF or can be converted (below).
 
 ```sh
 nix build
-MODEL=path/to/Qwen3.6-35B-A3B-MTP-UD-Q8_K_XL.gguf
+MODEL=path/to/Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf
 ./result/bin/gufo serve llm --model "$MODEL" --sessions 1 --context 32768
 ./result/bin/gufo prompt --model "$MODEL" --prompt "Explain virtual memory." --temperature 0
 ```
 
 Text-only model; there is no matching `mmproj` projector in scope. In prefill,
-each routed-expert projection picks its route by format: Q8_0 / Q6_K take
-Flash-Next's routed F16 WMMA GEMM, BF16 the grouped WMMA GEMM, and anything
-else the per-slot GEMV. Chunks of 1024+ tokens run gate and up as one paired
-launch when the down projection takes the routed GEMM too. Decode runs the
+each routed-expert projection picks its route by format: Q8_0, Q6_K, Q5_K and
+Q4_K take Flash-Next's routed F16 WMMA GEMM, BF16 the grouped WMMA GEMM, and
+anything else the per-slot GEMV. Chunks of 1024+ tokens run gate and up as one
+paired launch when the down projection takes the routed GEMM too; the down
+projection then reuses the pair's 64/128-row tile map for Q8_0 and Q6_K, while
+Q5_K and Q4_K, which the kernel decodes only in 16- and 48-row tiles, keep the
+regular map. Decode runs the
 vendored llama.cpp-derived MMQ vector kernels; their device context is bound
 at model load when the config reports an MoE architecture.
 
@@ -43,10 +57,11 @@ at model load when the config reports an MoE architecture.
   --prompt "Explain virtual memory." --temperature 0
 ```
 
-In the September 26, 2026 sweep n=2 was fastest for both quants: tg128
-68.39 t/s on UD-Q6_K_XL and 65.01 t/s on UD-Q8_K_XL, versus 54.02 and 51.59
-without MTP (+26%). An earlier UD-Q8_K_XL run favoured n=1, and acceptance
-depends on the generated text, so re-check n on your own workload.
+In a September 26, 2026 sweep n=2 was fastest on UD-Q6_K_XL and UD-Q8_K_XL;
+an earlier UD-Q8_K_XL run favoured n=1. With n=2, the October 25 benchmark
+decodes UD-Q6_K_XL at 66.95 tok/s on mixed text and 95.08 on repetitive text
+at pp2048, versus 55.07 without MTP. Acceptance depends on the generated text,
+so re-check n on your own workload.
 
 As in Qwen3.8 Flash-Next, each MTP draft token scores only the first 98,304
 output rows plus a per-request table of 1,024 output rows (about 2–4 MB per
@@ -61,10 +76,11 @@ A Q8_0 conversion of
 [`incoai/Qwen3.6-35B-A3B-DFlash2`](https://huggingface.co/incoai/Qwen3.6-35B-A3B-DFlash2)
 is published as
 [`aminya/Qwen3.6-35B-A3B-DFlash2-GGUF`](https://huggingface.co/aminya/Qwen3.6-35B-A3B-DFlash2-GGUF)
-(`Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf`). The numbers below were measured with a
-local conversion of the same checkpoint, made with a llama.cpp checkout whose
-converter registers `DFlash2DraftModel` (tested at `b81c99b47`); the converter
-takes the tokenizer from the target checkpoint:
+(`Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf`, revision
+[`1e26e349`](https://huggingface.co/aminya/Qwen3.6-35B-A3B-DFlash2-GGUF/blob/1e26e3499d865b9d2fc55e019d65b3f0e8ab6846/Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf));
+[Benchmarks](BENCHMARKS.md) use that file. To convert the checkpoint yourself,
+use a llama.cpp checkout whose converter registers `DFlash2DraftModel` (tested
+at `b81c99b47`); the converter takes the tokenizer from the target checkpoint:
 
 ```sh
 nix develop -c hf download incoai/Qwen3.6-35B-A3B-DFlash2 --local-dir draft
@@ -82,7 +98,7 @@ conversion drops the sign of every quant in tensors with rows of 4,096 values
 or more (`attn_output`, `ffn_down`, `fc`). The draft still loads, but accepts
 no drafts.
 
-On UD-Q6_K_XL, 512 greedy tokens with thinking off, a prose explanation ran at
+With such a local conversion on UD-Q6_K_XL, 512 greedy tokens with thinking off, a prose explanation ran at
 73.5 tok/s with `--draft-tokens 3 --draft-policy fixed` and a code rewrite at
 89.7 tok/s with 7, versus 52 tok/s without a draft; the best MTP setting
 reached 63.6 and 68.7. The adaptive policy (66.6 / 88.8) does not find the
@@ -92,7 +108,10 @@ understates DFlash2 because its synthetic prompt drafts poorly.
 Greedy speculation on this model is not bit-exact against AR: MTP and DFlash2
 agree with each other, but verifying a batch of tokens takes a different
 MoE numeric route than single-token decode, so near-tied tokens can flip late
-in a long answer. The Qwen3.8 27B keeps that contract; this model does not yet.
+in a long answer. Batched decode of concurrent requests takes the same route.
+The Qwen3.8 27B keeps that contract; this model does not yet. In the
+October 25 benchmark UD-Q4_K_XL matched AR in every concurrent run, while
+UD-Q6_K_XL and UD-Q8_K_XL diverged on prose and mixed prompts.
 
 ### Serving
 
@@ -121,17 +140,17 @@ sessions decode, a prompt is prefilled in `--prefill-chunk` token slices.
 slices, so a larger chunk does not lengthen their stalls in proportion. Each
 session holds its own KV/SSM state: at context 262144, one session used
 38.7 GiB of device memory in total and four 59.7 GiB. On this hardware DFlash2
-decodes faster than MTP at most depths and under concurrency, while MTP
-prefills short and medium prompts slightly faster; see
-[Benchmarks](BENCHMARKS.md#serving).
+decodes much faster than MTP on repetitive text, the two are close on mixed
+text, and MTP prefills slightly faster; see
+[Benchmarks](BENCHMARKS.md#multiple-users-dflash2).
 
 Thinking/template controls and HTTP sampling defaults are described in
 [the server guide](../../SERVER.md#reasoning-controls).
 
 ## Scope
 
-- Quantized MoE expert GEMM (Q8_0 / Q6_K) and the fused gate/up/down expert
-  path; dense attention and GDN layers are shared with the other Qwen runners.
+- Quantized MoE expert GEMM (Q8_0 / Q6_K / Q5_K / Q4_K) and the fused
+  gate/up/down expert path; dense attention and GDN layers are shared with the other Qwen runners.
 - No vision, no audio. Speculative decoding is MTP (the GGUF's own head) or a
   converted DFlash2 draft; both run in `gufo prompt`, `gufo bench` and
   `gufo serve`.
