@@ -214,6 +214,18 @@ SsmControls LaunchSsmControls(const models::QwenLayerWeights& layer,
       return {packed, packed + time_step_rank, row_stride};
     }
   }
+  // Single-token decode computes the controls in its fused input projection.
+  // Formats without a shared exact projection (F32, BF16) take that kernel's
+  // arithmetic for every row instead of the row GEMV.
+  if ((!SupportsExactSharedProjection(alpha.type) ||
+       !SupportsExactSharedProjection(beta.type)) &&
+      LaunchSsmControlProjectionsRows(alpha.data, alpha.type, beta.data,
+                                      beta.type, scratch.decode.normed.data(),
+                                      scratch.ssm.alpha.data(),
+                                      scratch.ssm.beta.data(), batch_size,
+                                      hidden_size, time_step_rank, stream)) {
+    return {scratch.ssm.alpha.data(), scratch.ssm.beta.data(), time_step_rank};
+  }
   LaunchProjection(alpha, scratch.decode.normed.data(),
                    scratch.ssm.alpha.data(), batch_size, time_step_rank,
                    hidden_size, stream);

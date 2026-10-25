@@ -163,10 +163,58 @@ void CheckLongPromptChunk(
             << " rmse=" << result.root_mean_square_error << "\n";
 }
 
+// Speculative verification must reproduce single-token decode: each row of an
+// eight-token verification chunk must give the logits that decoding the same
+// tokens one at a time gives, bit for bit.
+void CheckVerificationMatchesDecode(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& model) {
+  constexpr std::size_t kRows = 8;
+  std::string error;
+  auto executor = Executor::Create(model, &error, 4096);
+  Expect(executor != nullptr, error);
+  const auto tokens = executor->GetTokenizer().Encode(kTexts[0]);
+  Expect(tokens.size() > kRows + 8, "fixture text is too short");
+  const auto position = static_cast<std::uint32_t>(tokens.size() - kRows);
+  const auto candidates = std::span(tokens).subspan(position);
+
+  executor->Reset();
+  (void)executor->ForwardPromptBatch(std::span(tokens).first(position));
+  const auto snapshot = executor->SaveSnapshot(position);
+  std::vector<std::vector<float>> decoded;
+  for (std::size_t r = 0; r < kRows; ++r) {
+    (void)executor->ForwardToken(candidates[r],
+                                 position + static_cast<std::uint32_t>(r));
+    const auto view = executor->CopyLastLogits();
+    decoded.emplace_back(view.begin(), view.end());
+  }
+  executor->RestoreSnapshot(*snapshot);
+  (void)executor->ForwardVerificationChunk(candidates, position, true);
+  std::size_t differing_rows = 0;
+  for (std::size_t r = 0; r < kRows; ++r) {
+    const auto view = executor->CopyVerificationLogits(r);
+    const std::vector<float> verified(view.begin(), view.end());
+    Expect(verified.size() == decoded[r].size(), "logit width mismatch");
+    std::size_t differing = 0;
+    float max_abs = 0.0F;
+    for (std::size_t i = 0; i < verified.size(); ++i) {
+      if (std::memcmp(&verified[i], &decoded[r][i], sizeof(float)) != 0) {
+        ++differing;
+        max_abs = std::max(max_abs, std::fabs(verified[i] - decoded[r][i]));
+      }
+    }
+    differing_rows += differing != 0 ? 1 : 0;
+    std::cout << "verification row " << r << ": " << differing
+              << " logits differ, max_abs=" << max_abs << "\n";
+  }
+  Expect(differing_rows == 0,
+         "verification rows differ from single-token decode");
+}
+
 // Concurrent speculative verification stacks every session's draft rows into
 // one MoE batch (up to 8 sessions x 8 rows). Three sessions with 8 + 8 + 7
 // rows exceed the Q8_0 gated vector kernel's 8-row launch limit and leave a
-// partial slice; each row must agree with that session verifying alone.
+// partial slice; each row must equal that session verifying alone, bit for
+// bit.
 void CheckConcurrentVerification(
     const std::shared_ptr<const gufo::hip::QwenGpuModel>& model) {
   constexpr std::array<std::size_t, 3> kRows{8, 8, 7};
@@ -220,10 +268,14 @@ void CheckConcurrentVerification(
              "concurrent verification changed the greedy token: session " +
                  std::to_string(s) + " row " + std::to_string(r) + ": " +
                  result.details);
+      Expect(std::memcmp(actual.data(), expected[s][r].data(),
+                         actual.size() * sizeof(float)) == 0,
+             "concurrent verification changed the logits: session " +
+                 std::to_string(s) + " row " + std::to_string(r));
     }
   }
   std::cout << "concurrent verification: sessions=" << sessions.size()
-            << " rows=" << kRows[0] + kRows[1] + kRows[2] << " top1 match\n";
+            << " rows=" << kRows[0] + kRows[1] + kRows[2] << " bit-identical\n";
 }
 
 }  // namespace
@@ -247,6 +299,7 @@ int main() {
     CheckCpuGpuLogitParity(model, *reader);
     CheckPrefillDecodeParity(model);
     CheckLongPromptChunk(model);
+    CheckVerificationMatchesDecode(model);
     CheckConcurrentVerification(model);
   } catch (const std::exception& e) {
     std::cerr << "qwen35ba3b_target_test: " << e.what() << "\n";

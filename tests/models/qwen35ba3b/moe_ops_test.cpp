@@ -13,6 +13,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "qfn_mmq.h"
@@ -24,6 +25,8 @@
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"
 #include "src/families/qwen/kernels/ops/swiglu.hpp"
+#include "src/families/qwen/kernels/ops/norm_residual.hpp"
+#include "src/families/qwen/kernels/ops/ssm.hpp"
 #include "src/models/qwen/modules/moe.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"
@@ -937,6 +940,302 @@ void CheckRoutedPair(hipStream_t stream) {
   std::cout << "routed pair: OK\n";
 }
 
+/// The router, shared-expert gate and shared expert as single-token decode
+/// and batched decode / verification launch them; each batched row must equal
+/// that row decoded alone, bit for bit.
+void CheckSharedPathBatchInvariance(const Fixture& f, hipStream_t stream) {
+  constexpr std::size_t kRows = 8;
+  std::vector<float> x(kRows * f.kHidden);
+  for (auto& v : x) {
+    v = RndFloat(-1.0F, 1.0F);
+  }
+  gufo::test::DeviceBuffer<float> d_x(x);
+  gufo::test::DeviceBuffer<float> d_router(f.router);
+  gufo::test::DeviceBuffer<float> d_shexp_gi(f.shexp_gate_inp);
+  gufo::test::DeviceBuffer<Q8_0Block> d_gate(f.shexp_gate_q);
+  gufo::test::DeviceBuffer<Q8_0Block> d_up(f.shexp_up_q);
+  gufo::test::DeviceBuffer<Q8_0Block> d_down(f.shexp_down_q);
+  const auto compare = [](const char* name, gufo::test::DeviceBuffer<float>& a,
+                          gufo::test::DeviceBuffer<float>& b) {
+    HIP_CHECK(hipDeviceSynchronize());
+    const auto ha = a.CopyToHost();
+    const auto hb = b.CopyToHost();
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < ha.size(); ++i) {
+      differing += std::memcmp(&ha[i], &hb[i], sizeof(float)) != 0 ? 1 : 0;
+    }
+    std::cout << "shared path " << name << ": " << differing << "/" << ha.size()
+              << " differ\n";
+    return differing;
+  };
+  std::size_t differing = 0;
+
+  // Router and shared-expert gate: F32 GEMV against the row GEMV.
+  for (const auto& [name, weights, m] :
+       {std::tuple{"router", d_router.data(), std::size_t{f.kExperts}},
+        std::tuple{"shexp gate", d_shexp_gi.data(), std::size_t{1}}}) {
+    gufo::test::DeviceBuffer<float> one(kRows * m);
+    gufo::test::DeviceBuffer<float> rows(kRows * m);
+    for (std::size_t r = 0; r < kRows; ++r) {
+      gufo::hip::LaunchGEMV(weights, GgmlType::kF32, d_x.data() + r * f.kHidden,
+                            one.data() + r * m, m, f.kHidden, stream);
+    }
+    gufo::hip::LaunchGEMVRows(weights, GgmlType::kF32, d_x.data(), rows.data(),
+                              kRows, m, f.kHidden, stream);
+    differing += compare(name, one, rows);
+  }
+
+  // Shared expert gate/up: fused SwiGLU GEMV against two projections.
+  gufo::test::DeviceBuffer<float> act_one(kRows * f.kSharedFf);
+  gufo::test::DeviceBuffer<float> gate(kRows * f.kSharedFf);
+  gufo::test::DeviceBuffer<float> up(kRows * f.kSharedFf);
+  gufo::test::DeviceBuffer<float> act(kRows * f.kSharedFf);
+  for (std::size_t r = 0; r < kRows; ++r) {
+    gufo::hip::LaunchFusedSwiGLUGEMV(
+        d_gate.data(), GgmlType::kQ8_0, d_up.data(), GgmlType::kQ8_0,
+        d_x.data() + r * f.kHidden, act_one.data() + r * f.kSharedFf,
+        f.kSharedFf, f.kHidden, stream);
+  }
+  gufo::hip::LaunchBatchedQuantGEMMFp32(GgmlType::kQ8_0, d_gate.data(),
+                                        d_x.data(), gate.data(), kRows,
+                                        f.kSharedFf, f.kHidden, stream);
+  gufo::hip::LaunchBatchedQuantGEMMFp32(GgmlType::kQ8_0, d_up.data(),
+                                        d_x.data(), up.data(), kRows,
+                                        f.kSharedFf, f.kHidden, stream);
+  gufo::hip::LaunchBatchedSwiGLUActivation(
+      gate.data(), up.data(), act.data(), nullptr, kRows * f.kSharedFf, stream);
+  differing += compare("shexp gate/up", act_one, act);
+
+  // Shared expert down: Q8_0 GEMV against the batched projection, on the
+  // same activation rows.
+  gufo::test::DeviceBuffer<float> down_one(kRows * f.kHidden);
+  gufo::test::DeviceBuffer<float> down(kRows * f.kHidden);
+  for (std::size_t r = 0; r < kRows; ++r) {
+    gufo::hip::LaunchGEMV(
+        d_down.data(), GgmlType::kQ8_0, act_one.data() + r * f.kSharedFf,
+        down_one.data() + r * f.kHidden, f.kHidden, f.kSharedFf, stream);
+  }
+  gufo::hip::LaunchBatchedQuantGEMMFp32(GgmlType::kQ8_0, d_down.data(),
+                                        act_one.data(), down.data(), kRows,
+                                        f.kHidden, f.kSharedFf, stream);
+  differing += compare("shexp down", down_one, down);
+  Expect(differing == 0,
+         "batched router or shared expert differs from single-token decode");
+  std::cout << "shared path batch invariance: OK\n";
+}
+
+/// The gated-delta-net input/output projections and RMSNorm at this model's
+/// shapes, as single-token decode and batched decode / verification launch
+/// them; each batched row must equal that row decoded alone, bit for bit.
+void CheckSsmPathBatchInvariance(hipStream_t stream) {
+  constexpr std::size_t kRows = 4;
+  constexpr std::size_t kHidden = 2048;
+  constexpr std::size_t kQkv = 8192;
+  constexpr std::size_t kInner = 4096;
+  constexpr std::size_t kRank = 32;
+  const auto random = [](std::size_t n, float scale) {
+    std::vector<float> v(n);
+    for (auto& e : v) {
+      e = RndFloat(-1.0F, 1.0F) * scale;
+    }
+    return v;
+  };
+  const auto x = random(kRows * kHidden, 1.0F);
+  const auto inner_x = random(kRows * kInner, 1.0F);
+  const auto qkv_src = random(kQkv * kHidden, 0.05F);
+  const auto gate_src = random(kInner * kHidden, 0.05F);
+  const auto out_src = random(kHidden * kInner, 0.05F);
+  gufo::test::DeviceBuffer<float> d_x(x);
+  gufo::test::DeviceBuffer<float> d_inner_x(inner_x);
+  gufo::test::DeviceBuffer<Q8_0Block> d_qkv(
+      QuantizeQ8_0(qkv_src.data(), kQkv, kHidden));
+  gufo::test::DeviceBuffer<Q8_0Block> d_gate(
+      QuantizeQ8_0(gate_src.data(), kInner, kHidden));
+  gufo::test::DeviceBuffer<Q8_0Block> d_out(
+      QuantizeQ8_0(out_src.data(), kHidden, kInner));
+  gufo::test::DeviceBuffer<float> d_alpha(random(kRank * kHidden, 0.05F));
+  gufo::test::DeviceBuffer<float> d_beta(random(kRank * kHidden, 0.05F));
+  gufo::test::DeviceBuffer<float> d_norm(random(kHidden, 1.0F));
+  std::size_t total = 0;
+  const auto compare = [&](const char* name, gufo::test::DeviceBuffer<float>& a,
+                           gufo::test::DeviceBuffer<float>& b) {
+    HIP_CHECK(hipDeviceSynchronize());
+    const auto ha = a.CopyToHost();
+    const auto hb = b.CopyToHost();
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < ha.size(); ++i) {
+      differing += std::memcmp(&ha[i], &hb[i], sizeof(float)) != 0 ? 1 : 0;
+    }
+    std::cout << "ssm path " << name << ": " << differing << "/" << ha.size()
+              << " differ\n";
+    total += differing;
+  };
+
+  gufo::test::DeviceBuffer<float> qkv_one(kRows * kQkv);
+  gufo::test::DeviceBuffer<float> gate_one(kRows * kInner);
+  gufo::test::DeviceBuffer<float> alpha_one(kRows * kRank);
+  gufo::test::DeviceBuffer<float> beta_one(kRows * kRank);
+  gufo::test::DeviceBuffer<float> out_one(kRows * kHidden);
+  gufo::test::DeviceBuffer<float> norm_one(kRows * kHidden);
+  for (std::size_t r = 0; r < kRows; ++r) {
+    gufo::hip::LaunchFusedSSMInputProjections(
+        d_qkv.data(), GgmlType::kQ8_0, d_gate.data(), GgmlType::kQ8_0,
+        d_alpha.data(), GgmlType::kF32, d_beta.data(), GgmlType::kF32,
+        d_x.data() + r * kHidden, qkv_one.data() + r * kQkv,
+        gate_one.data() + r * kInner, alpha_one.data() + r * kRank,
+        beta_one.data() + r * kRank, kHidden, kQkv, kInner, kRank, stream);
+    gufo::hip::LaunchGEMV(
+        d_out.data(), GgmlType::kQ8_0, d_inner_x.data() + r * kInner,
+        out_one.data() + r * kHidden, kHidden, kInner, stream);
+    gufo::hip::LaunchRMSNorm(d_x.data() + r * kHidden, d_norm.data(),
+                             norm_one.data() + r * kHidden, kHidden, 1e-6F,
+                             stream);
+  }
+  gufo::test::DeviceBuffer<float> qkv(kRows * kQkv);
+  gufo::test::DeviceBuffer<float> gate(kRows * kInner);
+  gufo::test::DeviceBuffer<float> alpha(kRows * kRank);
+  gufo::test::DeviceBuffer<float> beta(kRows * kRank);
+  gufo::test::DeviceBuffer<float> out(kRows * kHidden);
+  gufo::test::DeviceBuffer<float> norm(kRows * kHidden);
+  gufo::hip::LaunchBatchedQuantGEMMFp32(GgmlType::kQ8_0, d_qkv.data(),
+                                        d_x.data(), qkv.data(), kRows, kQkv,
+                                        kHidden, stream);
+  gufo::hip::LaunchBatchedQuantGEMMFp32(GgmlType::kQ8_0, d_gate.data(),
+                                        d_x.data(), gate.data(), kRows, kInner,
+                                        kHidden, stream);
+  Expect(
+      gufo::hip::LaunchSsmControlProjectionsRows(
+          d_alpha.data(), GgmlType::kF32, d_beta.data(), GgmlType::kF32,
+          d_x.data(), alpha.data(), beta.data(), kRows, kHidden, kRank, stream),
+      "SSM control rows rejected the hidden size");
+  gufo::hip::LaunchBatchedQuantGEMMFp32(GgmlType::kQ8_0, d_out.data(),
+                                        d_inner_x.data(), out.data(), kRows,
+                                        kHidden, kInner, stream);
+  gufo::hip::LaunchBatchedRMSNorm(d_x.data(), d_norm.data(), norm.data(),
+                                  nullptr, kRows, kHidden, 1e-6F, stream);
+  compare("qkv", qkv_one, qkv);
+  compare("gate", gate_one, gate);
+  compare("alpha", alpha_one, alpha);
+  compare("beta", beta_one, beta);
+  compare("ssm_out", out_one, out);
+  compare("rms norm", norm_one, norm);
+  Expect(total == 0, "batched SSM-layer projection differs from decode");
+  std::cout << "ssm path batch invariance: OK\n";
+}
+
+/// Routed experts as single-token decode (ExecuteMoeDecodeStep) and batched
+/// decode / speculative verification (LaunchMoeFfn) launch them. Verification
+/// must reproduce single-token decode, so each batched row's SwiGLU activation
+/// and down projection must equal that row decoded alone, bit for bit.
+void CheckDecodeBatchInvariance(hipStream_t stream) {
+  constexpr std::uint32_t kExperts = 32;
+  constexpr std::uint32_t kUsed = 8;
+  constexpr std::size_t kFf = 512;
+  constexpr std::size_t kHidden = 2048;
+  constexpr std::size_t kGatedVecMaxRows = 8;
+  constexpr int kQ8_0 = static_cast<int>(GgmlType::kQ8_0);
+  for (const RoutedCase& routed_case : kRoutedCases) {
+    const GgmlType type = routed_case.type;
+    gufo::test::DeviceBuffer<std::uint8_t> d_gate(
+        RandomExperts(type, kExperts * kFf, kHidden));
+    gufo::test::DeviceBuffer<std::uint8_t> d_up(
+        RandomExperts(type, kExperts * kFf, kHidden));
+    gufo::test::DeviceBuffer<std::uint8_t> d_down(
+        RandomExperts(type, kExperts * kHidden, kFf));
+    const auto gate_up = [&](const float* x, const std::int32_t* ids,
+                             float* act, std::size_t rows) {
+      if (type == GgmlType::kQ8_0) {
+        for (std::size_t row = 0; row < rows; row += kGatedVecMaxRows) {
+          const std::size_t n = std::min(kGatedVecMaxRows, rows - row);
+          Expect(qfn_mmq_moe_gated_vec(
+                     kQ8_0, d_gate.data(), d_up.data(), x + row * kHidden,
+                     ids + row * kUsed, act + row * kUsed * kFf,
+                     static_cast<int>(kFf), static_cast<int>(kHidden),
+                     static_cast<int>(n), static_cast<int>(kExperts),
+                     static_cast<int>(kUsed), stream) == 0,
+                 "qfn_mmq_moe_gated_vec failed");
+        }
+      } else {
+        gufo::hip::LaunchMoeSlotSwigluGemv(
+            d_gate.data(), type, d_up.data(), type, x, ids, act, kFf, kHidden,
+            static_cast<std::uint32_t>(rows * kUsed), kUsed, stream);
+      }
+    };
+    const auto down = [&](const float* act, const std::int32_t* ids, float* out,
+                          std::size_t rows) {
+      const auto slots = static_cast<std::uint32_t>(rows * kUsed);
+      if (type == GgmlType::kQ8_0) {
+        Expect(
+            qfn_mmq_moe_vec(kQ8_0, d_down.data(), act, ids, out,
+                            static_cast<int>(kHidden), static_cast<int>(kFf),
+                            static_cast<int>(slots), static_cast<int>(kExperts),
+                            1, stream, nullptr, nullptr) == 0,
+            "qfn_mmq_moe_vec failed");
+      } else {
+        gufo::hip::LaunchMoeSlotGemv(d_down.data(), type, act, ids, out,
+                                     kHidden, kFf, slots, 1, stream);
+      }
+    };
+    for (const std::size_t rows :
+         std::array<std::size_t, 6>{2, 3, 8, 9, 23, 64}) {
+      // Few experts, so rows share experts as consecutive draft tokens do.
+      std::vector<std::int32_t> ids(rows * kUsed);
+      for (std::size_t r = 0; r < rows; ++r) {
+        for (std::uint32_t s = 0; s < kUsed; ++s) {
+          ids[r * kUsed + s] = static_cast<std::int32_t>(
+              (s * 4 + (Rnd() % 2 == 0 ? 0 : r)) % kExperts);
+        }
+      }
+      std::vector<float> x(rows * kHidden);
+      for (auto& v : x) {
+        v = RndFloat(-1.0F, 1.0F);
+      }
+      gufo::test::DeviceBuffer<std::int32_t> d_ids(ids);
+      gufo::test::DeviceBuffer<float> d_x(x);
+      gufo::test::DeviceBuffer<float> d_act(rows * kUsed * kFf);
+      gufo::test::DeviceBuffer<float> d_out(rows * kUsed * kHidden);
+      gufo::test::DeviceBuffer<float> d_act_one(rows * kUsed * kFf);
+      gufo::test::DeviceBuffer<float> d_out_one(rows * kUsed * kHidden);
+      gate_up(d_x.data(), d_ids.data(), d_act.data(), rows);
+      down(d_act.data(), d_ids.data(), d_out.data(), rows);
+      for (std::size_t r = 0; r < rows; ++r) {
+        gate_up(d_x.data() + r * kHidden, d_ids.data() + r * kUsed,
+                d_act_one.data() + r * kUsed * kFf, 1);
+        down(d_act_one.data() + r * kUsed * kFf, d_ids.data() + r * kUsed,
+             d_out_one.data() + r * kUsed * kHidden, 1);
+      }
+      HIP_CHECK(hipStreamSynchronize(stream));
+      const auto act = d_act.CopyToHost();
+      const auto act_one = d_act_one.CopyToHost();
+      const auto out = d_out.CopyToHost();
+      const auto out_one = d_out_one.CopyToHost();
+      const auto differing = [](const std::vector<float>& a,
+                                const std::vector<float>& b) {
+        std::size_t count = 0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+          count += std::memcmp(&a[i], &b[i], sizeof(float)) != 0 ? 1 : 0;
+        }
+        return count;
+      };
+      const std::size_t act_diff = differing(act, act_one);
+      const std::size_t out_diff = differing(out, out_one);
+      std::cout << "decode batch " << routed_case.name << " rows=" << rows
+                << ": activation " << act_diff << "/" << act.size()
+                << " differ, down " << out_diff << "/" << out.size()
+                << " differ\n";
+      Expect(act_diff == 0,
+             std::string("batched routed gate/up differs from single-token "
+                         "decode for ") +
+                 routed_case.name);
+      Expect(out_diff == 0,
+             std::string("batched routed down differs from single-token "
+                         "decode for ") +
+                 routed_case.name);
+    }
+  }
+  std::cout << "decode batch invariance: OK\n";
+}
+
 }  // namespace
 
 int main() {
@@ -956,6 +1255,9 @@ int main() {
     CheckDenseBf16Tiled(nullptr);
     CheckRoutedF16(nullptr);
     CheckRoutedPair(nullptr);
+    CheckDecodeBatchInvariance(nullptr);
+    CheckSharedPathBatchInvariance(f, nullptr);
+    CheckSsmPathBatchInvariance(nullptr);
   } catch (const std::exception& e) {
     std::cerr << "qwen35ba3b_moe_ops_test: " << e.what() << "\n";
     return 1;

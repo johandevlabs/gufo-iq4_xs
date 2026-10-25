@@ -9,7 +9,7 @@
 #include <cstdint>
 
 #include "src/core/gguf_reader.hpp"
-#include "src/core/hip/detail/dispatch_telemetry.hpp"
+#include <gufo/ext/experimental/dispatch_telemetry.hpp>
 #include "src/core/hip/detail/gemv_dispatcher.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"
 #include "src/families/qwen/hip_common/quant_ops.hpp"
@@ -32,6 +32,14 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   const std::size_t lane_id = tid & 31u;
   const std::size_t warp_id = tid >> 5u;
   const std::size_t m = (blockIdx.x * WavesPerBlock) + warp_id;
+  // Batched launches give each input row its own grid row; one-row decode
+  // launches a single grid row, so its arithmetic is the same.
+  const std::size_t input_row = blockIdx.y;
+  x += input_row * hidden_size;
+  qkv_out += input_row * qkv_size;
+  gate_out += input_row * inner_size;
+  alpha_out += input_row * time_step_rank;
+  beta_out += input_row * time_step_rank;
   const std::size_t gate_end = qkv_size + inner_size;
   const std::size_t alpha_end = gate_end + time_step_rank;
   const std::size_t total_rows = alpha_end + time_step_rank;
@@ -259,6 +267,30 @@ __global__ void FusedSSMInputProjectionsKernel(
       out_target[row_idx] = block_sum;
     }
   }
+}
+
+bool LaunchSsmControlProjectionsRows(
+    const void* alpha_w, core::GgmlType alpha_type, const void* beta_w,
+    core::GgmlType beta_type, const float* x, float* alpha_out, float* beta_out,
+    std::size_t rows, std::size_t hidden_size, std::size_t time_step_rank,
+    hipStream_t stream) {
+  if (hidden_size % 8 != 0 || rows == 0) {
+    return false;
+  }
+  // The one-row decode kernel with empty QKV and gate ranges: only the
+  // control rows run, with decode's arithmetic for every input row.
+  constexpr std::uint32_t kWavesPerBlock = 4;
+  constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
+  const dim3 grid(
+      static_cast<std::uint32_t>((2 * time_step_rank + kWavesPerBlock - 1) /
+                                 kWavesPerBlock),
+      static_cast<std::uint32_t>(rows));
+  Wave32FusedSSMInputProjectionsKernel_1Row<kWavesPerBlock>
+      <<<grid, kBlockThreads, 0, stream>>>(
+          nullptr, alpha_type, nullptr, alpha_type, alpha_w, alpha_type, beta_w,
+          beta_type, x, nullptr, nullptr, alpha_out, beta_out, hidden_size, 0,
+          0, time_step_rank);
+  return true;
 }
 
 void LaunchFusedSSMInputProjections(

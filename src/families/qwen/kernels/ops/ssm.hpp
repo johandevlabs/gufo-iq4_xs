@@ -77,6 +77,17 @@ void LaunchFusedSSMInputProjections(
     std::size_t hidden_size, std::size_t qkv_size, std::size_t inner_size,
     std::size_t time_step_rank, hipStream_t stream = nullptr);
 
+/// Computes only the alpha and beta rows of LaunchFusedSSMInputProjections for
+/// `rows` input rows of `hidden_size`, writing `rows` x `time_step_rank`
+/// outputs each. Every row is bit-identical to the one-row decode launch.
+/// Returns false, launching nothing, when the decode kernel does not take
+/// `hidden_size`.
+[[nodiscard]] bool LaunchSsmControlProjectionsRows(
+    const void* alpha_w, core::GgmlType alpha_type, const void* beta_w,
+    core::GgmlType beta_type, const float* x, float* alpha_out, float* beta_out,
+    std::size_t rows, std::size_t hidden_size, std::size_t time_step_rank,
+    hipStream_t stream = nullptr);
+
 /// Runs `rows` consecutive verification rows through the conv and DeltaNet
 /// recurrence in a single pair of launches. Each row's arithmetic and its order
 /// are identical to the one-row-per-launch form, so the result is bit-exact;
