@@ -15,8 +15,8 @@ weights:
 | [`Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf) | 30.4 GiB | gate/up Q6_K (layer 39 Q8_0); down Q8_0 |
 | [`Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf) | 36.4 GiB | gate/up Q8_0 (layer 39 BF16); down Q8_0 (layers 34, 38, 39 BF16) |
 
-UD-Q4_K_XL prefills fastest (3,169 tok/s at pp2048, versus 3,079 for
-UD-Q6_K_XL and 2,832 for UD-Q8_K_XL) and UD-Q8_K_XL decodes slowest; see
+UD-Q4_K_XL prefills fastest (3,195 tok/s at pp2048, versus 3,090 for
+UD-Q6_K_XL and 2,847 for UD-Q8_K_XL) and UD-Q8_K_XL decodes slowest; see
 [Benchmarks](BENCHMARKS.md). Every file carries an MTP head
 (`blk.40.nextn.*`) that Gufo uses as a speculative draft; a separate DFlash2
 draft is published as a GGUF or can be converted (below).
@@ -59,8 +59,8 @@ at model load when the config reports an MoE architecture.
 
 In a September 26, 2026 sweep n=2 was fastest on UD-Q6_K_XL and UD-Q8_K_XL;
 an earlier UD-Q8_K_XL run favoured n=1. With n=2, the October 25 benchmark
-decodes UD-Q6_K_XL at 66.95 tok/s on mixed text and 95.08 on repetitive text
-at pp2048, versus 55.07 without MTP. Acceptance depends on the generated text,
+decodes UD-Q6_K_XL at 67.37 tok/s on mixed text and 94.98 on repetitive text
+at pp2048, versus 55.05 without MTP. Acceptance depends on the generated text,
 so re-check n on your own workload.
 
 As in Qwen3.8 Flash-Next, each MTP draft token scores only the first 98,304
@@ -105,13 +105,13 @@ reached 63.6 and 68.7. The adaptive policy (66.6 / 88.8) does not find the
 shorter draft on prose, so pick the length for the workload. `gufo bench`
 understates DFlash2 because its synthetic prompt drafts poorly.
 
-Greedy speculation on this model is not bit-exact against AR: MTP and DFlash2
-agree with each other, but verifying a batch of tokens takes a different
-MoE numeric route than single-token decode, so near-tied tokens can flip late
-in a long answer. Batched decode of concurrent requests takes the same route.
-The Qwen3.8 27B keeps that contract; this model does not yet. In the
-October 25 benchmark UD-Q4_K_XL matched AR in every concurrent run, while
-UD-Q6_K_XL and UD-Q8_K_XL diverged on prose and mixed prompts.
+Greedy MTP and DFlash2 output is bit-exact against AR, as on the Qwen3.8 27B:
+verifying a batch of tokens, and batched decode of concurrent requests,
+reproduce single-token decode arithmetic row for row. This model's
+gated-delta-net alpha/beta controls are F32, so batched rows compute them with
+the decode kernel rather than the row GEMV, whose sum order differs; before
+that, the one-ulp drift flipped near-tied expert choices on UD-Q6_K_XL and
+UD-Q8_K_XL. The target test asserts the identity (see [Quality](QUALITY.md)).
 
 ### Serving
 

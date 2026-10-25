@@ -14,7 +14,8 @@ requires the loaded config to report an MoE architecture, then runs:
 | GPU/CPU greedy parity, position 0–11 | Two fixed text fixtures; the GPU re-prefills each prefix while the CPU reference steps the same tokens (teacher forcing). Compares the final-position logits. | GPU logits must be **finite** and the greedy (argmax) next token must **equal the CPU reference** at every position. `CompareLogits` is called with `atol = rtol = 5e-2`, but the elementwise `match` that drives is not asserted; per-position max-abs and RMSE are printed for reference only. |
 | Prefill/decode self-consistency | Same full prompt: one `ForwardPromptBatch` prefill versus a one-token-at-a-time `ForwardToken` decode loop. | The two next-token IDs must be **exactly equal**. |
 | Long prompt chunk | One 1100-token `ForwardPromptBatch` (the paired gate/up route; the down projection takes the pair's tile map only when its type has 64- and 128-row tiles) against the same prompt prefilled as 600 + 500 tokens. | Logits **finite** and the greedy token **equal** (`CompareLogits`, `atol = rtol = 5e-2`). UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL give identical logits (max abs 0). |
-| Concurrent verification | Three sessions verify 8, 8 and 7 rows together through `ForwardVerificationBatch` (23 stacked rows, more than the 8-row Q8_0 gated vector kernel takes per launch); each session's own `ForwardVerificationChunk` is the reference. | Logits **finite** and the greedy token of **every row equal** to the per-session reference (`CompareLogits`, `atol = rtol = 5e-2`). |
+| Verification equals decode | Eight draft tokens decoded one at a time with `ForwardToken`, then restored from a snapshot and verified as one `ForwardVerificationChunk`. | Every row's logits **bit-identical** to the decoded token's. |
+| Concurrent verification | Three sessions verify 8, 8 and 7 rows together through `ForwardVerificationBatch` (23 stacked rows, more than the 8-row Q8_0 gated vector kernel takes per launch); each session's own `ForwardVerificationChunk` is the reference. | Logits **finite** and **bit-identical** to the per-session reference for every row. |
 
 Executor context is capped at 4096 tokens for every check. The parity fixtures
 must tokenize to at least 12 / 16 tokens respectively, or the test fails rather
@@ -36,6 +37,12 @@ Q5_K and Q4_K at 16- and 48-row tiles; Q8_0 and Q6_K also at the 64- and
 and Q4_K must reject) and the paired gate/up GEMM (all four types, 64- and
 128-row tiles) against per-slot GEMV references, requiring every output
 written and relative error below 1e-2 (routed) and 5e-3 (paired).
+Finally, it launches every projection that single-token decode and batched
+decode / verification take through different kernels the way each path does
+and requires each batched row to be bit-identical to that row decoded alone:
+the routed gate/up/SwiGLU and down projections for all four types at 2-64
+rows, the router, shared-expert gate and shared expert, the gated-delta-net
+input projections and controls, its output projection and RMSNorm.
 
 ## MTP head
 
@@ -60,9 +67,7 @@ targets keep the exact FP32-activation route. This changes only the draft's
 context, never the verified output distribution. On three 2.4K-3.7K-token
 prompts decoded greedily for 768 tokens, outputs and draft/accepted counts
 were identical before and after the change. The concurrent draft cap only
-shortens proposals, so it does not change the verified output distribution
-either; greedy output can still flip at near-ties because the verification
-width changes the MoE numeric route (see [README](README.md)).
+shortens proposals, so it does not change the verified output either.
 
 ## Scope of the target test for prefill changes
 
@@ -97,18 +102,20 @@ it does not measure long generations, tool calling or speculative decoding.
 ## Benchmark output consistency
 
 The October 25, 2026 [benchmarks](BENCHMARKS.md) hash every greedy completion.
-Each multi-user request (pp2048 / tg128) is compared with the same prompt
-decoded alone with AR on the same build:
+On UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL:
 
-| Target | AR, C2-C8 | DFlash2 / MTP, C1-C8 |
-| --- | --- | --- |
-| UD-Q4_K_XL | every request matches | every request matches |
-| UD-Q6_K_XL, UD-Q8_K_XL | none match (prose prompt) | mixed prompt: none match; repetitive: all match |
+- DFlash2 and MTP match AR at all eight single-user depths, mixed and
+  repetitive.
+- Every multi-user request (pp2048 / tg128, C1-C8) matches the same prompt
+  decoded alone with AR: AR from C2, DFlash2 and MTP from C1.
 
-Single-user DFlash2 and MTP agree with each other at depth 0 on all three
-targets. Production `8e509128` gives the same Q6 differences, so they predate
-the Q4_K/Q5_K changes. These hashes show which runs are numerically
-interchangeable; they do not measure accuracy.
+Before `7b1e23a8`, the F32 gated-delta-net controls of batched rows were
+summed in a different order than single-token decode. UD-Q6_K_XL and
+UD-Q8_K_XL then matched AR in none of the prose/mixed multi-user requests and
+at only two to four of the eight single-user depths; production `8e509128`
+showed the same multi-user differences.
+These hashes show which runs are numerically interchangeable; they do not
+measure accuracy.
 
 ## Reproduce
 

@@ -12,11 +12,11 @@
   "scope": "Pinned artifacts for the October 25, 2026 benchmark tables.",
   "benchmarks-2026-10-25": {
     "gufo": {
-      "revision": "b43f7b4dc0bed7fff09e006b146a4e583145c816",
+      "revision": "7b1e23a8",
       "dirty": false,
       "build": "CMake release with the pinned Nix toolchain (GCC 15.3 / ROCm 7.2.3)",
-      "binarySha256": "2034927512b28d0fb4228db2bb7d684d0b4225e1f23e8ed491d8b01264765176",
-      "productionControl": "8e509128 (production, parent commit) shows the same Q6 multi-user AR and DFlash2 output differences"
+      "binarySha256": "acd43c996f1950e24cd375020617996f0f520602d0d9c38d2f7e69afe01a2c7c",
+      "change": "Batched decode and verification compute F32/BF16 gated-delta-net controls with the single-token decode kernel"
     },
     "reference": {
       "name": "llama.cpp",
@@ -24,7 +24,8 @@
       "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
       "backend": "ROCm gfx1151, LLAMA_HIP_UMA=ON, pinned Nix ROCm 7.2.3 compiler",
       "binarySha256": "7245ffffeb1166adcaa02cc3bfd8cd144069bd44739c19773c5dd9aab6d2985c",
-      "speculative": "DFlash2: --spec-type draft-dflash; MTP: --spec-type draft-mtp with the target as draft model; default draft length 3"
+      "speculative": "DFlash2: --spec-type draft-dflash; MTP: --spec-type draft-mtp with the target as draft model; default draft length 3",
+      "note": "llama.cpp rows were measured the same day and reused unchanged"
     },
     "targets": [
       "Target UD-Q4_K_XL",
@@ -39,16 +40,14 @@
       "thinking": false
     },
     "timedRunsPerPoint": 1,
-    "gufoInexactMultiUser": {
-      "tables": [
-        "multi-ar-q6",
-        "multi-dflash2-q6",
-        "multi-mtp-q6",
-        "multi-ar-q8",
-        "multi-dflash2-q8",
-        "multi-mtp-q8"
-      ],
-      "driver": "b43f7b4d model-bench with the isolated-AR completion check printing a warning instead of stopping; each artifact's completionExactness records the matching requests"
-    }
+    "gufoConsistency": {
+      "singleUserSpeculativeMatchingAr": "48 of 48 (3 targets x 2 modes x 8 depths, mixed text)",
+      "multiUserMatchingIsolatedAr": "every request in multi-ar, multi-dflash2 and multi-mtp, all targets",
+      "metric": "SHA-256 of completion text; does not establish original-checkpoint accuracy."
+    },
+    "remeasured": [
+      "multi-ar-q4: the sweep's C8 cell (148.93 tok/s) was an outlier; two alternating reruns of b43f7b4d and 7b1e23a8 gave 165.49-166.22, and the table uses the first 7b1e23a8 rerun.",
+      "single-ar-q4: the sweep's 32K and 64K prefill cells (1,806 / 1,304 tok/s) were low; an A/B rerun gave 1,911 / 1,378 on b43f7b4d and 1,923 / 1,389 on 7b1e23a8, and the table uses that 7b1e23a8 rerun."
+    ]
   }
 }
