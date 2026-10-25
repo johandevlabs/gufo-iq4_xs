@@ -13,9 +13,10 @@ requires the loaded config to report an MoE architecture, then runs:
 | --- | --- | --- |
 | GPU/CPU greedy parity, position 0–11 | Two fixed text fixtures; the GPU re-prefills each prefix while the CPU reference steps the same tokens (teacher forcing). Compares the final-position logits. | GPU logits must be **finite** and the greedy (argmax) next token must **equal the CPU reference** at every position. `CompareLogits` is called with `atol = rtol = 5e-2`, but the elementwise `match` that drives is not asserted; per-position max-abs and RMSE are printed for reference only. |
 | Prefill/decode self-consistency | Same full prompt: one `ForwardPromptBatch` prefill versus a one-token-at-a-time `ForwardToken` decode loop. | The two next-token IDs must be **exactly equal**. |
+| Long prompt chunk | One 1100-token `ForwardPromptBatch` (the paired gate/up route; the down projection takes the pair's tile map only when its type has 64- and 128-row tiles) against the same prompt prefilled as 600 + 500 tokens. | Logits **finite** and the greedy token **equal** (`CompareLogits`, `atol = rtol = 5e-2`). UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL give identical logits (max abs 0). |
 | Concurrent verification | Three sessions verify 8, 8 and 7 rows together through `ForwardVerificationBatch` (23 stacked rows, more than the 8-row Q8_0 gated vector kernel takes per launch); each session's own `ForwardVerificationChunk` is the reference. | Logits **finite** and the greedy token of **every row equal** to the per-session reference (`CompareLogits`, `atol = rtol = 5e-2`). |
 
-Executor context is capped at 4096 tokens for both checks. The parity fixtures
+Executor context is capped at 4096 tokens for every check. The parity fixtures
 must tokenize to at least 12 / 16 tokens respectively, or the test fails rather
 than skips.
 
@@ -29,9 +30,11 @@ for 1, 7, 100 and 512 tokens on both projection shapes, requiring every
 slot written, relative error < 1e-2, and byte-identical output across two
 runs. The op test also checks the dense mode of the BF16 WMMA GEMM against
 the FP32-activation GEMV for 1, 100 and 512 rows (relative error < 1e-2,
-every row written). It also checks the routed F16 expert GEMM (Q8_0 and
-Q6_K, 16- and 48-row tiles) and the paired gate/up GEMM (Q8_0 and Q6_K, 64-
-and 128-row tiles) against per-slot GEMV references, requiring every output
+every row written). It also checks the routed F16 expert GEMM (Q8_0, Q6_K,
+Q5_K and Q4_K at 16- and 48-row tiles; Q8_0 and Q6_K also at the 64- and
+128-row tiles the paired prefill sends the down projection over, which Q5_K
+and Q4_K must reject) and the paired gate/up GEMM (all four types, 64- and
+128-row tiles) against per-slot GEMV references, requiring every output
 written and relative error below 1e-2 (routed) and 5e-3 (paired).
 
 ## MTP head

@@ -121,6 +121,48 @@ void CheckPrefillDecodeParity(
          "prefill and single-step decode disagree on the next token");
 }
 
+// Prompt chunks of 1024 tokens or more pair the routed gate/up projections and
+// send the down projection over the pair's tile map when its type allows wide
+// tiles. One 1100-token chunk must agree with the same prompt prefilled as
+// 600 + 500 tokens, which stays below the pairing threshold.
+void CheckLongPromptChunk(
+    const std::shared_ptr<const gufo::hip::QwenGpuModel>& model) {
+  constexpr std::size_t kTokens = 1100;
+  constexpr std::size_t kSplit = 600;
+  std::string error;
+  auto executor = Executor::Create(model, &error, 4096);
+  Expect(executor != nullptr, error);
+  Expect(executor->GetMaxPromptBatch() >= kTokens,
+         "prompt batch must hold the long chunk");
+  std::vector<Token> tokens;
+  while (tokens.size() < kTokens) {
+    for (const char* text : kTexts) {
+      const auto encoded = executor->GetTokenizer().Encode(text);
+      tokens.insert(tokens.end(), encoded.begin(), encoded.end());
+    }
+  }
+  tokens.resize(kTokens);
+
+  executor->Reset();
+  (void)executor->ForwardPromptBatch(tokens);
+  const auto one_view = executor->CopyLastLogits();
+  const std::vector<float> one_chunk(one_view.begin(), one_view.end());
+  executor->Reset();
+  (void)executor->ForwardPromptBatch(std::span(tokens).first(kSplit), 0, false);
+  (void)executor->ForwardPromptBatch(std::span(tokens).subspan(kSplit),
+                                     static_cast<std::uint32_t>(kSplit));
+  const auto split_view = executor->CopyLastLogits();
+  const std::vector<float> split(split_view.begin(), split_view.end());
+  const auto result =
+      gufo::testing::CompareLogits(split, one_chunk, 5e-2F, 5e-2F);
+  Expect(result.finite, "long-chunk logits must be finite");
+  Expect(result.top1_match,
+         "long chunk and split prefill disagree: " + result.details);
+  std::cout << "long chunk: tokens=" << kTokens
+            << " max_abs=" << result.max_abs_diff
+            << " rmse=" << result.root_mean_square_error << "\n";
+}
+
 // Concurrent speculative verification stacks every session's draft rows into
 // one MoE batch (up to 8 sessions x 8 rows). Three sessions with 8 + 8 + 7
 // rows exceed the Q8_0 gated vector kernel's 8-row launch limit and leave a
@@ -204,6 +246,7 @@ int main() {
 
     CheckCpuGpuLogitParity(model, *reader);
     CheckPrefillDecodeParity(model);
+    CheckLongPromptChunk(model);
     CheckConcurrentVerification(model);
   } catch (const std::exception& e) {
     std::cerr << "qwen35ba3b_target_test: " << e.what() << "\n";

@@ -3,6 +3,7 @@
 // expert and the combine epilogue, each compared against the CPU reference
 // on fixed pseudo-random weights. No model file required.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -623,17 +624,81 @@ std::vector<std::uint8_t> RandomQ6K(std::size_t rows, std::size_t cols) {
   return out;
 }
 
-/// Flash-Next's routed F16 expert GEMM on this model's Q8_0 and Q6_K expert
-/// shapes, against the per-slot GEMV (FP32 activations, same weights). The
-/// difference is the F16 rounding of the activation rows (and, for Q6_K,
-/// of the per-16 scale).
+/// Random block_q4_K (`with_high_bits` false) or block_q5_K payload for
+/// `rows` x `cols`: arbitrary codes and packed 6-bit scales/mins, small F16
+/// superblock scale and min.
+std::vector<std::uint8_t> RandomQ45K(std::size_t rows, std::size_t cols,
+                                     bool with_high_bits) {
+  const std::size_t block_bytes = with_high_bits
+                                      ? sizeof(gufo::quant::block_q5_K)
+                                      : sizeof(gufo::quant::block_q4_K);
+  std::vector<std::uint8_t> out(rows * (cols / 256) * block_bytes);
+  for (std::size_t b = 0; b < out.size() / block_bytes; ++b) {
+    std::uint8_t* blk = out.data() + (b * block_bytes);
+    const std::uint16_t d = FloatToFp16Bits(RndFloat(0.0002F, 0.0012F));
+    const std::uint16_t dmin = FloatToFp16Bits(RndFloat(0.0F, 0.0006F));
+    std::memcpy(blk, &d, sizeof(d));
+    std::memcpy(blk + 2, &dmin, sizeof(dmin));
+    for (std::size_t i = 4; i < block_bytes; ++i) {
+      blk[i] = static_cast<std::uint8_t>(Rnd() & 0xFFU);
+    }
+  }
+  return out;
+}
+
+/// Expert weights of `type` for `rows` x `cols`: Q8_0 quantized from uniform
+/// values, the K-quants as random payloads.
+std::vector<std::uint8_t> RandomExperts(GgmlType type, std::size_t rows,
+                                        std::size_t cols) {
+  switch (type) {
+    case GgmlType::kQ6_K:
+      return RandomQ6K(rows, cols);
+    case GgmlType::kQ4_K:
+      return RandomQ45K(rows, cols, false);
+    case GgmlType::kQ5_K:
+      return RandomQ45K(rows, cols, true);
+    default: {
+      std::vector<float> src(rows * cols);
+      for (auto& v : src) {
+        v = RndFloat(-0.05F, 0.05F);
+      }
+      const auto q = QuantizeQ8_0(src.data(), rows, cols);
+      std::vector<std::uint8_t> bytes(q.size() * sizeof(Q8_0Block));
+      std::memcpy(bytes.data(), q.data(), bytes.size());
+      return bytes;
+    }
+  }
+}
+
+namespace routed = gufo::models::qwen38_flash_next::rocm;
+
+struct RoutedCase {
+  GgmlType type;
+  routed::WeightType weight_type;
+  const char* name;
+};
+
+constexpr std::array<RoutedCase, 4> kRoutedCases{{
+    {GgmlType::kQ8_0, routed::WeightType::kQ8_0, "Q8_0"},
+    {GgmlType::kQ6_K, routed::WeightType::kQ6_K, "Q6_K"},
+    {GgmlType::kQ5_K, routed::WeightType::kQ5_K, "Q5_K"},
+    {GgmlType::kQ4_K, routed::WeightType::kQ4_K, "Q4_K"},
+}};
+
+/// Flash-Next's routed F16 expert GEMM on this model's expert shapes, against
+/// the per-slot GEMV (FP32 activations, same weights). The difference is the
+/// F16 rounding of the activation rows (and, for the K-quants, of the scales).
+/// Tiles of 64 and 128 rows, which the paired prefill sends the down
+/// projection over, are checked for the types that support them; Q4_K and
+/// Q5_K must reject them.
 void CheckRoutedF16(hipStream_t stream) {
-  namespace routed = gufo::models::qwen38_flash_next::rocm;
-  for (const GgmlType type : {GgmlType::kQ8_0, GgmlType::kQ6_K}) {
-    const auto weight_type = type == GgmlType::kQ8_0
-                                 ? routed::WeightType::kQ8_0
-                                 : routed::WeightType::kQ6_K;
-    const char* type_name = type == GgmlType::kQ8_0 ? "Q8_0" : "Q6_K";
+  for (const RoutedCase& routed_case : kRoutedCases) {
+    const GgmlType type = routed_case.type;
+    const auto weight_type = routed_case.weight_type;
+    const char* type_name = routed_case.name;
+    const bool wide = routed::RoutedF16WideTilesSupported(weight_type);
+    Expect(wide == (type == GgmlType::kQ8_0 || type == GgmlType::kQ6_K),
+           std::string("unexpected wide-tile support for ") + type_name);
     constexpr std::uint32_t kExperts = 64;
     constexpr std::uint32_t kUsed = 8;
     struct Shape {
@@ -644,21 +709,8 @@ void CheckRoutedF16(hipStream_t stream) {
     };
     for (const Shape shape :
          {Shape{"gate/up", 512, 2048, false}, Shape{"down", 2048, 512, true}}) {
-      std::vector<std::uint8_t> w_bytes;
-      if (type == GgmlType::kQ8_0) {
-        std::vector<float> w_src(static_cast<std::size_t>(kExperts) * shape.m *
-                                 shape.k);
-        for (auto& v : w_src) {
-          v = RndFloat(-0.05F, 0.05F);
-        }
-        const auto w_q =
-            QuantizeQ8_0(w_src.data(), kExperts * shape.m, shape.k);
-        w_bytes.resize(w_q.size() * sizeof(Q8_0Block));
-        std::memcpy(w_bytes.data(), w_q.data(), w_bytes.size());
-      } else {
-        w_bytes = RandomQ6K(kExperts * shape.m, shape.k);
-      }
-      gufo::test::DeviceBuffer<std::uint8_t> d_w(w_bytes);
+      gufo::test::DeviceBuffer<std::uint8_t> d_w(
+          RandomExperts(type, kExperts * shape.m, shape.k));
       for (const std::uint32_t tokens : {1U, 7U, 100U, 512U}) {
         const std::uint32_t slots = tokens * kUsed;
         std::vector<std::int32_t> ids(slots);
@@ -696,7 +748,7 @@ void CheckRoutedF16(hipStream_t stream) {
         routed::ExpertCounts(d_ids.data(), d_counts.data(), tokens, kExperts,
                              kUsed, stream);
         const auto counts = d_counts.CopyToHost();
-        for (const std::uint32_t tile_rows : {16U, 48U}) {
+        for (const std::uint32_t tile_rows : {16U, 48U, 64U, 128U}) {
           std::vector<std::int32_t> tiles;
           for (std::uint32_t e = 0; e < kExperts; ++e) {
             const std::uint32_t padded = (counts[e] + 15U) / 16U * 16U;
@@ -714,13 +766,18 @@ void CheckRoutedF16(hipStream_t stream) {
                                     x_rows * shape.k, stream);
           const auto* rows_in =
               shape.per_slot_input ? d_rows_slot.data() : d_rows_token.data();
-          Expect(routed::RoutedF16Gemm(
-                     d_w.data(), weight_type,
-                     reinterpret_cast<const __half*>(d_x_half.data()),
-                     d_tiles.data(), static_cast<std::uint32_t>(tiles.size()),
-                     tile_rows, d_bounds.data(), rows_in, d_rows_slot.data(),
-                     nullptr, d_got.data(), nullptr, shape.m, shape.k, stream),
-                 "routed F16 GEMM rejected the shape");
+          const bool launched = routed::RoutedF16Gemm(
+              d_w.data(), weight_type,
+              reinterpret_cast<const __half*>(d_x_half.data()), d_tiles.data(),
+              static_cast<std::uint32_t>(tiles.size()), tile_rows,
+              d_bounds.data(), rows_in, d_rows_slot.data(), nullptr,
+              d_got.data(), nullptr, shape.m, shape.k, stream);
+          if (tile_rows > 48U && !wide) {
+            Expect(!launched, std::string("routed F16 GEMM took a wide ") +
+                                  type_name + " tile");
+            continue;
+          }
+          Expect(launched, "routed F16 GEMM rejected the shape");
           HIP_CHECK(hipStreamSynchronize(stream));
           const auto ref = d_ref.CopyToHost();
           const auto got = d_got.CopyToHost();
@@ -779,31 +836,18 @@ float Fp16BitsToFloat(std::uint16_t h) {
 /// Paired routed gate/up (SwiGLU in the epilogue, F16 out) against
 /// silu(gate) * up from two per-slot GEMVs on the same weights.
 void CheckRoutedPair(hipStream_t stream) {
-  namespace routed = gufo::models::qwen38_flash_next::rocm;
   constexpr std::uint32_t kExperts = 64;
   constexpr std::uint32_t kUsed = 8;
   constexpr std::size_t kM = 512;
   constexpr std::size_t kK = 2048;
-  for (const GgmlType type : {GgmlType::kQ6_K, GgmlType::kQ8_0}) {
-    const auto weight_type = type == GgmlType::kQ8_0
-                                 ? routed::WeightType::kQ8_0
-                                 : routed::WeightType::kQ6_K;
-    const char* type_name = type == GgmlType::kQ8_0 ? "Q8_0" : "Q6_K";
-    const auto make = [&] {
-      if (type == GgmlType::kQ6_K) {
-        return RandomQ6K(kExperts * kM, kK);
-      }
-      std::vector<float> src(static_cast<std::size_t>(kExperts) * kM * kK);
-      for (auto& v : src) {
-        v = RndFloat(-0.05F, 0.05F);
-      }
-      const auto q = QuantizeQ8_0(src.data(), kExperts * kM, kK);
-      std::vector<std::uint8_t> bytes(q.size() * sizeof(Q8_0Block));
-      std::memcpy(bytes.data(), q.data(), bytes.size());
-      return bytes;
-    };
-    gufo::test::DeviceBuffer<std::uint8_t> d_gate(make());
-    gufo::test::DeviceBuffer<std::uint8_t> d_up(make());
+  for (const RoutedCase& routed_case : kRoutedCases) {
+    const GgmlType type = routed_case.type;
+    const auto weight_type = routed_case.weight_type;
+    const char* type_name = routed_case.name;
+    gufo::test::DeviceBuffer<std::uint8_t> d_gate(
+        RandomExperts(type, kExperts * kM, kK));
+    gufo::test::DeviceBuffer<std::uint8_t> d_up(
+        RandomExperts(type, kExperts * kM, kK));
     for (const std::uint32_t tokens : {100U, 512U, 1024U}) {
       const std::uint32_t slots = tokens * kUsed;
       std::vector<std::int32_t> ids(slots);
