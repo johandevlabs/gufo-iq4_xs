@@ -1,0 +1,45 @@
+name: Benchmark docs
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  render-check:
+    # Required by the main ruleset; keep the name in sync with it.
+    name: Benchmark docs match artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Every marked table in each model's BENCHMARKS.md must match what
+      # model-bench renders from that model's artifacts. Charts need
+      # matplotlib and are not compared here.
+      - name: Check rendered tables
+        run: |
+          set -euo pipefail
+          status=0
+          for config in docs/models/*/artifacts/bench*.json; do
+            model=$(basename "$(dirname "$(dirname "$config")")")
+            echo "::group::$model $(basename "$config")"
+            python3 tools/bench/model-bench.py --model "$model" --config "$config" \
+              render --check --no-charts || status=1
+            echo "::endgroup::"
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "::error::BENCHMARKS.md is out of date; run tools/bench/model-bench.py --model <model> render"
+          fi
+          exit "$status"
