@@ -41,6 +41,12 @@ bar:
 - Build with the ROCm 7.2.3 toolchain Gufo pins; other compilers can break the
   bit-exact checks.
 
+A model PR can be opened at any stage, so the work is visible and can be
+reviewed as it goes. It is merged only once Strycast runs the model faster than
+llama.cpp runs the same GGUF on the same machine; otherwise there is little
+reason to run it on Strycast. The model's `BENCHMARKS.md` carries that
+comparison, and its guide lists any gaps that remain.
+
 The rest of this README is Gufo's.
 
 ## About Gufo
