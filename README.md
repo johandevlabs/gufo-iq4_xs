@@ -1,8 +1,48 @@
-# Gufo: The ***Open Source*** Strix Halo AI engine 
+# Strycast: Strix Halo outcasts for Gufo
 
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
+
+Strycast ("Strix outcast") is a community fork of [Gufo](https://github.com/gufo-org/gufo),
+the open-source inference engine for AMD Strix Halo. Gufo supports only the best
+model for each size on a 128 GiB Strix Halo. Strycast takes models that aren't
+Gufo's first choice there but are worth running anyway:
+
+- **Smaller memory.** Models that fit a 64 GiB Strix Halo or a Ryzen AI laptop
+  (gfx1150) where Gufo's flagship models don't.
+- **A specific use case.** For example, a low-latency local assistant (Home
+  Assistant voice control) that leaves room on the same box for speech-to-text,
+  text-to-speech, embeddings and reranking.
+
+Strycast tracks Gufo releases and is rebased on each one (currently Gufo
+v0.22.0). Everything Gufo supports still works here; the models below are the
+additions. Strycast is not affiliated with gufo-org: report problems with
+these models here, not upstream.
+
+| Model | Status |
+| --- | --- |
+| [Qwen3.6 35B-A3B](docs/models/qwen3.6-35b-a3b/README.md) | Unsloth UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL, AR, MTP, DFlash2, batched serving. Formerly [gufo-org/gufo#299](https://github.com/gufo-org/gufo/pull/299). |
+| Qwen3.6 35B-A3B Q4_K_M (lmstudio-community) | Planned, with K-quant experts on the MMQ decode kernels. |
+| Ornith 1.5 122B (Qwen3.5-122B-A10B fine-tune) | Proposed in [gufo-org/gufo#735](https://github.com/gufo-org/gufo/pull/735); a PR here is welcome. |
+
+### Contributing a model
+
+PRs for other models are welcome; open them against
+[`feat/qwen35moe-35b-a3b`](https://github.com/slimsami/strycast/tree/feat/qwen35moe-35b-a3b).
+Strycast keeps Gufo's quality bar:
+
+- Greedy speculative and batched decoding must stay bit-exact against plain
+  (AR) decoding, with a test that asserts it.
+- Each model gets a guide under `docs/models` with its files pinned to a
+  revision, plus `BENCHMARKS.md` and `QUALITY.md`.
+- Changes must leave the outputs of Gufo's own models byte-identical.
+- Build with the ROCm 7.2.3 toolchain Gufo pins; other compilers can break the
+  bit-exact checks.
+
+The rest of this README is Gufo's.
+
+## About Gufo
 
 Gufo is a vertical local inference engine for Linux and Windows, specifically built and optimized for AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
