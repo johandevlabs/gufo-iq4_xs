@@ -28,9 +28,8 @@ these models here, not upstream.
 
 ### Contributing a model
 
-PRs for other models are welcome; open them against
-[`feat/qwen35moe-35b-a3b`](https://github.com/slimsami/strycast/tree/feat/qwen35moe-35b-a3b).
-Strycast keeps Gufo's quality bar:
+PRs for other models are welcome; open them against `main`. Strycast keeps
+Gufo's quality bar:
 
 - Greedy speculative and batched decoding must stay bit-exact against plain
   (AR) decoding, with a test that asserts it.
