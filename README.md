@@ -1,7 +1,7 @@
 # Strycast: Strix Halo outcasts for Gufo
 
 <p align="center">
-  <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
+  <img src="assets/strycast-logo.png" alt="Strycast logo" width="180">
 </p>
 
 Strycast ("Strix outcast") is a community fork of [Gufo](https://github.com/gufo-org/gufo),
