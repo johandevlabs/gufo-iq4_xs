@@ -1,0 +1,28 @@
+name: Promotion source
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, edited, reopened, synchronize ]
+
+permissions: {}
+
+jobs:
+  source:
+    # Required by the main ruleset; keep the name in sync with it.
+    name: Promotion comes from staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # Work lands on staging first; main only takes staging as a whole.
+      - name: Check the PR's source branch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REF" != staging ] || [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::Only $BASE_REPO:staging can be merged into main; open this PR against staging."
+            exit 1
+          fi
+          echo "Promotion from $HEAD_REPO:$HEAD_REF"

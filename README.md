@@ -28,8 +28,10 @@ these models here, not upstream.
 
 ### Contributing a model
 
-PRs for other models are welcome; open them against `main`. Strycast keeps
-Gufo's quality bar:
+PRs for other models are welcome; open them against `staging`. Approved PRs
+are squash-merged there, and `staging` is promoted to `main` once its CPU and
+GPU tests pass, so `main` only holds tested work. Strycast keeps Gufo's quality
+bar:
 
 - Greedy speculative and batched decoding must stay bit-exact against plain
   (AR) decoding, with a test that asserts it.
