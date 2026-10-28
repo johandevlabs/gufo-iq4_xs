@@ -1,18 +1,24 @@
 # Qwen3.6 35B-A3B benchmarks
 
-AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo `7b1e23a8` versus
-llama.cpp `b11069` (`68d9053a`), both compiled with the pinned ROCm 7.2.3
-toolchain. Targets are the Unsloth UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL files;
-DFlash2 uses the aminya Q8_0 draft and MTP uses each target's own head
-([files and revisions](README.md)). HTTP, greedy, thinking off. Every row
-was measured on October 25, 2026.
+AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo versus llama.cpp
+`b11069` (`68d9053a`), both compiled with the pinned ROCm 7.2.3 toolchain.
+Targets are the Unsloth UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL files and the
+lmstudio-community Q4_K_M; DFlash2 uses the aminya Q8_0 draft and MTP uses each
+Unsloth target's own head (Q4_K_M has none) ([files and
+revisions](README.md)). HTTP, greedy, thinking off.
+
+The Q4 (UD-Q4_K_XL) and Q4_K_M rows were measured on October 27, 2026 with the
+build that decodes K-quant experts with the MMQ vector kernels. The Q6 and Q8
+rows were measured on October 25 with `7b1e23a8`; those targets decode through
+the same kernels in both builds ([builds](artifacts/model-identities.json)). Loading was re-measured for every
+target on October 27.
 
 Gufo drafts up to 7 DFlash2 tokens with its adaptive controller and 2 MTP
 tokens; llama.cpp uses its default of 3 for both modes. Its repetitive MTP
 rows therefore accept up to 2.88 tokens per step against Gufo's 1.91.
 
 Every Gufo DFlash2 and MTP completion, single-user at every depth and
-multi-user at every level, matches Gufo AR on all three targets, and every
+multi-user at every level, matches Gufo AR on every target, and every
 multi-user AR completion matches the same prompt decoded alone (see
 [Quality](QUALITY.md#benchmark-output-consistency)).
 
@@ -26,14 +32,14 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 <!-- bench:single-ar-q4 -->
 | Qwen35B-A3B Q4 AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3195.02 | 1406.89 | +127.1% | 55.95 | 52.88 | +5.8% |
-| 4,096 | 2950.32 | 1292.78 | +128.2% | 54.52 | 51.45 | +6.0% |
-| 8,192 | 2762.46 | 1198.97 | +130.4% | 53.53 | 50.44 | +6.1% |
-| 12,288 | 2544.41 | 1116.84 | +127.8% | 52.27 | 49.38 | +5.9% |
-| 16,384 | 2394.29 | 1049.84 | +128.1% | 51.43 | 48.43 | +6.2% |
-| 32,768 | 1923.26 | 846.06 | +127.3% | 47.86 | 45.13 | +6.0% |
-| 65,536 | 1388.51 | 611.04 | +127.2% | 42.11 | 39.44 | +6.8% |
-| 131,072 | 891.80 | 395.50 | +125.5% | 33.95 | 31.57 | +7.5% |
+| 0 | 3266.95 | 1406.89 | +132.2% | 61.37 | 52.88 | +16.1% |
+| 4,096 | 2955.61 | 1292.78 | +128.6% | 59.73 | 51.45 | +16.1% |
+| 8,192 | 2801.98 | 1198.97 | +133.7% | 58.52 | 50.44 | +16.0% |
+| 12,288 | 2597.12 | 1116.84 | +132.5% | 57.15 | 49.38 | +15.7% |
+| 16,384 | 2430.27 | 1049.84 | +131.5% | 56.14 | 48.43 | +15.9% |
+| 32,768 | 1950.53 | 846.06 | +130.5% | 51.92 | 45.13 | +15.0% |
+| 65,536 | 1403.08 | 611.04 | +129.6% | 45.17 | 39.44 | +14.5% |
+| 131,072 | 902.10 | 395.50 | +128.1% | 35.88 | 31.57 | +13.7% |
 <!-- /bench -->
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q4.svg)
@@ -72,6 +78,23 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens.
 
 ![Single user, autoregressive](artifacts/charts/single-ar-q8.svg)
 
+---
+
+<!-- bench:single-ar-q4km -->
+| Qwen35B-A3B Q4_K_M AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 3103.31 | 1344.48 | +130.8% | 70.71 | 62.61 | +12.9% |
+| 4,096 | 2883.51 | 1239.47 | +132.6% | 68.48 | 61.34 | +11.6% |
+| 8,192 | 2642.62 | 1152.16 | +129.4% | 66.89 | 60.29 | +10.9% |
+| 12,288 | 2484.12 | 1084.03 | +129.2% | 65.09 | 58.67 | +10.9% |
+| 16,384 | 2331.04 | 1020.81 | +128.4% | 63.64 | 57.42 | +10.8% |
+| 32,768 | 1888.73 | 827.87 | +128.1% | 58.32 | 52.52 | +11.0% |
+| 65,536 | 1362.72 | 599.07 | +127.5% | 50.01 | 45.13 | +10.8% |
+| 131,072 | 888.27 | 393.85 | +125.5% | 38.90 | 35.15 | +10.7% |
+<!-- /bench -->
+
+![Single user, autoregressive](artifacts/charts/single-ar-q4km.svg)
+
 ## Single user, DFlash2
 
 pp is the highest measured rate per engine and depth across mixed/repetitive
@@ -80,14 +103,14 @@ text.
 <!-- bench:single-dflash2-q4 -->
 | Qwen35B-A3B Q4 DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 2965.68 | 1307.78 | +126.8% | 69.35 | 71.68 | -3.3% | 165.79 | 110.69 | +49.8% |
-| 4,096 | 2617.46 | 1194.36 | +119.2% | 68.74 | 66.59 | +3.2% | 156.02 | 105.10 | +48.4% |
-| 8,192 | 2500.04 | 1113.55 | +124.5% | 62.01 | 70.38 | -11.9% | 153.72 | 106.50 | +44.3% |
-| 12,288 | 2359.05 | 1041.80 | +126.4% | 62.70 | 75.74 | -17.2% | 152.67 | 101.82 | +49.9% |
-| 16,384 | 2214.42 | 981.11 | +125.7% | 61.42 | 66.16 | -7.2% | 133.83 | 102.91 | +30.0% |
-| 32,768 | 1804.24 | 808.49 | +123.2% | 59.64 | 58.36 | +2.2% | 138.16 | 98.85 | +39.8% |
-| 65,536 | 1326.74 | 589.76 | +125.0% | 52.39 | 58.65 | -10.7% | 118.78 | 79.62 | +49.2% |
-| 131,072 | 852.61 | 383.37 | +122.4% | 49.54 | 46.40 | +6.8% | 101.46 | 59.31 | +71.1% |
+| 0 | 2989.93 | 1307.78 | +128.6% | 74.53 | 71.68 | +4.0% | 213.95 | 110.69 | +93.3% |
+| 4,096 | 2730.72 | 1194.36 | +128.6% | 77.31 | 66.59 | +16.1% | 199.82 | 105.10 | +90.1% |
+| 8,192 | 2541.22 | 1113.55 | +128.2% | 71.81 | 70.38 | +2.0% | 197.49 | 106.50 | +85.4% |
+| 12,288 | 2396.08 | 1041.80 | +130.0% | 72.41 | 75.74 | -4.4% | 195.36 | 101.82 | +91.9% |
+| 16,384 | 2249.92 | 981.11 | +129.3% | 71.78 | 66.16 | +8.5% | 167.60 | 102.91 | +62.9% |
+| 32,768 | 1824.76 | 808.49 | +125.7% | 63.53 | 58.36 | +8.9% | 173.41 | 98.85 | +75.4% |
+| 65,536 | 1339.82 | 589.76 | +127.2% | 58.30 | 58.65 | -0.6% | 143.77 | 79.62 | +80.6% |
+| 131,072 | 864.84 | 383.37 | +125.6% | 54.58 | 46.40 | +17.6% | 118.85 | 59.31 | +100.4% |
 <!-- /bench -->
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q4.svg)
@@ -126,6 +149,23 @@ text.
 
 ![Single user, DFlash2](artifacts/charts/single-dflash2-q8.svg)
 
+---
+
+<!-- bench:single-dflash2-q4km -->
+| Qwen35B-A3B Q4_K_M DFlash2<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 2887.32 | 1266.45 | +128.0% | 81.11 | 82.15 | -1.3% | 228.82 | 120.43 | +90.0% |
+| 4,096 | 2620.12 | 1167.48 | +124.4% | 78.56 | 66.06 | +18.9% | 199.55 | 108.15 | +84.5% |
+| 8,192 | 2445.77 | 1080.28 | +126.4% | 82.16 | 66.09 | +24.3% | 213.04 | 108.83 | +95.8% |
+| 12,288 | 2312.21 | 1013.29 | +128.2% | 78.57 | 73.40 | +7.0% | 208.88 | 102.92 | +103.0% |
+| 16,384 | 2180.35 | 958.40 | +127.5% | 80.35 | 68.65 | +17.0% | 183.46 | 105.18 | +74.4% |
+| 32,768 | 1780.91 | 793.40 | +124.5% | 74.24 | 65.11 | +14.0% | 178.15 | 101.86 | +74.9% |
+| 65,536 | 1320.99 | 581.57 | +127.1% | 64.98 | 61.47 | +5.7% | 151.02 | 78.58 | +92.2% |
+| 131,072 | 856.19 | 381.70 | +124.3% | 62.99 | 47.25 | +33.3% | 125.82 | 65.09 | +93.3% |
+<!-- /bench -->
+
+![Single user, DFlash2](artifacts/charts/single-dflash2-q4km.svg)
+
 ## Single user, MTP
 
 The GGUF's own MTP head on both engines. pp is the highest measured rate per
@@ -134,14 +174,14 @@ engine and depth across mixed/repetitive text.
 <!-- bench:single-mtp-q4 -->
 | Qwen35B-A3B Q4 MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 3106.73 | 1353.27 | +129.6% | 70.46 | 71.58 | -1.6% | 92.96 | 106.80 | -13.0% |
-| 4,096 | 2849.49 | 1215.60 | +134.4% | 69.56 | 70.78 | -1.7% | 91.07 | 103.84 | -12.3% |
-| 8,192 | 2639.16 | 1108.04 | +138.2% | 70.11 | 71.83 | -2.4% | 88.11 | 101.56 | -13.2% |
-| 12,288 | 2466.63 | 1032.26 | +139.0% | 65.60 | 67.19 | -2.4% | 85.83 | 99.91 | -14.1% |
-| 16,384 | 2314.08 | 966.42 | +139.4% | 65.81 | 69.09 | -4.7% | 84.29 | 98.58 | -14.5% |
-| 32,768 | 1868.08 | 780.33 | +139.4% | 61.90 | 56.30 | +9.9% | 77.77 | 91.41 | -14.9% |
-| 65,536 | 1358.43 | 558.58 | +143.2% | 50.13 | 51.16 | -2.0% | 67.01 | 77.66 | -13.7% |
-| 131,072 | 877.75 | 358.22 | +145.0% | 40.15 | 42.46 | -5.4% | 51.55 | 62.78 | -17.9% |
+| 0 | 3234.43 | 1353.27 | +139.0% | 83.13 | 71.58 | +16.1% | 106.03 | 106.80 | -0.7% |
+| 4,096 | 2895.62 | 1215.60 | +138.2% | 77.81 | 70.78 | +9.9% | 103.30 | 103.84 | -0.5% |
+| 8,192 | 2688.18 | 1108.04 | +142.6% | 78.71 | 71.83 | +9.6% | 99.98 | 101.56 | -1.6% |
+| 12,288 | 2509.25 | 1032.26 | +143.1% | 74.47 | 67.19 | +10.8% | 97.17 | 99.91 | -2.7% |
+| 16,384 | 2353.25 | 966.42 | +143.5% | 74.41 | 69.09 | +7.7% | 95.45 | 98.58 | -3.2% |
+| 32,768 | 1895.66 | 780.33 | +142.9% | 69.20 | 56.30 | +22.9% | 86.94 | 91.41 | -4.9% |
+| 65,536 | 1377.90 | 558.58 | +146.7% | 55.34 | 51.16 | +8.2% | 73.74 | 77.66 | -5.0% |
+| 131,072 | 890.76 | 358.22 | +148.7% | 44.80 | 42.46 | +5.5% | 55.15 | 62.78 | -12.2% |
 <!-- /bench -->
 
 ![Single user, MTP](artifacts/charts/single-mtp-q4.svg)
@@ -189,11 +229,11 @@ request decode rates.
 <!-- bench:multi-ar-q4 -->
 | Qwen35B-A3B Q4 AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
 | ---: | ---: | ---: | ---: |
-| 1 | 56.06 | 52.81 | +6.2% |
-| 2 | 88.39 | 85.42 | +3.5% |
-| 4 | 128.17 | 136.37 | -6.0% |
-| 6 | 152.03 | 150.53 | +1.0% |
-| 8 | 165.78 | 170.00 | -2.5% |
+| 1 | 61.40 | 52.81 | +16.3% |
+| 2 | 104.64 | 85.42 | +22.5% |
+| 4 | 165.44 | 136.37 | +21.3% |
+| 6 | 207.32 | 150.53 | +37.7% |
+| 8 | 230.91 | 170.00 | +35.8% |
 <!-- /bench -->
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-q4.svg)
@@ -226,6 +266,20 @@ request decode rates.
 
 ![Multiple users, autoregressive](artifacts/charts/multi-ar-q8.svg)
 
+---
+
+<!-- bench:multi-ar-q4km -->
+| Qwen35B-A3B Q4_K_M AR<br>Users | Gufo AR (tok/s) | llama.cpp AR (tok/s) | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | 70.68 | 62.69 | +12.7% |
+| 2 | 124.31 | 104.16 | +19.3% |
+| 4 | 192.25 | 147.29 | +30.5% |
+| 6 | 231.22 | 150.19 | +54.0% |
+| 8 | 244.19 | 166.23 | +46.9% |
+<!-- /bench -->
+
+![Multiple users, autoregressive](artifacts/charts/multi-ar-q4km.svg)
+
 ## Multiple users, DFlash2
 
 Same pp2048 mixed/repetitive prompts as single-user d0, tg128, context 4096
@@ -234,11 +288,11 @@ per user. Every session is prefilled before timed decoding.
 <!-- bench:multi-dflash2-q4 -->
 | Qwen35B-A3B Q4 DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 68.62 | 71.29 | -3.7% | 164.23 | 109.64 | +49.8% |
-| 2 | 97.75 | 97.96 | -0.2% | 156.37 | 151.40 | +3.3% |
-| 4 | 127.20 | 130.69 | -2.7% | 169.65 | 163.99 | +3.5% |
-| 6 | 130.32 | 152.11 | -14.3% | 165.75 | 199.36 | -16.9% |
-| 8 | 139.33 | 166.10 | -16.1% | 176.81 | 227.83 | -22.4% |
+| 1 | 74.18 | 71.29 | +4.1% | 211.77 | 109.64 | +93.2% |
+| 2 | 122.23 | 97.96 | +24.8% | 199.89 | 151.40 | +32.0% |
+| 4 | 154.26 | 130.69 | +18.0% | 226.11 | 163.99 | +37.9% |
+| 6 | 162.46 | 152.11 | +6.8% | 233.06 | 199.36 | +16.9% |
+| 8 | 177.65 | 166.10 | +7.0% | 253.43 | 227.83 | +11.2% |
 <!-- /bench -->
 
 ![Multiple users, DFlash2](artifacts/charts/multi-dflash2-q4.svg)
@@ -271,6 +325,20 @@ per user. Every session is prefilled before timed decoding.
 
 ![Multiple users, DFlash2](artifacts/charts/multi-dflash2-q8.svg)
 
+---
+
+<!-- bench:multi-dflash2-q4km -->
+| Qwen35B-A3B Q4_K_M DFlash2<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 80.98 | 81.52 | -0.7% | 224.57 | 116.07 | +93.5% |
+| 2 | 127.86 | 100.15 | +27.7% | 230.73 | 127.96 | +80.3% |
+| 4 | 161.82 | 134.69 | +20.1% | 228.61 | 181.30 | +26.1% |
+| 6 | 167.56 | 165.46 | +1.3% | 242.12 | 216.98 | +11.6% |
+| 8 | 182.52 | 166.60 | +9.6% | 265.88 | 231.36 | +14.9% |
+<!-- /bench -->
+
+![Multiple users, DFlash2](artifacts/charts/multi-dflash2-q4km.svg)
+
 ## Multiple users, MTP
 
 Same prompts and method as the DFlash2 table.
@@ -278,11 +346,11 @@ Same prompts and method as the DFlash2 table.
 <!-- bench:multi-mtp-q4 -->
 | Qwen35B-A3B Q4 MTP<br>Users | Gufo mixed (tok/s) | llama.cpp mixed (tok/s) | Gain | Gufo repetitive (tok/s) | llama.cpp repetitive (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 70.28 | 71.01 | -1.0% | 92.83 | 106.69 | -13.0% |
-| 2 | 96.55 | 96.44 | +0.1% | 109.78 | 116.20 | -5.5% |
-| 4 | 125.02 | 130.00 | -3.8% | 124.51 | 125.09 | -0.5% |
-| 6 | 148.13 | 151.92 | -2.5% | 147.90 | 134.24 | +10.2% |
-| 8 | 160.25 | 171.86 | -6.8% | 159.31 | 146.10 | +9.0% |
+| 1 | 82.45 | 71.01 | +16.1% | 104.69 | 106.69 | -1.9% |
+| 2 | 117.87 | 96.44 | +22.2% | 134.73 | 116.20 | +15.9% |
+| 4 | 159.19 | 130.00 | +22.5% | 151.91 | 125.09 | +21.4% |
+| 6 | 197.82 | 151.92 | +30.2% | 189.94 | 134.24 | +41.5% |
+| 8 | 219.99 | 171.86 | +28.0% | 220.12 | 146.10 | +50.7% |
 <!-- /bench -->
 
 ![Multiple users, MTP](artifacts/charts/multi-mtp-q4.svg)
@@ -322,9 +390,10 @@ C1, context capacity 133760, DFlash2. Cold target/draft files to HTTP readiness.
 <!-- bench:loading -->
 | Qwen35B-A3B<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
-| Q4 | 9.97 | 9.57 | -4.0% |
-| Q6 | 13.96 | 13.16 | -5.7% |
-| Q8 | 16.51 | 15.34 | -7.1% |
+| Q4 | 9.92 | 9.62 | -3.0% |
+| Q6 | 13.97 | 13.23 | -5.3% |
+| Q8 | 16.51 | 15.37 | -6.9% |
+| Q4_K_M | 9.65 | 9.53 | -1.2% |
 <!-- /bench -->
 
 ![Loading time](artifacts/charts/loading.svg)
@@ -337,8 +406,8 @@ allocates its KV cache up front, so its peak does not grow with the prefix.
 <!-- bench:memory-q4 -->
 | Qwen35B-A3B Q4 AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 31.34 | 26.64 | -15.0% |
-| 16K prefix, pp4096 + tg128 | 32.34 | 26.81 | -17.1% |
+| pp2048 + tg128 | 31.59 | 26.64 | -15.7% |
+| 16K prefix, pp4096 + tg128 | 32.59 | 26.81 | -17.7% |
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q4.svg)
@@ -364,3 +433,14 @@ allocates its KV cache up front, so its peak does not grow with the prefix.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)
+
+---
+
+<!-- bench:memory-q4km -->
+| Qwen35B-A3B Q4_K_M AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
+| --- | ---: | ---: | ---: |
+| pp2048 + tg128 | 30.02 | 25.59 | -14.8% |
+| 16K prefix, pp4096 + tg128 | 31.02 | 25.77 | -16.9% |
+<!-- /bench -->
+
+![Memory occupation](artifacts/charts/memory-q4km.svg)

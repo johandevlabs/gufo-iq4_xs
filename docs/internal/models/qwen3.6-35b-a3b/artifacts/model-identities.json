@@ -3,13 +3,15 @@
     "Target UD-Q4_K_XL": "55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1",
     "Target UD-Q6_K_XL": "35fce994cd36104a7dc1bd8a4bdf13778145664c00fdef6773aebc9246e5019c",
     "Target UD-Q8_K_XL": "6c6b816537abad90b250a0972b345466028d861ddfe316d5f0de31ca6440f781",
-    "Draft DFlash2 Q8_0": "69bc81f5344dfeb67bcfc09277dd9617500fca1823f72e6e08d5df92e73a8b44"
+    "Draft DFlash2 Q8_0": "69bc81f5344dfeb67bcfc09277dd9617500fca1823f72e6e08d5df92e73a8b44",
+    "Target Q4_K_M": "4ac6a06bce551257267f49ad2226f8671a22519ccc1a4dde9d5b433d1f2a410d"
   },
   "sources": {
     "targets": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF, revision 5bc3e238d916f48a861bac2f8a1990a0e9b7e98d; each target's MTP head is the MTP draft",
-    "draft": "aminya/Qwen3.6-35B-A3B-DFlash2-GGUF, revision 1e26e3499d865b9d2fc55e019d65b3f0e8ab6846, Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf"
+    "draft": "aminya/Qwen3.6-35B-A3B-DFlash2-GGUF, revision 1e26e3499d865b9d2fc55e019d65b3f0e8ab6846, Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf",
+    "q4km": "lmstudio-community/Qwen3.6-35B-A3B-GGUF, revision 68a34855558af61cbef0324d31f411be8a506b08, Qwen3.6-35B-A3B-Q4_K_M.gguf; no MTP head"
   },
-  "scope": "Pinned artifacts for the October 25, 2026 benchmark tables.",
+  "scope": "Pinned artifacts for the October 25 and October 27, 2026 benchmark tables.",
   "benchmarks-2026-10-25": {
     "gufo": {
       "revision": "7b1e23a8",
@@ -49,5 +51,33 @@
       "multi-ar-q4: the sweep's C8 cell (148.93 tok/s) was an outlier; two alternating reruns of b43f7b4d and 7b1e23a8 gave 165.49-166.22, and the table uses the first 7b1e23a8 rerun.",
       "single-ar-q4: the sweep's 32K and 64K prefill cells (1,806 / 1,304 tok/s) were low; an A/B rerun gave 1,911 / 1,378 on b43f7b4d and 1,923 / 1,389 on 7b1e23a8, and the table uses that 7b1e23a8 rerun."
     ]
+  },
+  "benchmarks-2026-10-27": {
+    "gufo": {
+      "revision": "dc4a513e (branch build of the K-quant MMQ decode change; the merged commit carries the same source)",
+      "dirty": false,
+      "build": "CMake release with the pinned Nix toolchain (GCC 15.3 / ROCm 7.2.3)",
+      "binarySha256": "1562df1064f7aec3c4485605667b7058c44c97e3f30a9df813ab8a85b7c7acd5",
+      "change": "Decode and verification send Q4_K/Q5_K gate/up and Q4_K/Q5_K/Q6_K down experts to the MMQ vector kernels"
+    },
+    "reference": "Same llama.cpp b11069 build as benchmarks-2026-10-25; Q4_K_M rows and loading measured on October 27",
+    "targets": [
+      "Target UD-Q4_K_XL",
+      "Target Q4_K_M"
+    ],
+    "draft": "Draft DFlash2 Q8_0",
+    "scope": "Every Gufo table for UD-Q4_K_XL; AR and DFlash2 single-user grids, C1-C8 concurrency and memory for Q4_K_M on both engines; loading for all four targets on both engines.",
+    "sampling": {
+      "temperature": 0,
+      "seed": 1,
+      "thinking": false
+    },
+    "timedRunsPerPoint": 1,
+    "gufoConsistency": {
+      "singleUserSpeculativeMatchingAr": "24 of 24 (UD-Q4_K_XL DFlash2 and MTP, Q4_K_M DFlash2; 8 depths each, mixed text)",
+      "multiUserMatchingIsolatedAr": "every request in multi-ar, multi-dflash2 and multi-mtp for UD-Q4_K_XL, and multi-ar and multi-dflash2 for Q4_K_M",
+      "metric": "SHA-256 of completion text; does not establish original-checkpoint accuracy."
+    },
+    "before": "Same Q4_K_M single-user AR grid on the 7b1e23a8 build: tg 63.66 / 60.54 / 53.23 / 36.56 tok/s at depth 0 / 8K / 32K / 128K (after: 70.71 / 66.89 / 58.32 / 38.90)"
   }
 }

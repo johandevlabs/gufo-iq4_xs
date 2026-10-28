@@ -6,20 +6,26 @@ alternate gated-delta-net (GDN) recurrence and full attention in a 3:1 ratio;
 the attention layers use 16 query / 2 key-value heads at `head_dim` 256.
 Three Unsloth GGUFs from
 [`unsloth/Qwen3.6-35B-A3B-MTP-GGUF`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/tree/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d)
+and the Q4_K_M from
+[`lmstudio-community/Qwen3.6-35B-A3B-GGUF`](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/tree/68a34855558af61cbef0324d31f411be8a506b08)
 are supported; request state and KV/SSM caches need memory on top of the
 weights:
 
 | File | Weights | Routed experts |
 | --- | ---: | --- |
 | [`Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) | 21.3 GiB | gate/up Q4_K (layer 39 Q5_K); down Q5_K (layers 34, 38, 39 Q6_K) |
+| [`Qwen3.6-35B-A3B-Q4_K_M.gguf`](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/blob/68a34855558af61cbef0324d31f411be8a506b08/Qwen3.6-35B-A3B-Q4_K_M.gguf) (lmstudio-community) | 19.7 GiB | gate/up Q4_K; down Q6_K on 20 layers, Q4_K on the other 20 |
 | [`Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf) | 30.4 GiB | gate/up Q6_K (layer 39 Q8_0); down Q8_0 |
 | [`Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf) | 36.4 GiB | gate/up Q8_0 (layer 39 BF16); down Q8_0 (layers 34, 38, 39 BF16) |
 
-UD-Q4_K_XL prefills fastest (3,195 tok/s at pp2048, versus 3,090 for
-UD-Q6_K_XL and 2,847 for UD-Q8_K_XL) and UD-Q8_K_XL decodes slowest; see
-[Benchmarks](BENCHMARKS.md). Every file carries an MTP head
-(`blk.40.nextn.*`) that Gufo uses as a speculative draft; a separate DFlash2
-draft is published as a GGUF or can be converted (below).
+UD-Q4_K_XL prefills fastest (3,267 tok/s at pp2048, versus 3,103 for Q4_K_M,
+3,090 for UD-Q6_K_XL and 2,847 for UD-Q8_K_XL); Q4_K_M decodes fastest (70.7
+tok/s, versus 61.4 for UD-Q4_K_XL) and UD-Q8_K_XL slowest; see
+[Benchmarks](BENCHMARKS.md). Q4_K_M is the smallest file and suits machines
+with 64 GB of memory. Every Unsloth file carries an MTP head (`blk.40.nextn.*`)
+that Gufo uses as a speculative draft; the Q4_K_M has none, so it runs AR or
+DFlash2 only. A separate DFlash2 draft is published as a GGUF or can be
+converted (below).
 
 [Benchmarks](BENCHMARKS.md) · [Quality](QUALITY.md) · [Experiments](EXPERIMENTS.md)
 
@@ -39,9 +45,12 @@ anything else the per-slot GEMV. Chunks of 1024+ tokens run gate and up as one
 paired launch when the down projection takes the routed GEMM too; the down
 projection then reuses the pair's 64/128-row tile map for Q8_0 and Q6_K, while
 Q5_K and Q4_K, which the kernel decodes only in 16- and 48-row tiles, keep the
-regular map. Decode runs the
-vendored llama.cpp-derived MMQ vector kernels; their device context is bound
-at model load when the config reports an MoE architecture.
+regular map. Decode and speculative
+verification run the vendored llama.cpp-derived MMQ vector kernels: gate/up
+for Q8_0, Q5_K and Q4_K, down for Q8_0, Q6_K, Q5_K and Q4_K, with the
+expert activations quantized to Q8_1. Other formats, such as UD-Q6_K_XL's
+Q6_K gate/up, take the per-slot GEMV. The kernels' device context is bound at
+model load when the config reports an MoE architecture.
 
 | Mode | Selection | Behavior |
 | --- | --- | --- |

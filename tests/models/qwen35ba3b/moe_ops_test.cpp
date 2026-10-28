@@ -1133,9 +1133,9 @@ void CheckDecodeBatchInvariance(hipStream_t stream) {
   constexpr std::size_t kFf = 512;
   constexpr std::size_t kHidden = 2048;
   constexpr std::size_t kGatedVecMaxRows = 8;
-  constexpr int kQ8_0 = static_cast<int>(GgmlType::kQ8_0);
   for (const RoutedCase& routed_case : kRoutedCases) {
     const GgmlType type = routed_case.type;
+    const int ggml_type = static_cast<int>(type);
     gufo::test::DeviceBuffer<std::uint8_t> d_gate(
         RandomExperts(type, kExperts * kFf, kHidden));
     gufo::test::DeviceBuffer<std::uint8_t> d_up(
@@ -1144,11 +1144,11 @@ void CheckDecodeBatchInvariance(hipStream_t stream) {
         RandomExperts(type, kExperts * kHidden, kFf));
     const auto gate_up = [&](const float* x, const std::int32_t* ids,
                              float* act, std::size_t rows) {
-      if (type == GgmlType::kQ8_0) {
+      if (gufo::hip::IsMoeMmqGatedVecType(type)) {
         for (std::size_t row = 0; row < rows; row += kGatedVecMaxRows) {
           const std::size_t n = std::min(kGatedVecMaxRows, rows - row);
           Expect(qfn_mmq_moe_gated_vec(
-                     kQ8_0, d_gate.data(), d_up.data(), x + row * kHidden,
+                     ggml_type, d_gate.data(), d_up.data(), x + row * kHidden,
                      ids + row * kUsed, act + row * kUsed * kFf,
                      static_cast<int>(kFf), static_cast<int>(kHidden),
                      static_cast<int>(n), static_cast<int>(kExperts),
@@ -1164,9 +1164,9 @@ void CheckDecodeBatchInvariance(hipStream_t stream) {
     const auto down = [&](const float* act, const std::int32_t* ids, float* out,
                           std::size_t rows) {
       const auto slots = static_cast<std::uint32_t>(rows * kUsed);
-      if (type == GgmlType::kQ8_0) {
+      if (gufo::hip::IsMoeMmqVecType(type)) {
         Expect(
-            qfn_mmq_moe_vec(kQ8_0, d_down.data(), act, ids, out,
+            qfn_mmq_moe_vec(ggml_type, d_down.data(), act, ids, out,
                             static_cast<int>(kHidden), static_cast<int>(kFf),
                             static_cast<int>(slots), static_cast<int>(kExperts),
                             1, stream, nullptr, nullptr) == 0,

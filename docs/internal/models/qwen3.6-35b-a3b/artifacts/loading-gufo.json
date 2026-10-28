@@ -22,7 +22,7 @@
     "fingerprintId": "fc9a031161170511545286fa0e767880e688de9c0af46c05dc9e21d2680b3fe5",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-25",
+  "measuredOn": "2026-10-27",
   "mode": "dflash2",
   "model": {
     "id": "Qwen3.6-35B-A3B",
@@ -35,20 +35,26 @@
   "referenceName": "llama.cpp",
   "rows": {
     "q4": {
-      "command": "gufo serve --port 46239 --sessions 1 llm --model Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 --draft-policy adaptive",
-      "ready_s": 9.969,
+      "command": "gufo serve --port 38063 --sessions 1 llm --model Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 --draft-policy adaptive",
+      "ready_s": 9.923,
+      "ready_s_sd": null,
+      "samples": 1
+    },
+    "q4km": {
+      "command": "gufo serve --port 37047 --sessions 1 llm --model Qwen3.6-35B-A3B-Q4_K_M.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 --draft-policy adaptive",
+      "ready_s": 9.653,
       "ready_s_sd": null,
       "samples": 1
     },
     "q6": {
-      "command": "gufo serve --port 34055 --sessions 1 llm --model Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 --draft-policy adaptive",
-      "ready_s": 13.965,
+      "command": "gufo serve --port 40253 --sessions 1 llm --model Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 --draft-policy adaptive",
+      "ready_s": 13.97,
       "ready_s_sd": null,
       "samples": 1
     },
     "q8": {
-      "command": "gufo serve --port 51253 --sessions 1 llm --model Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 --draft-policy adaptive",
-      "ready_s": 16.506,
+      "command": "gufo serve --port 36213 --sessions 1 llm --model Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf --draft-tokens 7 --draft-policy adaptive",
+      "ready_s": 16.512,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -59,12 +65,12 @@
       "gufo",
       "serve",
       "--port",
-      "51253",
+      "37047",
       "--sessions",
       "1",
       "llm",
       "--model",
-      "Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf",
+      "Qwen3.6-35B-A3B-Q4_K_M.gguf",
       "--context",
       "133760",
       "--served-model-name",
@@ -89,8 +95,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": false,
-    "revision": "7b1e23a8c13aa8c434b17a2b2c6f9566be7d1b20"
+    "dirty": true,
+    "revision": "dc4a513edcf5ef3cb6bf5c003ce1b2507450195a"
   },
   "table": "loading",
   "target": "gufo"

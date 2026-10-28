@@ -13,9 +13,9 @@ requires the loaded config to report an MoE architecture, then runs:
 | --- | --- | --- |
 | GPU/CPU greedy parity, position 0–11 | Two fixed text fixtures; the GPU re-prefills each prefix while the CPU reference steps the same tokens (teacher forcing). Compares the final-position logits. | GPU logits must be **finite** and the greedy (argmax) next token must **equal the CPU reference** at every position. `CompareLogits` is called with `atol = rtol = 5e-2`, but the elementwise `match` that drives is not asserted; per-position max-abs and RMSE are printed for reference only. |
 | Prefill/decode self-consistency | Same full prompt: one `ForwardPromptBatch` prefill versus a one-token-at-a-time `ForwardToken` decode loop. | The two next-token IDs must be **exactly equal**. |
-| Long prompt chunk | One 1100-token `ForwardPromptBatch` (the paired gate/up route; the down projection takes the pair's tile map only when its type has 64- and 128-row tiles) against the same prompt prefilled as 600 + 500 tokens. | Logits **finite** and the greedy token **equal** (`CompareLogits`, `atol = rtol = 5e-2`). UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL give identical logits (max abs 0). |
+| Long prompt chunk | One 1100-token `ForwardPromptBatch` (the paired gate/up route; the down projection takes the pair's tile map only when its type has 64- and 128-row tiles) against the same prompt prefilled as 600 + 500 tokens. | Logits **finite** and the greedy token **equal** (`CompareLogits`, `atol = rtol = 5e-2`). UD-Q4_K_XL, Q4_K_M, UD-Q6_K_XL and UD-Q8_K_XL give identical logits (max abs 0). |
 | Verification equals decode | Eight draft tokens decoded one at a time with `ForwardToken`, then restored from a snapshot and verified as one `ForwardVerificationChunk`. | Every row's logits **bit-identical** to the decoded token's. |
-| Concurrent verification | Three sessions verify 8, 8 and 7 rows together through `ForwardVerificationBatch` (23 stacked rows, more than the 8-row Q8_0 gated vector kernel takes per launch); each session's own `ForwardVerificationChunk` is the reference. | Logits **finite** and **bit-identical** to the per-session reference for every row. |
+| Concurrent verification | Three sessions verify 8, 8 and 7 rows together through `ForwardVerificationBatch` (23 stacked rows, more than the 8-row gated vector kernel takes per launch); each session's own `ForwardVerificationChunk` is the reference. | Logits **finite** and **bit-identical** to the per-session reference for every row. |
 
 Executor context is capped at 4096 tokens for every check. The parity fixtures
 must tokenize to at least 12 / 16 tokens respectively, or the test fails rather
@@ -41,7 +41,8 @@ Finally, it launches every projection that single-token decode and batched
 decode / verification take through different kernels the way each path does
 and requires each batched row to be bit-identical to that row decoded alone:
 the routed gate/up/SwiGLU and down projections for all four types at 2-64
-rows, the router, shared-expert gate and shared expert, the gated-delta-net
+rows (MMQ vector kernels for Q8_0/Q5_K/Q4_K gate/up and all four down
+projections, the per-slot GEMV for Q6_K gate/up), the router, shared-expert gate and shared expert, the gated-delta-net
 input projections and controls, its output projection and RMSNorm.
 
 ## MTP head
@@ -101,11 +102,11 @@ it does not measure long generations, tool calling or speculative decoding.
 
 ## Benchmark output consistency
 
-The October 25, 2026 [benchmarks](BENCHMARKS.md) hash every greedy completion.
-On UD-Q4_K_XL, UD-Q6_K_XL and UD-Q8_K_XL:
+The October 25 and 27, 2026 [benchmarks](BENCHMARKS.md) hash every greedy
+completion. On UD-Q4_K_XL, Q4_K_M, UD-Q6_K_XL and UD-Q8_K_XL:
 
 - DFlash2 and MTP match AR at all eight single-user depths, mixed and
-  repetitive.
+  repetitive (Q4_K_M has no MTP head, so DFlash2 only).
 - Every multi-user request (pp2048 / tg128, C1-C8) matches the same prompt
   decoded alone with AR: AR from C2, DFlash2 and MTP from C1.
 
@@ -116,6 +117,18 @@ at only two to four of the eight single-user depths; production `8e509128`
 showed the same multi-user differences.
 These hashes show which runs are numerically interchangeable; they do not
 measure accuracy.
+
+## K-quant experts in decode
+
+Since the October 27 tables, decode and verification send Q4_K/Q5_K gate/up
+and Q4_K/Q5_K/Q6_K down experts to the MMQ vector kernels instead of the
+per-slot GEMV, with the expert activations quantized to Q8_1 as on the Q8_0
+route. This changes the arithmetic for UD-Q4_K_XL and Q4_K_M, so their greedy
+text can differ from earlier builds; UD-Q6_K_XL and UD-Q8_K_XL take the same
+routes as before. Speculative and concurrent decoding stay bit-exact against
+plain decoding on all four files (target test, MoE operator test and the
+benchmark hashes above). The change has not been qualified on accuracy
+benchmarks.
 
 ## Reproduce
 
