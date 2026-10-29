@@ -1,14 +1,14 @@
-name: Rebase onto Gufo
+name: Check a Gufo rebase
 
-# Strycast is rebased on each Gufo release. The staging and main rulesets block
-# force-pushes for everyone but this workflow, which replaces a branch only
-# with a checked rebase: see tools/ci/rebase-upstream.sh and "Rebasing onto
-# Gufo" in README.md.
+# Strycast is rebased on each Gufo release. This workflow checks a rebase PR
+# and prints the commands that replace staging or main; the rulesets block
+# force-pushes, so an admin lifts that for the push itself. See
+# tools/ci/rebase-upstream.sh and "Rebasing onto Gufo" in README.md.
 on:
   workflow_dispatch:
     inputs:
       pr:
-        description: "Pull request to apply: rebase/<tag> -> staging, or staging -> main"
+        description: "Pull request to check: rebase/<tag> -> staging, or staging -> main"
         required: true
         type: number
 
@@ -19,12 +19,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  replace:
-    name: Replace the branch with the rebase
+  check:
+    name: Check the rebase
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
       pull-requests: read
       checks: read
     steps:
@@ -33,10 +33,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check the rebase and replace the branch
+      - name: Check the rebase
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr }}
-          ACTOR: ${{ github.actor }}
         run: bash tools/ci/rebase-upstream.sh

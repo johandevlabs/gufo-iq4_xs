@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Replace staging or main with a prepared rebase onto a newer Gufo release.
-# Run by .github/workflows/rebase-upstream.yml, the only actor the branch
-# rulesets let rewrite those branches. See "Rebasing onto Gufo" in README.md.
+# Check a prepared rebase of staging or main onto a newer Gufo release, and
+# print the commands that replace the branch. Run by
+# .github/workflows/rebase-upstream.yml. The rulesets block force-pushes, so an
+# admin lifts that for the push itself: see "Rebasing onto Gufo" in README.md.
 #
-# Environment: GH_TOKEN, REPO (owner/name), PR (pull request number), ACTOR.
+# Environment: GH_TOKEN, REPO (owner/name), PR (pull request number).
 set -euo pipefail
 
 UPSTREAM=https://github.com/gufo-org/gufo.git
@@ -14,10 +15,6 @@ fail() {
   echo "::error::$*"
   exit 1
 }
-
-# workflow_dispatch already needs write access; rewriting history needs admin.
-permission=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission)
-[ "$permission" = admin ] || fail "$ACTOR has $permission access; only admins can replace protected branches."
 
 pr_json=$(gh api "repos/$REPO/pulls/$PR")
 field() { jq -r "$1" <<<"$pr_json"; }
@@ -93,7 +90,7 @@ fi
   echo "## $base: Gufo $old_tag -> $new_tag"
   echo
   echo "- Pull request: #$PR ($head, \`${sha:0:8}\`)"
-  echo "- Previous head \`${old:0:8}\` archived as \`$archive\`"
+  echo "- Previous head \`${old:0:8}\`, to archive as \`$archive\`"
   echo "- Strycast commits: $(git rev-list --count --no-merges "upstream/$old_tag..$old") -> $own"
   echo
   echo '<details><summary>git range-diff</summary>'
@@ -104,6 +101,13 @@ fi
   echo '</details>'
 } >>"$summary"
 
-git push origin "$old:refs/tags/$archive"
-git push --force-with-lease="refs/heads/$base:$old" origin "$sha:refs/heads/$base"
-echo "$base now points at ${sha:0:8} (Gufo $new_tag); the old head is $archive."
+{
+  echo
+  echo "Checks passed. To replace $base:"
+  echo
+  echo '```sh'
+  echo "git fetch origin $old $sha"
+  echo "git push origin $old:refs/tags/$archive"
+  echo "git push --force-with-lease=refs/heads/$base:$old origin $sha:refs/heads/$base"
+  echo '```'
+} | tee -a "$summary"
