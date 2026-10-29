@@ -9,13 +9,15 @@
 #include "src/core/gguf_reader.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"
 #include "src/families/qwen/hip_common/quant_ops.hpp"
+#include "src/families/qwen/kernels/fast_gemv_row.hpp"
 
 namespace gufo::hip {
 namespace {
 
 constexpr std::uint32_t kMoeWave = 32;
 
-__device__ inline float MoeBlockSum(float v, float* shared) {
+__device__ inline float MoeBlockSum(float v, float* shared,
+                                    std::uint32_t waves) {
   for (int offset = kMoeWave / 2; offset > 0; offset >>= 1) {
     v += __shfl_xor(v, offset);
   }
@@ -27,13 +29,14 @@ __device__ inline float MoeBlockSum(float v, float* shared) {
   }
   __syncthreads();
   float total = 0.0F;
-  for (std::uint32_t w = 0; w < blockDim.x / kMoeWave; ++w) {
+  for (std::uint32_t w = 0; w < waves; ++w) {
     total += shared[w];
   }
   return total;
 }
 
-__device__ inline float MoeBlockMax(float v, float* shared) {
+__device__ inline float MoeBlockMax(float v, float* shared,
+                                    std::uint32_t waves) {
   for (int offset = kMoeWave / 2; offset > 0; offset >>= 1) {
     v = fmaxf(v, __shfl_xor(v, offset));
   }
@@ -45,41 +48,41 @@ __device__ inline float MoeBlockMax(float v, float* shared) {
   }
   __syncthreads();
   float total = -INFINITY;
-  for (std::uint32_t w = 0; w < blockDim.x / kMoeWave; ++w) {
+  for (std::uint32_t w = 0; w < waves; ++w) {
     total = fmaxf(total, shared[w]);
   }
   return total;
 }
 
-/// Softmax over n_experts router logits followed by top-k selection. One block
-/// per token; the first wave runs the k selection rounds. Mirrors the CPU
-/// reference: full-set softmax, lowest-index tie-break, renormalized weights
-/// with the sum floored at 2^-14.
+/// Softmax over n_experts router logits followed by top-k selection, run by
+/// the first `threads` threads of the block (a multiple of the wave size);
+/// the other waves only join the barriers. The first wave runs the k
+/// selection rounds. Mirrors the CPU reference: full-set softmax,
+/// lowest-index tie-break, renormalized weights with the sum floored at
+/// 2^-14.
 template<std::uint32_t MaxExperts>
-__global__ void MoeRouterTopKKernel(const float* __restrict__ logits,
-                                    std::uint32_t stride,
-                                    std::int32_t* __restrict__ ids,
-                                    float* __restrict__ weights,
-                                    std::uint32_t n_experts,
-                                    std::uint32_t k) {
+__device__ __forceinline__ void MoeRouterTopKBlock(
+    const float* __restrict__ src, std::int32_t* __restrict__ ids,
+    float* __restrict__ weights, std::uint32_t n_experts, std::uint32_t k,
+    std::uint32_t threads) {
   __shared__ float probs[MaxExperts];
   __shared__ float shared[32];
   __shared__ std::uint32_t chosen[32];
   __shared__ float chosen_p[32];
-  const std::uint32_t t = blockIdx.x;
-  const float* src = logits + static_cast<std::size_t>(t) * stride;
+  const std::uint32_t waves = threads / kMoeWave;
+  const std::uint32_t first = threadIdx.x < threads ? threadIdx.x : n_experts;
   float local_max = -INFINITY;
-  for (std::uint32_t e = threadIdx.x; e < n_experts; e += blockDim.x) {
+  for (std::uint32_t e = first; e < n_experts; e += threads) {
     local_max = fmaxf(local_max, src[e]);
   }
-  const float max_logit = MoeBlockMax(local_max, shared);
+  const float max_logit = MoeBlockMax(local_max, shared, waves);
   float local_sum = 0.0F;
-  for (std::uint32_t e = threadIdx.x; e < n_experts; e += blockDim.x) {
+  for (std::uint32_t e = first; e < n_experts; e += threads) {
     probs[e] = __expf(src[e] - max_logit);
     local_sum += probs[e];
   }
-  const float denom = MoeBlockSum(local_sum, shared);
-  for (std::uint32_t e = threadIdx.x; e < n_experts; e += blockDim.x) {
+  const float denom = MoeBlockSum(local_sum, shared, waves);
+  for (std::uint32_t e = first; e < n_experts; e += threads) {
     probs[e] /= denom;
   }
   __syncthreads();
@@ -132,9 +135,62 @@ __global__ void MoeRouterTopKKernel(const float* __restrict__ logits,
     }
     sum = fmaxf(sum, 6.103515625e-5F);
     for (std::uint32_t slot = 0; slot < k; ++slot) {
-      ids[t * k + slot] = static_cast<std::int32_t>(chosen[slot]);
-      weights[t * k + slot] = chosen_p[slot] / sum;
+      ids[slot] = static_cast<std::int32_t>(chosen[slot]);
+      weights[slot] = chosen_p[slot] / sum;
     }
+  }
+}
+
+/// One block per token.
+template<std::uint32_t MaxExperts>
+__global__ void MoeRouterTopKKernel(const float* __restrict__ logits,
+                                    std::uint32_t stride,
+                                    std::int32_t* __restrict__ ids,
+                                    float* __restrict__ weights,
+                                    std::uint32_t n_experts, std::uint32_t k) {
+  const std::uint32_t t = blockIdx.x;
+  MoeRouterTopKBlock<MaxExperts>(logits + static_cast<std::size_t>(t) * stride,
+                                 ids + t * k, weights + t * k, n_experts, k,
+                                 blockDim.x);
+}
+
+/// Thread count of the router top-k; the fused kernel below runs it with the
+/// same count so the softmax sums keep their order.
+constexpr std::uint32_t kMoeTopKThreads = 128;
+
+/// One-token router: block m < n_experts computes router logit m, block
+/// n_experts the shared-expert gate logit, both with FastGEMVBlockKernel's
+/// arithmetic. The last block to finish runs the top-k over the logits and
+/// resets `done` for the next launch.
+template<std::uint32_t MaxExperts>
+__launch_bounds__(256) __global__ void MoeRouterGateTopKKernel(
+    const void* __restrict__ router, core::GgmlType router_type,
+    const void* __restrict__ shared_gate_inp, core::GgmlType shared_type,
+    const float* __restrict__ x, float* logits, float* __restrict__ shared_gate,
+    std::int32_t* __restrict__ ids, float* __restrict__ weights,
+    std::uint32_t n_experts, std::size_t K, std::uint32_t k,
+    std::uint32_t* done) {
+  if (blockIdx.x < n_experts) {
+    FastGEMVBlockRow(router, router_type, x, logits, blockIdx.x, K);
+  } else {
+    FastGEMVBlockRow(shared_gate_inp, shared_type, x, shared_gate, 0, K);
+  }
+  __shared__ bool last;
+  if (threadIdx.x == 0) {
+    // Release this block's logit before counting it; thread 0 stored it.
+    __threadfence();
+    last = atomicAdd(done, 1U) == gridDim.x - 1;
+  }
+  __syncthreads();
+  if (!last) {
+    return;
+  }
+  // Acquire the other blocks' logits.
+  __threadfence();
+  MoeRouterTopKBlock<MaxExperts>(logits, ids, weights, n_experts, k,
+                                 kMoeTopKThreads);
+  if (threadIdx.x == 0) {
+    *done = 0;
   }
 }
 
@@ -155,8 +211,7 @@ __global__ void MoeEpilogueKernel(const float* __restrict__ expert_out,
     return;
   }
   float4 acc{0.0F, 0.0F, 0.0F, 0.0F};
-  const float* rows =
-      expert_out + static_cast<std::size_t>(t) * k * dim + i;
+  const float* rows = expert_out + static_cast<std::size_t>(t) * k * dim + i;
   for (std::uint32_t s = 0; s < k; ++s) {
     const float w = weights[t * k + s];
     const float4 v = *reinterpret_cast<const float4*>(
@@ -178,8 +233,8 @@ __global__ void MoeEpilogueKernel(const float* __restrict__ expert_out,
 
 /// Byte size of one expert matrix inside a stacked [cols, rows, experts]
 /// payload for the formats this fallback decodes.
-__device__ inline std::size_t MoeExpertBytes(core::GgmlType type,
-                                             std::size_t m, std::size_t k) {
+__device__ inline std::size_t MoeExpertBytes(core::GgmlType type, std::size_t m,
+                                             std::size_t k) {
   if (type == core::GgmlType::kBF16) {
     return m * k * sizeof(hip_bfloat16);
   }
@@ -195,8 +250,7 @@ template<typename TX>
 __device__ inline float MoeWarpDenseRowDot(core::GgmlType type,
                                            const void* __restrict__ row,
                                            const TX* __restrict__ x,
-                                           std::size_t k,
-                                           std::uint32_t lane) {
+                                           std::size_t k, std::uint32_t lane) {
   float sum = 0.0F;
   if (type == core::GgmlType::kBF16) {
     const auto* r = static_cast<const hip_bfloat16*>(row);
@@ -223,8 +277,8 @@ __device__ inline float MoeWarpRowDot(core::GgmlType type,
                                       std::size_t k, std::uint32_t lane) {
   if (type == core::GgmlType::kBF16 || type == core::GgmlType::kF32) {
     const std::size_t row_bytes =
-        k * (type == core::GgmlType::kBF16 ? sizeof(hip_bfloat16)
-                                           : sizeof(float));
+        k *
+        (type == core::GgmlType::kBF16 ? sizeof(hip_bfloat16) : sizeof(float));
     const auto* row =
         static_cast<const std::uint8_t*>(expert_base) + m * row_bytes;
     return MoeWarpDenseRowDot(type, row, x, k, lane);
@@ -248,12 +302,12 @@ __global__ void MoeSlotGemvKernel(const void* __restrict__ w,
     return;
   }
   const std::uint32_t expert = static_cast<std::uint32_t>(ids[slot]);
-  const auto* base = static_cast<const std::uint8_t*>(w) +
-                     static_cast<std::size_t>(expert) *
-                         MoeExpertBytes(type, m, k);
+  const auto* base =
+      static_cast<const std::uint8_t*>(w) +
+      static_cast<std::size_t>(expert) * MoeExpertBytes(type, m, k);
   const float* x_row =
-      x + static_cast<std::size_t>(x_divisor == 0 ? slot : slot / x_divisor) *
-              k;
+      x +
+      static_cast<std::size_t>(x_divisor == 0 ? slot : slot / x_divisor) * k;
   const float sum = MoeWarpRowDot(type, base, row, x_row, k, lane);
   if (lane == 0) {
     out[static_cast<std::size_t>(slot) * m + row] = sum;
@@ -261,16 +315,12 @@ __global__ void MoeSlotGemvKernel(const void* __restrict__ w,
 }
 
 /// Routed fused SwiGLU GEMV: grid.y = slot, one warp per intermediate row.
-__global__ void MoeSlotSwigluGemvKernel(const void* __restrict__ gate_w,
-                                        core::GgmlType gate_type,
-                                        const void* __restrict__ up_w,
-                                        core::GgmlType up_type,
-                                        const float* __restrict__ x,
-                                        const std::int32_t* __restrict__ ids,
-                                        float* __restrict__ act,
-                                        std::size_t expert_ff,
-                                        std::size_t hidden,
-                                        std::uint32_t x_divisor) {
+__global__ void MoeSlotSwigluGemvKernel(
+    const void* __restrict__ gate_w, core::GgmlType gate_type,
+    const void* __restrict__ up_w, core::GgmlType up_type,
+    const float* __restrict__ x, const std::int32_t* __restrict__ ids,
+    float* __restrict__ act, std::size_t expert_ff, std::size_t hidden,
+    std::uint32_t x_divisor) {
   const std::uint32_t slot = blockIdx.y;
   const std::uint32_t lane = threadIdx.x % kMoeWave;
   const std::uint32_t warp = threadIdx.x / kMoeWave;
@@ -280,14 +330,12 @@ __global__ void MoeSlotSwigluGemvKernel(const void* __restrict__ gate_w,
     return;
   }
   const std::uint32_t expert = static_cast<std::uint32_t>(ids[slot]);
-  const auto* gate_base =
-      static_cast<const std::uint8_t*>(gate_w) +
-      static_cast<std::size_t>(expert) *
-          MoeExpertBytes(gate_type, expert_ff, hidden);
-  const auto* up_base =
-      static_cast<const std::uint8_t*>(up_w) +
-      static_cast<std::size_t>(expert) *
-          MoeExpertBytes(up_type, expert_ff, hidden);
+  const auto* gate_base = static_cast<const std::uint8_t*>(gate_w) +
+                          static_cast<std::size_t>(expert) *
+                              MoeExpertBytes(gate_type, expert_ff, hidden);
+  const auto* up_base = static_cast<const std::uint8_t*>(up_w) +
+                        static_cast<std::size_t>(expert) *
+                            MoeExpertBytes(up_type, expert_ff, hidden);
   const float* x_row =
       x + static_cast<std::size_t>(x_divisor == 0 ? slot : slot / x_divisor) *
               hidden;
@@ -325,8 +373,7 @@ constexpr std::uint32_t kGroupedTileShift = 20;
 using GroupedFragment = __attribute__((ext_vector_type(16))) unsigned short;
 using GroupedAccumulator = __attribute__((ext_vector_type(8))) float;
 
-__device__ inline GroupedFragment GroupedLoadFragment(
-    const unsigned short* p) {
+__device__ inline GroupedFragment GroupedLoadFragment(const unsigned short* p) {
   union {
     GroupedFragment f;
     uint4 u[2];
@@ -370,8 +417,7 @@ __global__ void MoeGroupSlotsKernel(const std::int32_t* __restrict__ ids,
       expert_bounds[e] = static_cast<std::int32_t>(offset);
       cursor[e] = offset;
       for (std::uint32_t r = 0; r < count[e]; r += kGroupedTileRows) {
-        tiles[tile++] =
-            static_cast<std::int32_t>((e << kGroupedTileShift) | r);
+        tiles[tile++] = static_cast<std::int32_t>((e << kGroupedTileShift) | r);
       }
       offset += count[e];
     }
@@ -411,9 +457,9 @@ __launch_bounds__(kGroupedThreads) __global__ void MoeGroupedBf16GemmKernel(
       return;
     }
     expert = static_cast<std::uint32_t>(entry) >> kGroupedTileShift;
-    first = static_cast<std::uint32_t>(expert_bounds[expert]) +
-            (static_cast<std::uint32_t>(entry) &
-             ((1U << kGroupedTileShift) - 1U));
+    first =
+        static_cast<std::uint32_t>(expert_bounds[expert]) +
+        (static_cast<std::uint32_t>(entry) & ((1U << kGroupedTileShift) - 1U));
     end = static_cast<std::uint32_t>(expert_bounds[expert + 1]);
   }
   const std::uint32_t col0 = blockIdx.y * kGroupedTileCols;
@@ -441,12 +487,13 @@ __launch_bounds__(kGroupedThreads) __global__ void MoeGroupedBf16GemmKernel(
   const std::uint32_t a_col = (tid % 8U) * 8U;
   const std::int32_t a_slot = slot_of[a_row];
   const float* a_src =
-      a_slot < 0 ? nullptr
-                 : x + static_cast<std::size_t>(
-                           x_divisor == 0 ? static_cast<std::uint32_t>(a_slot)
-                                          : static_cast<std::uint32_t>(a_slot) /
-                                                x_divisor) *
-                           k;
+      a_slot < 0
+          ? nullptr
+          : x + static_cast<std::size_t>(
+                    x_divisor == 0
+                        ? static_cast<std::uint32_t>(a_slot)
+                        : static_cast<std::uint32_t>(a_slot) / x_divisor) *
+                    k;
   const unsigned short* w_tile =
       w + (static_cast<std::size_t>(expert) * m + col0) * k;
 
@@ -665,16 +712,15 @@ namespace {
 
 void LaunchMoeGroupSlots(const std::int32_t* ids, std::uint32_t slots,
                          std::uint32_t n_experts,
-                         const MoeGroupedScratch& scratch,
-                         hipStream_t stream) {
+                         const MoeGroupedScratch& scratch, hipStream_t stream) {
   MoeGroupSlotsKernel<<<1, 1024, 0, stream>>>(
       ids, slots, n_experts, scratch.sorted_slots, scratch.tiles,
       scratch.expert_bounds, GroupedGridTiles(slots, n_experts));
 }
 
 void LaunchMoeGroupedBf16Gemm(const void* w, const float* x, float* out,
-                              std::size_t m, std::size_t k,
-                              std::uint32_t slots, std::uint32_t n_experts,
+                              std::size_t m, std::size_t k, std::uint32_t slots,
+                              std::uint32_t n_experts,
                               std::uint32_t x_token_divisor,
                               const MoeGroupedScratch& scratch,
                               hipStream_t stream) {
@@ -735,7 +781,7 @@ void LaunchMoeRouterTopK(const float* logits, std::uint32_t logits_stride,
                          std::int32_t* ids, float* weights,
                          std::uint32_t n_tokens, std::uint32_t n_experts,
                          std::uint32_t n_used, hipStream_t stream) {
-  constexpr std::uint32_t kThreads = 128;
+  constexpr std::uint32_t kThreads = kMoeTopKThreads;
   if (n_experts <= 256) {
     MoeRouterTopKKernel<256><<<n_tokens, kThreads, 0, stream>>>(
         logits, logits_stride, ids, weights, n_experts, n_used);
@@ -743,6 +789,33 @@ void LaunchMoeRouterTopK(const float* logits, std::uint32_t logits_stride,
     MoeRouterTopKKernel<1024><<<n_tokens, kThreads, 0, stream>>>(
         logits, logits_stride, ids, weights, n_experts, n_used);
   }
+}
+
+bool IsMoeRouterGateTopKSupported(core::GgmlType router_type,
+                                  core::GgmlType shared_type,
+                                  std::uint32_t n_experts, std::size_t k,
+                                  std::uint32_t n_used) noexcept {
+  const auto dense = [](core::GgmlType type) {
+    return type == core::GgmlType::kF32 || type == core::GgmlType::kBF16;
+  };
+  // FastGEMVBlockKernel takes 256 threads below K 16384 (the router GEMV's
+  // dense route), as the fused kernel does; the top-k keeps one wave of
+  // selections.
+  return dense(router_type) && dense(shared_type) && n_experts <= 256 &&
+         k < 16384 && n_used <= 32;
+}
+
+void LaunchMoeRouterGateTopK(const void* router, core::GgmlType router_type,
+                             const void* shared_gate_inp,
+                             core::GgmlType shared_type, const float* x,
+                             float* logits, float* shared_gate,
+                             std::int32_t* ids, float* weights,
+                             std::uint32_t n_experts, std::size_t k,
+                             std::uint32_t n_used, std::uint32_t* done,
+                             hipStream_t stream) {
+  MoeRouterGateTopKKernel<256><<<n_experts + 1, 256, 0, stream>>>(
+      router, router_type, shared_gate_inp, shared_type, x, logits, shared_gate,
+      ids, weights, n_experts, k, n_used, done);
 }
 
 void LaunchMoeEpilogue(const float* expert_out, const float* weights,
@@ -760,10 +833,9 @@ void LaunchMoeSlotGemv(const void* w, core::GgmlType type, const float* x,
                        const std::int32_t* ids, float* out, std::size_t m,
                        std::size_t k, std::uint32_t slots,
                        std::uint32_t x_token_divisor, hipStream_t stream) {
-  const dim3 grid(
-      static_cast<std::uint32_t>((m + kMoeGemvWavesPerBlock - 1) /
-                                 kMoeGemvWavesPerBlock),
-      slots);
+  const dim3 grid(static_cast<std::uint32_t>((m + kMoeGemvWavesPerBlock - 1) /
+                                             kMoeGemvWavesPerBlock),
+                  slots);
   MoeSlotGemvKernel<<<grid, kMoeGemvWavesPerBlock * kMoeWave, 0, stream>>>(
       w, type, x, ids, out, m, k, x_token_divisor);
 }

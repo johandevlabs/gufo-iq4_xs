@@ -134,14 +134,27 @@ __global__ void BatchedFusedRMSNormQuantizeQ8_1Kernel(
 // rounding the quantizer reads are those of LaunchBatchedResidualAdd,
 // LaunchBatchedRMSNorm and LaunchQuantizeActivationQ8_1 in sequence, so every
 // output byte is identical.
-template<int Items>
+//
+// With MoeCombine the residual is not read from memory: element i is the MoE
+// epilogue's combine of the routed expert rows and the gated shared expert
+// (LaunchMoeEpilogue's arithmetic, one token), so the decode step does not
+// store and reload the FFN output.
+struct MoeResidualInputs {
+  const float* expert_out{nullptr};   // [k, dim]
+  const float* weights{nullptr};      // [k]
+  const float* shared_out{nullptr};   // [dim]
+  const float* shared_gate{nullptr};  // [1], pre-sigmoid
+  std::uint32_t k{0};
+};
+
+template<int Items, bool MoeCombine = false>
 __launch_bounds__(256) __global__
     void BatchedFusedResidualRMSNormQuantizeQ8_1Kernel(
         const float* x, const float* __restrict__ residual,
         const float* __restrict__ weight, float* sum_out,
         float* __restrict__ out, hip_bfloat16* __restrict__ out_bf16,
         void* __restrict__ q8_out, std::size_t batch_size, float eps,
-        hip_bfloat16* __restrict__ out_bf16_tiled) {
+        hip_bfloat16* __restrict__ out_bf16_tiled, MoeResidualInputs moe = {}) {
   constexpr std::size_t kDim = static_cast<std::size_t>(Items) * 256;
   const std::size_t b = blockIdx.x;
   if (b >= batch_size) {
@@ -156,14 +169,23 @@ __launch_bounds__(256) __global__
   for (int j = 0; j < Items; ++j) {
     const std::size_t i = tid + (256 * j);
     float val = x[row + i];
-    if (residual != nullptr) {
+    if constexpr (MoeCombine) {
+      float acc = 0.0F;
+      for (std::uint32_t slot = 0; slot < moe.k; ++slot) {
+        const float w = moe.weights[slot];
+        acc += w * moe.expert_out[(static_cast<std::size_t>(slot) * kDim) + i];
+      }
+      const float g = 1.0F / (1.0F + __expf(-moe.shared_gate[0]));
+      acc += g * moe.shared_out[i];
+      val = val + acc;
+    } else if (residual != nullptr) {
       val = val + residual[row + i];
     }
     values[j] = val;
     // Unrolling must retain the generic loop's fused accumulation.
     sum_sq = __fmaf_rn(val, val, sum_sq);
   }
-  if (residual != nullptr) {
+  if (MoeCombine || residual != nullptr) {
 #pragma unroll
     for (int j = 0; j < Items; ++j) {
       sum_out[row + tid + (256 * j)] = values[j];
@@ -1182,6 +1204,36 @@ void LaunchBatchedFusedResidualRMSNormQuantizeQ8_1(
           static_cast<hip_bfloat16*>(out_bf16), q8_1_out, batch_size, eps,
           static_cast<hip_bfloat16*>(out_bf16_tiled));
   LaunchZeroQ8ActTail<true>(q8_1_out, batch_size, dim, stream);
+}
+
+void LaunchFusedResidualRMSNorm(const float* x, const float* residual,
+                                const float* weight, float* sum_out, float* out,
+                                std::size_t dim, float eps,
+                                hipStream_t stream) {
+  if (!IsFusedResidualRMSNormQuantizeQ8_1Supported(dim)) {
+    return;
+  }
+  BatchedFusedResidualRMSNormQuantizeQ8_1Kernel<8><<<1, 256, 0, stream>>>(
+      x, residual, weight, sum_out, out, nullptr, nullptr, 1, eps, nullptr);
+}
+
+void LaunchFusedMoeResidualRMSNorm(const float* x, const float* expert_out,
+                                   const float* expert_weights,
+                                   const float* shared_out,
+                                   const float* shared_gate, std::uint32_t k,
+                                   const float* weight, float* sum_out,
+                                   float* out, std::size_t dim, float eps,
+                                   hipStream_t stream) {
+  if (!IsFusedResidualRMSNormQuantizeQ8_1Supported(dim)) {
+    return;
+  }
+  BatchedFusedResidualRMSNormQuantizeQ8_1Kernel<8, true><<<1, 256, 0, stream>>>(
+      x, nullptr, weight, sum_out, out, nullptr, nullptr, 1, eps, nullptr,
+      {.expert_out = expert_out,
+       .weights = expert_weights,
+       .shared_out = shared_out,
+       .shared_gate = shared_gate,
+       .k = k});
 }
 
 bool IsFusedRMSNormQuantizeQ8_1Supported(std::size_t dim) noexcept {

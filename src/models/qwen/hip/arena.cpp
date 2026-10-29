@@ -87,6 +87,8 @@ std::size_t MoeScratchBytes(const core::ModelConfig& config,
                                256) *
                                   256);
   }
+  // router_done, at the start of the block.
+  total = CheckedSum(total, 256);
   return total;
 }
 
@@ -113,6 +115,12 @@ QwenMoeScratch CarveMoeScratch(std::uint8_t* block,
     offset += ((n * sizeof(std::int32_t) + 255) / 256) * 256;
     return std::span<std::int32_t>(p, n);
   };
+  // First, so every batch size carves it at the same offset: prefill and
+  // decode view this block with different batches, and no other span may
+  // ever cover the counter.
+  scratch.router_done =
+      std::span<std::uint32_t>(reinterpret_cast<std::uint32_t*>(block), 1);
+  offset += 256;
   scratch.router_logits = take_floats(batch * config.expert_count);
   scratch.shexp_gate = take_floats(batch);
   scratch.ids = take_ints(slots);
@@ -923,7 +931,10 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
                                              policy_.recurrent_state_storage)));
 
     if (config_.IsMoE()) {
-      HIP_CHECK(hipMalloc(&d_moe_scratch, MoeScratchBytes(config_, batch)));
+      const std::size_t moe_bytes = MoeScratchBytes(config_, batch);
+      HIP_CHECK(hipMalloc(&d_moe_scratch, moe_bytes));
+      // The fused router's completion counter must start at zero.
+      HIP_CHECK(hipMemset(d_moe_scratch, 0, moe_bytes));
     }
 
     Reset();
