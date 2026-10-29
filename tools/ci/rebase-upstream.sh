@@ -69,11 +69,16 @@ subjects() { git log --no-merges --format=%s "upstream/$1..$2" | sort -u; }
 dropped=$(comm -23 <(subjects "$old_tag" "$old") <(subjects "$new_tag" "$sha"))
 [ -z "$dropped" ] || fail "commits missing after the rebase: $(tr '\n' ';' <<<"$dropped")"
 
-# The checks the target branch requires must have passed on this commit.
+# The checks the target branch requires must have passed on this commit. A
+# rebase PR conflicts with its target, so they come from push runs on the
+# rebase/<tag> branch (staging -> main reuses the same commit's results).
 required=$(gh api "repos/$REPO/rules/branches/$base" \
   --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context')
 while IFS= read -r check; do
   [ -n "$check" ] || continue
+  # A pull_request-only check, and a rebase PR conflicts with its target, so
+  # it never runs. The source rules above check the same thing.
+  [ "$check" = "Promotion comes from staging" ] && continue
   passed=$(gh api "repos/$REPO/commits/$sha/check-runs" -X GET -f check_name="$check" \
     --jq '[.check_runs[] | select(.conclusion == "success")] | length')
   [ "$passed" -gt 0 ] || fail "required check '$check' has not passed on $sha."

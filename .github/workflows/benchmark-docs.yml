@@ -2,7 +2,9 @@ name: Benchmark docs
 
 on:
   push:
-    branches: [ main, staging ]
+    # A rebase PR conflicts with the branch it replaces, so pull_request runs
+    # never start; rebase/<tag> branches are checked on push instead.
+    branches: [ main, staging, 'rebase/**' ]
   pull_request:
     branches: [ main, staging ]
 
