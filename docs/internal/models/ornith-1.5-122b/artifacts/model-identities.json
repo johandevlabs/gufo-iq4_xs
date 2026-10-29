@@ -5,7 +5,7 @@
   "sources": {
     "q4km": "ornith-ai/Ornith-1.5-122B-GGUF, revision 8d5893d767c449a4f18dd08f4bb6d0d6d4426175, Ornith-1.5-122B-Q4_K_M.gguf; carries one MTP layer, used as the MTP draft"
   },
-  "scope": "Pinned artifacts for the October 28, 2026 benchmark tables.",
+  "scope": "Pinned artifacts for the benchmark tables. The Gufo rows are from benchmarks-2026-10-29; the llama.cpp rows from benchmarks-2026-10-28.",
   "benchmarks-2026-10-28": {
     "gufo": {
       "revision": "d8535ed0",
@@ -21,6 +21,20 @@
       "binarySha256": "290ff40c479d3e29ba14b1160f295ec34d4b75d0608c7a2288bd77d80c23f1a6",
       "ggmlHipSha256": "d70bc036681f5f1b94f6262b5a774764bc651c9e893a6bd5f6787fa119662e25",
       "speculative": "MTP: --spec-type draft-mtp with the target as draft model fails to load (a second 72 GiB copy does not fit), so MTP cells are N/A"
+    }
+  },
+  "benchmarks-2026-10-29": {
+    "gufo": {
+      "revision": "03ba946d",
+      "dirty": false,
+      "build": "CMake release with ROCm 10.1.0 (HIP Clang 24) and libstdc++ 16 from Gufo's pinned runtime image, outside Nix",
+      "binarySha256": "6583bfb9a1ac7849e19ac48f257d5deee54a1ea1936279d6a7ebf4f42179c7d9",
+      "change": "Strycast rebased onto Gufo v0.26.0; first build with the ROCm 10.1 toolchain"
+    },
+    "reference": "Not re-measured; llama.cpp rows are from benchmarks-2026-10-28",
+    "gufoConsistency": {
+      "singleUserMtpMatchingAr": "6 of 6 depths, mixed text",
+      "metric": "SHA-256 of completion text; does not establish original-checkpoint accuracy."
     }
   }
 }

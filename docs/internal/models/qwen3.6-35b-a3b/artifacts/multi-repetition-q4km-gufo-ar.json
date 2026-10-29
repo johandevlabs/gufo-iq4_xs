@@ -11,15 +11,15 @@
     "gpuArchitecture": "gfx1151",
     "gpuComputeUnits": 20,
     "gpuDriver": "amdgpu",
-    "gpuName": "AMD Radeon 8060S Graphics",
+    "gpuName": "Radeon 8060S Graphics",
     "gpuPciId": "1002:1586",
     "kernelRelease": "7.0.0-34-generic",
     "memoryTotalBytes": 134307635200,
     "memoryType": "LPDDR5X (Unified)",
-    "rocmVersion": "7.2.3",
+    "rocmVersion": "10.1.0",
     "schemaVersion": "1.0.0"
   },
-  "fingerprintId": "fc9a031161170511545286fa0e767880e688de9c0af46c05dc9e21d2680b3fe5",
+  "fingerprintId": "b98f7b56369ea8ccfc74374ecdbaa0e33de445e7a87b48c5c8b3ed5d91949fe8",
   "metricDefinitions": {
     "aggregate_output_tokens_per_second": "overall: completion tokens divided by the sum of measured round spans (end-to-end, includes prefill and queueing)",
     "aggregate_total_tokens_per_second": "overall: actual prefill plus completion tokens divided by the sum of measured round spans; other statistics describe individual rounds",
@@ -33,13 +33,13 @@
     "id": "bench"
   },
   "modelBench": {
-    "measuredOn": "2026-10-27",
+    "measuredOn": "2026-10-29",
     "mode": "ar",
     "table": "multi-repetition-q4km",
     "target": "gufo"
   },
   "notes": [
-    "gufo serve --port 49893 --sessions 1 llm --model Qwen3.6-35B-A3B-Q4_K_M.gguf --context 4096 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8",
+    "gufo serve --port 36837 --sessions 1 llm --model Qwen3.6-35B-A3B-Q4_K_M.gguf --context 4096 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8",
     "fresh server per concurrency level"
   ],
   "reference": {
@@ -49,28 +49,28 @@
     "c1": {
       "aggregate": {
         "output_tokens_per_second": {
-          "maximum": 51.69788934810245,
-          "median": 51.69788934810245,
-          "minimum": 51.69788934810245,
-          "overall": 51.69788934810245,
-          "p95": 51.69788934810245,
-          "p99": 51.69788934810245
+          "maximum": 54.542659447086706,
+          "median": 54.542659447086706,
+          "minimum": 54.542659447086706,
+          "overall": 54.542659447086706,
+          "p95": 54.542659447086706,
+          "p99": 54.542659447086706
         },
         "prefill_tokens_per_second": {
-          "maximum": 821.5117729221905,
-          "median": 821.5117729221905,
-          "minimum": 821.5117729221905,
-          "overall": 821.5117729221905,
-          "p95": 821.5117729221905,
-          "p99": 821.5117729221905
+          "maximum": 866.7169477763622,
+          "median": 866.7169477763622,
+          "minimum": 866.7169477763622,
+          "overall": 866.7169477763622,
+          "p95": 866.7169477763622,
+          "p99": 866.7169477763622
         },
         "total_tokens_per_second": {
-          "maximum": 873.2096622702929,
-          "median": 873.2096622702929,
-          "minimum": 873.2096622702929,
-          "overall": 873.2096622702929,
-          "p95": 873.2096622702929,
-          "p99": 873.2096622702929
+          "maximum": 921.2596072234488,
+          "median": 921.2596072234488,
+          "minimum": 921.2596072234488,
+          "overall": 921.2596072234488,
+          "p95": 921.2596072234488,
+          "p99": 921.2596072234488
         }
       },
       "cases": {
@@ -86,11 +86,11 @@
             "82fd84fded8d257a194ac1eca43b70a866a79bac1e97e45d19f0292d6a7118bd"
           ],
           "decode_tokens_per_second": {
-            "maximum": 70.50249351814533,
-            "median": 70.50249351814533,
-            "minimum": 70.50249351814533,
-            "p95": 70.50249351814533,
-            "p99": 70.50249351814533
+            "maximum": 74.62131197005701,
+            "median": 74.62131197005701,
+            "minimum": 74.62131197005701,
+            "p95": 74.62131197005701,
+            "p99": 74.62131197005701
           },
           "draftedPerOutputToken": 0.0,
           "draftedTokens": 0,
@@ -119,11 +119,11 @@
             "82fd84fded8d257a194ac1eca43b70a866a79bac1e97e45d19f0292d6a7118bd"
           ],
           "decode_tokens_per_second": {
-            "maximum": 70.50249351814533,
-            "median": 70.50249351814533,
-            "minimum": 70.50249351814533,
-            "p95": 70.50249351814533,
-            "p99": 70.50249351814533
+            "maximum": 74.62131197005701,
+            "median": 74.62131197005701,
+            "minimum": 74.62131197005701,
+            "p95": 74.62131197005701,
+            "p99": 74.62131197005701
           },
           "draftedPerOutputToken": 0.0,
           "draftedTokens": 0,
@@ -143,7 +143,7 @@
         "exactRate": 1.0,
         "exactRequests": 1,
         "matchedCases": 1,
-        "matchedRoundOutputTokensPerSecond": 51.69788934810245,
+        "matchedRoundOutputTokensPerSecond": 54.542659447086706,
         "matchedRounds": 1
       },
       "corpusPromptCount": 1,
@@ -152,59 +152,59 @@
       ],
       "latency": {
         "client_event_inter_token_ms": {
-          "maximum": 14.191276166500069,
-          "median": 14.191276166500069,
-          "minimum": 14.191276166500069,
-          "p95": 14.191276166500069,
-          "p99": 14.191276166500069
+          "maximum": 13.412646747626892,
+          "median": 13.412646747626892,
+          "minimum": 13.412646747626892,
+          "p95": 13.412646747626892,
+          "p99": 13.412646747626892
         },
         "client_ttft_ms": {
-          "maximum": 658.914749044925,
-          "median": 658.914749044925,
-          "minimum": 658.914749044925,
-          "p95": 658.914749044925,
-          "p99": 658.914749044925
+          "maximum": 629.2468253523111,
+          "median": 629.2468253523111,
+          "minimum": 629.2468253523111,
+          "p95": 629.2468253523111,
+          "p99": 629.2468253523111
         },
         "queue_ms": {
-          "maximum": 0.815727,
-          "median": 0.815727,
-          "minimum": 0.815727,
-          "p95": 0.815727,
-          "p99": 0.815727
+          "maximum": 0.833922,
+          "median": 0.833922,
+          "minimum": 0.833922,
+          "p95": 0.833922,
+          "p99": 0.833922
         },
         "request_ms": {
-          "maximum": 2475.923129823059,
-          "median": 2475.923129823059,
-          "minimum": 2475.923129823059,
-          "p95": 2475.923129823059,
-          "p99": 2475.923129823059
+          "maximum": 2346.786924172193,
+          "median": 2346.786924172193,
+          "minimum": 2346.786924172193,
+          "p95": 2346.786924172193,
+          "p99": 2346.786924172193
         },
         "server_inter_token_ms": {
-          "maximum": 14.201473236220473,
-          "median": 14.201473236220473,
-          "minimum": 14.201473236220473,
-          "p95": 14.201473236220473,
-          "p99": 14.201473236220473
+          "maximum": 13.418602149606292,
+          "median": 13.418602149606292,
+          "minimum": 13.418602149606292,
+          "p95": 13.418602149606292,
+          "p99": 13.418602149606292
         },
         "server_max_inter_token_ms": {
-          "maximum": 16.541065,
-          "median": 16.541065,
-          "minimum": 16.541065,
-          "p95": 16.541065,
-          "p99": 16.541065
+          "maximum": 15.807747,
+          "median": 15.807747,
+          "minimum": 15.807747,
+          "p95": 15.807747,
+          "p99": 15.807747
         },
         "server_ttft_ms": {
-          "maximum": 656.90247,
-          "median": 656.90247,
-          "minimum": 656.90247,
-          "p95": 656.90247,
-          "p99": 656.90247
+          "maximum": 627.816359,
+          "median": 627.816359,
+          "minimum": 627.816359,
+          "p95": 627.816359,
+          "p99": 627.816359
         }
       },
       "logicalConcurrency": [
         1
       ],
-      "measuredSpanMs": 2475.923129823059,
+      "measuredSpanMs": 2346.786924172193,
       "metricsSources": [
         "gufo"
       ],
@@ -216,12 +216,12 @@
       "roundCount": 1,
       "rounds": [
         {
-          "output_tokens_per_second": 51.69788934810245,
-          "prefill_tokens_per_second": 821.5117729221905,
+          "output_tokens_per_second": 54.542659447086706,
+          "prefill_tokens_per_second": 866.7169477763622,
           "repetition": 0,
           "sampleCount": 1,
-          "span_ms": 2475.923129823059,
-          "total_tokens_per_second": 873.2096622702929
+          "span_ms": 2346.786924172193,
+          "total_tokens_per_second": 921.2596072234488
         }
       ],
       "samples": [
@@ -230,32 +230,32 @@
           "cached_prompt_tokens": 0,
           "case_id": "synthetic_repetition_pp2048",
           "category": "repetition",
-          "client_event_inter_token_ms": 14.191276166500069,
-          "client_ttft_ms": 658.914749044925,
+          "client_event_inter_token_ms": 13.412646747626892,
+          "client_ttft_ms": 629.2468253523111,
           "completion_sha256": "82fd84fded8d257a194ac1eca43b70a866a79bac1e97e45d19f0292d6a7118bd",
           "completion_tokens": 128,
           "concurrency": 1,
-          "decode_ms": 1815.5386230000001,
-          "decode_tokens_per_second": 70.50249351814533,
+          "decode_ms": 1715.327654,
+          "decode_tokens_per_second": 74.62131197005701,
           "draft_acceptance": null,
           "draft_accepted_tokens": 0,
           "draft_tokens": 0,
           "execution_plan": "serial-c1",
           "metrics_source": "gufo",
           "physical_execution_width": 1,
-          "prefill_ms": 653.968584,
+          "prefill_ms": 624.806186,
           "prefill_tokens": 2034,
-          "prefill_tokens_per_second": 3110.2411488317002,
+          "prefill_tokens_per_second": 3255.4095103021273,
           "prompt_tokens": 2034,
-          "queue_ms": 0.815727,
+          "queue_ms": 0.833922,
           "repetition": 0,
           "request_index": 0,
           "requested_logical_concurrency": 1,
-          "server_inter_token_ms": 14.201473236220473,
-          "server_max_inter_token_ms": 16.541065,
-          "server_ttft_ms": 656.90247,
-          "wall_ms": 2475.923129823059,
-          "whole_request_tokens_per_second": 873.2096622702929
+          "server_inter_token_ms": 13.418602149606292,
+          "server_max_inter_token_ms": 15.807747,
+          "server_ttft_ms": 627.816359,
+          "wall_ms": 2346.786924172193,
+          "whole_request_tokens_per_second": 921.2596072234488
         }
       ],
       "scheduledPromptCount": 1,
@@ -277,25 +277,25 @@
       },
       "stage": {
         "decode_tokens_per_second": {
-          "maximum": 70.50249351814533,
-          "median": 70.50249351814533,
-          "minimum": 70.50249351814533,
-          "p95": 70.50249351814533,
-          "p99": 70.50249351814533
+          "maximum": 74.62131197005701,
+          "median": 74.62131197005701,
+          "minimum": 74.62131197005701,
+          "p95": 74.62131197005701,
+          "p99": 74.62131197005701
         },
         "prefill_tokens_per_second": {
-          "maximum": 3110.2411488317002,
-          "median": 3110.2411488317002,
-          "minimum": 3110.2411488317002,
-          "p95": 3110.2411488317002,
-          "p99": 3110.2411488317002
+          "maximum": 3255.4095103021273,
+          "median": 3255.4095103021273,
+          "minimum": 3255.4095103021273,
+          "p95": 3255.4095103021273,
+          "p99": 3255.4095103021273
         },
         "whole_request_tokens_per_second": {
-          "maximum": 873.2096622702929,
-          "median": 873.2096622702929,
-          "minimum": 873.2096622702929,
-          "p95": 873.2096622702929,
-          "p99": 873.2096622702929
+          "maximum": 921.2596072234488,
+          "median": 921.2596072234488,
+          "minimum": 921.2596072234488,
+          "p95": 921.2596072234488,
+          "p99": 921.2596072234488
         }
       }
     }
@@ -303,8 +303,8 @@
   "schemaVersion": "1.0.0",
   "source": {
     "buildMode": "nix-release",
-    "dirty": true,
-    "revision": "dc4a513edcf5ef3cb6bf5c003ce1b2507450195a"
+    "dirty": false,
+    "revision": "03ba946d37bbfdbf80af56740aa10c27c5c0fd67"
   },
   "warnings": [],
   "workload": {

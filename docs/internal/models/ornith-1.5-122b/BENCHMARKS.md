@@ -1,13 +1,22 @@
 # Ornith 1.5 122B benchmarks
 
-AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo (Strycast `staging`
-plus this model's commits) versus llama.cpp `68d9053a`, the revision Strycast
-pins, on `Ornith-1.5-122B-Q4_K_M.gguf` ([files and revisions](README.md)).
-Both were compiled with host ROCm 7.2.2, not the pinned 7.2.3, and llama.cpp
-with the same `--amdgpu-unroll-threshold-local=600` HIP flag as the pinned
-recipe. HTTP through `tools/bench/model-bench.py`, greedy, thinking off.
-Measured October 28, 2026, inside one GPU admission hold so no other model
-shared the GPU.
+AMD Strix Halo `gfx1151`, 128 GB unified memory. Gufo versus llama.cpp
+`68d9053a`, the revision Strycast pins, on `Ornith-1.5-122B-Q4_K_M.gguf`
+([files and revisions](README.md)). HTTP through `tools/bench/model-bench.py`,
+greedy, thinking off.
+
+The Gufo rows were measured on October 29, 2026 with Strycast `03ba946d` (on
+Gufo v0.26.0) built with the ROCm 10.1 toolchain Gufo pins. They replace
+October 28 rows from the contributed branch (`d8535ed0`, host ROCm 7.2.2),
+which lacked the K-quant GEMV decode change: prefill is now 1-16% faster and
+decode 4-23% faster. Loading takes 30 s instead of 19 s and the server holds
+about 4 GiB more, because Strycast loads the weights into device memory with
+Gufo's own implementation
+([gufo#708](https://github.com/gufo-org/gufo/pull/708)) rather than the
+branch's; Strycast before the rebase (`87e3dcd0`, ROCm 7.2.3) measures the
+same. The llama.cpp rows are the October 28 measurements, compiled with host
+ROCm 7.2.2 and the pinned recipe's `--amdgpu-unroll-threshold-local=600` HIP
+flag ([builds](artifacts/model-identities.json)).
 
 Gufo drafts 2 MTP tokens from the GGUF's own MTP layer. llama.cpp's
 `draft-mtp` loads the whole 72 GiB GGUF a second time as its draft model,
@@ -24,52 +33,60 @@ Approximately pp2048 / tg128; depth is the cached prefix in tokens. Depth
 <!-- bench:single-ar-q4km -->
 | Ornith 122B Q4_K_M AR<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain | Gufo tg (tok/s) | llama.cpp tg (tok/s) | Gain |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1014.29 | 368.06 | +175.6% | 28.14 | 26.70 | +5.4% |
-| 4,096 | 949.21 | 344.41 | +175.6% | 27.38 | 25.92 | +5.6% |
-| 8,192 | 886.06 | 327.77 | +170.3% | 26.63 | 25.18 | +5.8% |
-| 16,384 | 790.15 | 298.75 | +164.5% | 25.12 | 23.75 | +5.8% |
-| 32,768 | 648.42 | 252.70 | +156.6% | 22.72 | 21.48 | +5.8% |
-| 65,536 | 466.88 | 193.55 | +141.2% | 18.89 | 18.00 | +4.9% |
+| 0 | 1079.22 | 368.06 | +193.2% | 29.88 | 26.70 | +11.9% |
+| 4,096 | 962.28 | 344.41 | +179.4% | 29.11 | 25.92 | +12.3% |
+| 8,192 | 984.03 | 327.77 | +200.2% | 28.45 | 25.18 | +13.0% |
+| 16,384 | 876.23 | 298.75 | +193.3% | 27.17 | 23.75 | +14.4% |
+| 32,768 | 716.44 | 252.70 | +183.5% | 24.93 | 21.48 | +16.1% |
+| 65,536 | 516.15 | 193.55 | +166.7% | 21.28 | 18.00 | +18.2% |
 <!-- /bench -->
+
+![Single user, autoregressive](artifacts/charts/single-ar-q4km.svg)
 
 ## Single user, MTP
 
 Same workload as above with 2 MTP draft tokens. The mixed rows decode prose,
-the repetitive rows copy text. MTP stops paying off with depth: at 32,768
-mixed decode is 3% ahead of AR and repetitive is behind it, and at 65,536 both
-are slower than AR (18.28 and 18.36 against 18.89 tok/s). llama.cpp's cells
+the repetitive rows copy text. On repetitive text MTP stops paying off
+with depth: it is behind AR from 16,384 (20.54 against 21.28 tok/s at
+65,536), while mixed decode stays ahead (22.41 at 65,536). llama.cpp's cells
 are N/A because its `draft-mtp` loads the whole GGUF again as the draft model,
 which does not fit.
 
 <!-- bench:single-mtp-q4km -->
 | Ornith 122B Q4_K_M MTP<br>Depth (tokens) | Gufo pp (tok/s) | llama.cpp pp (tok/s) | Gain pp | Gufo tg mixed (tok/s) | llama.cpp tg mixed (tok/s) | Gain mixed | Gufo tg repetitive (tok/s) | llama.cpp tg repetitive (tok/s) | Gain repetitive |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 987.93 | N/A | N/A | 31.37 | N/A | N/A | 32.20 | N/A | N/A |
-| 4,096 | 898.76 | N/A | N/A | 29.77 | N/A | N/A | 33.27 | N/A | N/A |
-| 8,192 | 830.84 | N/A | N/A | 30.98 | N/A | N/A | 31.20 | N/A | N/A |
-| 16,384 | 740.91 | N/A | N/A | 28.31 | N/A | N/A | 25.74 | N/A | N/A |
-| 32,768 | 624.95 | N/A | N/A | 23.32 | N/A | N/A | 21.78 | N/A | N/A |
-| 65,536 | 463.00 | N/A | N/A | 18.28 | N/A | N/A | 18.36 | N/A | N/A |
+| 0 | 1141.65 | N/A | N/A | 36.39 | N/A | N/A | 33.35 | N/A | N/A |
+| 4,096 | 1020.14 | N/A | N/A | 31.45 | N/A | N/A | 35.04 | N/A | N/A |
+| 8,192 | 966.20 | N/A | N/A | 32.86 | N/A | N/A | 33.27 | N/A | N/A |
+| 16,384 | 861.85 | N/A | N/A | 29.98 | N/A | N/A | 26.87 | N/A | N/A |
+| 32,768 | 706.00 | N/A | N/A | 25.99 | N/A | N/A | 23.21 | N/A | N/A |
+| 65,536 | 521.29 | N/A | N/A | 22.41 | N/A | N/A | 20.54 | N/A | N/A |
 <!-- /bench -->
+
+![Single user, MTP](artifacts/charts/single-mtp-q4km.svg)
 
 ## Loading time
 
 <!-- bench:loading -->
 | Ornith 122B<br>Target | Gufo ready (s) | llama.cpp ready (s) | Gain |
 | --- | ---: | ---: | ---: |
-| Q4_K_M | 19.48 | 19.85 | +1.9% |
+| Q4_K_M | 29.94 | 19.85 | -33.7% |
 <!-- /bench -->
+
+![Loading time](artifacts/charts/loading.svg)
 
 ## Memory occupation
 
-Gufo holds 6 to 8 GiB more than llama.cpp at these context settings.
+Gufo holds 10 to 12 GiB more than llama.cpp at these context settings.
 
 <!-- bench:memory-q4km -->
 | Ornith 122B Q4_K_M AR<br>Workload | Gufo GiB | llama.cpp GiB | Gain |
 | --- | ---: | ---: | ---: |
-| pp2048 + tg128 | 77.48 | 71.15 | -8.2% |
-| 16K prefix, pp4096 + tg128 | 79.47 | 71.15 | -10.5% |
+| pp2048 + tg128 | 81.39 | 71.15 | -12.6% |
+| 16K prefix, pp4096 + tg128 | 83.39 | 71.15 | -14.7% |
 <!-- /bench -->
+
+![Memory occupation](artifacts/charts/memory-q4km.svg)
 
 ## Earlier measurements
 

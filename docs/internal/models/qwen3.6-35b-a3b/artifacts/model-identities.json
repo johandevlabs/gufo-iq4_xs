@@ -11,7 +11,7 @@
     "draft": "aminya/Qwen3.6-35B-A3B-DFlash2-GGUF, revision 1e26e3499d865b9d2fc55e019d65b3f0e8ab6846, Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf",
     "q4km": "lmstudio-community/Qwen3.6-35B-A3B-GGUF, revision 68a34855558af61cbef0324d31f411be8a506b08, Qwen3.6-35B-A3B-Q4_K_M.gguf; no MTP head"
   },
-  "scope": "Pinned artifacts for the October 25 and October 27, 2026 benchmark tables.",
+  "scope": "Pinned artifacts for the benchmark tables. The Gufo rows are from benchmarks-2026-10-29; the llama.cpp rows from benchmarks-2026-10-25 and benchmarks-2026-10-27.",
   "benchmarks-2026-10-25": {
     "gufo": {
       "revision": "7b1e23a8",
@@ -79,5 +79,34 @@
       "metric": "SHA-256 of completion text; does not establish original-checkpoint accuracy."
     },
     "before": "Same Q4_K_M single-user AR grid on the 7b1e23a8 build: tg 63.66 / 60.54 / 53.23 / 36.56 tok/s at depth 0 / 8K / 32K / 128K (after: 70.71 / 66.89 / 58.32 / 38.90)"
+  },
+  "benchmarks-2026-10-29": {
+    "gufo": {
+      "revision": "03ba946d",
+      "dirty": false,
+      "build": "CMake release with ROCm 10.1.0 (HIP Clang 24) and libstdc++ 16 from Gufo's pinned runtime image, outside Nix",
+      "binarySha256": "6583bfb9a1ac7849e19ac48f257d5deee54a1ea1936279d6a7ebf4f42179c7d9",
+      "change": "Strycast rebased onto Gufo v0.26.0; first build with the ROCm 10.1 toolchain"
+    },
+    "reference": "Not re-measured; llama.cpp rows are from benchmarks-2026-10-25 and benchmarks-2026-10-27",
+    "targets": [
+      "Target UD-Q4_K_XL",
+      "Target UD-Q6_K_XL",
+      "Target UD-Q8_K_XL",
+      "Target Q4_K_M"
+    ],
+    "draft": "Draft DFlash2 Q8_0",
+    "scope": "Every Gufo table for all four targets: AR, DFlash2 and MTP single-user grids (no MTP for Q4_K_M), C1-C8 concurrency, memory and loading.",
+    "sampling": {
+      "temperature": 0,
+      "seed": 1,
+      "thinking": false
+    },
+    "timedRunsPerPoint": 1,
+    "gufoConsistency": {
+      "singleUserSpeculativeMatchingAr": "56 of 56 (UD-Q4/Q6/Q8_K_XL DFlash2 and MTP, Q4_K_M DFlash2; 8 depths each, mixed text)",
+      "multiUserMatchingIsolatedAr": "every request in multi-ar, multi-dflash2 and multi-mtp, all targets",
+      "metric": "SHA-256 of completion text; does not establish original-checkpoint accuracy."
+    }
   }
 }

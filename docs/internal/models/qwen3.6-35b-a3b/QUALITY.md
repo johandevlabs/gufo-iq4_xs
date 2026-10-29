@@ -102,7 +102,7 @@ it does not measure long generations, tool calling or speculative decoding.
 
 ## Benchmark output consistency
 
-The October 25 and 27, 2026 [benchmarks](BENCHMARKS.md) hash every greedy
+The October 29, 2026 [benchmarks](BENCHMARKS.md) hash every greedy
 completion. On UD-Q4_K_XL, Q4_K_M, UD-Q6_K_XL and UD-Q8_K_XL:
 
 - DFlash2 and MTP match AR at all eight single-user depths, mixed and
@@ -120,7 +120,7 @@ measure accuracy.
 
 ## K-quant experts in decode
 
-Since the October 27 tables, decode and verification send Q4_K/Q5_K gate/up
+Since `03d06ea`, decode and verification send Q4_K/Q5_K gate/up
 and Q4_K/Q5_K/Q6_K down experts to the MMQ vector kernels instead of the
 per-slot GEMV, with the expert activations quantized to Q8_1 as on the Q8_0
 route. This changes the arithmetic for UD-Q4_K_XL and Q4_K_M, so their greedy

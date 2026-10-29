@@ -18,9 +18,9 @@ weights:
 | [`Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf) | 30.4 GiB | gate/up Q6_K (layer 39 Q8_0); down Q8_0 |
 | [`Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf`](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf) | 36.4 GiB | gate/up Q8_0 (layer 39 BF16); down Q8_0 (layers 34, 38, 39 BF16) |
 
-UD-Q4_K_XL prefills fastest (3,267 tok/s at pp2048, versus 3,103 for Q4_K_M,
-3,090 for UD-Q6_K_XL and 2,847 for UD-Q8_K_XL); Q4_K_M decodes fastest (70.7
-tok/s, versus 61.4 for UD-Q4_K_XL) and UD-Q8_K_XL slowest; see
+UD-Q4_K_XL prefills fastest (3,401 tok/s at pp2048, versus 3,279 for Q4_K_M,
+3,243 for UD-Q6_K_XL and 2,985 for UD-Q8_K_XL); Q4_K_M decodes fastest (74.9
+tok/s, versus 61.1 for UD-Q4_K_XL) and UD-Q8_K_XL slowest; see
 [Benchmarks](BENCHMARKS.md). Q4_K_M is the smallest file and suits machines
 with 64 GB of memory. Every Unsloth file carries an MTP head (`blk.40.nextn.*`)
 that Gufo uses as a speculative draft; the Q4_K_M has none, so it runs AR or
@@ -67,9 +67,9 @@ model load when the config reports an MoE architecture.
 ```
 
 In a September 26, 2026 sweep n=2 was fastest on UD-Q6_K_XL and UD-Q8_K_XL;
-an earlier UD-Q8_K_XL run favoured n=1. With n=2, the October 25 benchmark
-decodes UD-Q6_K_XL at 67.37 tok/s on mixed text and 94.98 on repetitive text
-at pp2048, versus 55.05 without MTP. Acceptance depends on the generated text,
+an earlier UD-Q8_K_XL run favoured n=1. With n=2, the October 29 benchmark
+decodes UD-Q6_K_XL at 70.85 tok/s on mixed text and 97.10 on repetitive text
+at pp2048, versus 55.98 without MTP. Acceptance depends on the generated text,
 so re-check n on your own workload.
 
 As in Qwen3.8 Flash-Next, each MTP draft token scores only the first 98,304
