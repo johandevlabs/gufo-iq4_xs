@@ -448,3 +448,47 @@ allocates its KV cache up front, so its peak does not grow with the prefix.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q4km.svg)
+
+---
+
+## A second machine: ASUS ProArt PX13 laptop
+
+Contributed by [@Farenheith](https://github.com/Farenheith) on another
+Strix Halo machine, a laptop: an ASUS ProArt PX13 (HN7306EAC), Ryzen AI Max+
+395 with the Radeon 8060S (`gfx1151`), 121 GiB of unified memory, running the
+`performance` power profile. These rows did not come from
+`tools/bench/model-bench.py`, so they sit outside the rendered tables.
+
+The target is Occamy 1.0 Q6_K, a fine-tune of this model (see
+[Tested derivatives](README.md#tested-derivatives)). The build is Strycast
+`03d06ea`, before the rebase onto Gufo v0.26.0, compiled against the laptop's
+ROCm 7.2.4. `gufo serve` was queried directly with one request in flight,
+greedy, two runs per cell; the spread is the difference between them, and the
+rates are the server's own per-request counters (`prefill_tps`, `decode_tps`,
+`ttft_ms`). *Requested* is the prompt size asked for, *counted* is what the
+server tokenized.
+
+Prefill, cold (a fresh prompt per probe, `cache_prompt: false`):
+
+| Requested tokens | Counted tokens | Gufo pp (tok/s) | Spread | TTFT (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 639 | 1521.2 | 56.7 | 423 |
+| 2,048 | 2,292 | 2071.2 | 5.7 | 1,109 |
+| 8,192 | 8,928 | 2287.6 | 18.5 | 3,907 |
+| 32,768 | 35,389 | 1982.7 | 7.6 | 17,854 |
+
+Decode, AR, 128 tokens per probe:
+
+| Depth (tokens) | Counted tokens | Gufo tg (tok/s) | Spread | TTFT (ms) |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 78 | 43.6 | 0.2 | 211 |
+| 4,096 | 4,504 | 43.4 | 0.2 | 2,059 |
+| 32,768 | 35,389 | 39.8 | 0.4 | 17,886 |
+
+Against the desktop's UD-Q6_K_XL rows above, which have the same expert
+formats, the laptop keeps 78% of plain decode with an empty context (43.6
+against 55.98 tok/s), 79% at 4K (43.4 against 54.65) and 83% at 32K (39.8
+against 48.17). Prefill at about 2K tokens falls to 64% (2071.2 against
+3243.22). A laptop's power limit shows up in prefill first. The files, builds
+and toolchains differ, so read these as what a Strix Halo laptop does, not as
+an exact desktop-to-laptop ratio.

@@ -166,3 +166,14 @@ Thinking/template controls and HTTP sampling defaults are described in
 - The prefill attention kernel is compiled only for head shapes listed in
   `detail/attention_policy.hpp`; unsupported shapes fall back to the baseline
   path (see [Experiments](EXPERIMENTS.md)).
+
+## Tested derivatives
+
+| File | Weights | Routed experts | Provenance |
+| --- | ---: | --- | --- |
+| [`Accio-Lab_occamy-1.0-Q6_K.gguf`](https://huggingface.co/bartowski/Accio-Lab_occamy-1.0-GGUF/blob/104e2b7e9960c8dc280fc7efad049d55c3697dad/Accio-Lab_occamy-1.0-Q6_K.gguf) | 28.6 GiB | Q6_K and Q8_0, all 40 layers, shared expert Q8_0 | Occamy 1.0, a fine-tune of `Qwen/Qwen3.6-35B-A3B` (Apache-2.0) |
+
+Occamy keeps this model's `qwen35moe` architecture and 40 layers, and its
+expert formats match UD-Q6_K_XL's, so it runs through the same paths. Its
+laptop measurements are in
+[Benchmarks](BENCHMARKS.md#a-second-machine-asus-proart-px13-laptop).
