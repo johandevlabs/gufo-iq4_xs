@@ -710,8 +710,14 @@ void CheckRoutedF16(hipStream_t stream) {
       std::size_t k;
       bool per_slot_input;
     };
-    for (const Shape shape :
-         {Shape{"gate/up", 512, 2048, false}, Shape{"down", 2048, 512, true}}) {
+    std::vector<Shape> shapes{Shape{"gate/up", 512, 2048, false},
+                              Shape{"down", 2048, 512, true}};
+    if (type == GgmlType::kQ4_K) {
+      // Ornith 1.5 122B's Q4_K experts: hidden 3072, expert FFN 1024.
+      shapes.push_back(Shape{"Ornith gate/up", 1024, 3072, false});
+      shapes.push_back(Shape{"Ornith down", 3072, 1024, true});
+    }
+    for (const Shape& shape : shapes) {
       gufo::test::DeviceBuffer<std::uint8_t> d_w(
           RandomExperts(type, kExperts * shape.m, shape.k));
       for (const std::uint32_t tokens : {1U, 7U, 100U, 512U}) {

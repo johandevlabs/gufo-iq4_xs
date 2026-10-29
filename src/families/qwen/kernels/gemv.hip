@@ -3,13 +3,15 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 
+#include "qfn_mmq.h"
 #include "src/core/gguf_reader.hpp"
-#include "src/core/hip/detail/dispatch_telemetry.hpp"
+#include <gufo/ext/experimental/dispatch_telemetry.hpp>
 #include "src/families/qwen/hip_common/gemm_route.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 
@@ -176,6 +178,35 @@ void ExecuteDenseGemv(models::qwen::QwenGemmRoute route, const void* A,
   FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, a_type, x, y, M, K);
 }
 
+// The vendored vector kernel reads a routed expert id per row; a dense weight
+// is expert 0 of one for every row.
+constexpr std::size_t kMaxMmvqRows = 64;
+__device__ std::int32_t gDenseExpertIds[kMaxMmvqRows] = {};
+
+void ExecuteMmvqGemv(const void* A, core::GgmlType a_type, const float* x,
+                     float* y, std::size_t rows, std::size_t M, std::size_t K,
+                     hipStream_t stream) {
+  static const std::int32_t* const kExpertIds = [] {
+    void* address = nullptr;
+    if (hipGetSymbolAddress(&address, HIP_SYMBOL(gDenseExpertIds)) !=
+        hipSuccess) {
+      std::abort();
+    }
+    return static_cast<const std::int32_t*>(address);
+  }();
+  if (rows > kMaxMmvqRows) {
+    std::abort();
+  }
+  detail::EmitGemvDispatch(M, K, false,
+                           models::qwen::QwenGemmRouteName(
+                               models::qwen::QwenGemmRoute::kHipQuantMmvq));
+  if (qfn_mmq_moe_vec(static_cast<int>(a_type), A, x, kExpertIds, y,
+                      static_cast<int>(M), static_cast<int>(K),
+                      static_cast<int>(rows), 1, 1, stream) != 0) {
+    std::abort();
+  }
+}
+
 }  // namespace
 
 void LaunchGEMVRows(const void* A, core::GgmlType a_type, const float* x,
@@ -187,6 +218,14 @@ void LaunchGEMVRows(const void* A, core::GgmlType a_type, const float* x,
   const auto resolution = models::qwen::ResolveQwenGemmRoute(
       {.type = a_type, .batch_size = 1, .m = M, .k = K, .mode = mode});
   switch (resolution.route) {
+    case models::qwen::QwenGemmRoute::kHipQuantMmvq:
+      // Each launch quantizes and multiplies up to kMaxMmvqRows rows; each row
+      // keeps the single-row arithmetic.
+      for (std::size_t row = 0; row < rows; row += kMaxMmvqRows) {
+        ExecuteMmvqGemv(A, a_type, x + (row * K), y + (row * M),
+                        std::min(rows - row, kMaxMmvqRows), M, K, stream);
+      }
+      return;
     case models::qwen::QwenGemmRoute::kHipF32Baseline256:
     case models::qwen::QwenGemmRoute::kHipF32Baseline512:
     case models::qwen::QwenGemmRoute::kHipBf16Baseline256:
@@ -222,6 +261,9 @@ void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
   switch (resolution.route) {
     case models::qwen::QwenGemmRoute::kHipQuantDirect:
       LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
+      return;
+    case models::qwen::QwenGemmRoute::kHipQuantMmvq:
+      ExecuteMmvqGemv(A, a_type, x, y, 1, M, K, stream);
       return;
     case models::qwen::QwenGemmRoute::kHipF32Baseline256:
     case models::qwen::QwenGemmRoute::kHipF32Baseline512:

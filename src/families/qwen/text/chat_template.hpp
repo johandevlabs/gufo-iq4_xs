@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "gufo/ext/text.hpp"
+#include <gufo/ext/text.hpp>
 #include "src/core/gguf_reader.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"
@@ -106,6 +106,8 @@ enum class QwenReasoningEffort : std::uint8_t {
 
 /// Formatting options for rendering a conversation into a text prompt.
 struct ChatTemplateOptions {
+  enum class Dialect : std::uint8_t { kQwen, kOrnith };
+  Dialect dialect{Dialect::kQwen};
   bool add_generation_prompt{true};
   bool enable_thinking{true};
   QwenReasoningEffort reasoning_effort{QwenReasoningEffort::kXHigh};
@@ -139,12 +141,17 @@ inline constexpr std::size_t kMaxRenderedBytesPerToken = 128;
 [[nodiscard]] ChatTemplateOptions ResolveQwenChatOptions(
     const ReasoningOptions& reasoning, bool add_vision_id = false);
 
+/// Ornith preserves all assistant reasoning and has no effort instruction.
+[[nodiscard]] ChatTemplateOptions ResolveOrnithChatOptions(
+    const ReasoningOptions& reasoning, bool add_vision_id = false);
+
 /// Deterministic, bounded Qwen ChatML formatter.
 class QwenChatTemplate {
 public:
   enum class Profile : std::uint8_t {
     kLegacyChatMl,
     kQwen38Reasoning,
+    kOrnith,
   };
 
   ~QwenChatTemplate() = default;
@@ -186,6 +193,13 @@ public:
   UnslothArtifactTemplateSha256() noexcept {
     return "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce";
   }
+
+  [[nodiscard]] static constexpr std::string_view
+  OrnithTemplateSha256() noexcept {
+    return "9dd2fbd270feaa1fbef2d4f634d7887c9c506e3bde140f8e7351c8944e8fd235";
+  }
+
+  [[nodiscard]] static bool IsOrnithTemplate(std::string_view raw_template);
 
   /// Formats a list of messages into a deterministic UTF-8 prompt string.
   [[nodiscard]] static std::optional<std::string> Render(

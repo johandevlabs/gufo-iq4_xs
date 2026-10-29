@@ -23,7 +23,7 @@ these models here, not upstream.
 | Model | Status |
 | --- | --- |
 | [Qwen3.6 35B-A3B](docs/models/qwen3.6-35b-a3b/README.md) | Unsloth UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL and lmstudio-community [Q4_K_M](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/blob/68a34855558af61cbef0324d31f411be8a506b08/Qwen3.6-35B-A3B-Q4_K_M.gguf), AR, MTP (Unsloth files), DFlash2, batched serving. Formerly [gufo-org/gufo#299](https://github.com/gufo-org/gufo/pull/299). |
-| Ornith 1.5 122B (Qwen3.5-122B-A10B fine-tune) | Proposed in [gufo-org/gufo#735](https://github.com/gufo-org/gufo/pull/735); a PR here is welcome. |
+| [Ornith 1.5 122B](docs/models/ornith-1.5-122b/README.md) (Qwen3.5-122B-A10B fine-tune) | Q4_K_M, AR, MTP, images. In review in [#12](https://github.com/slimsami/strycast/pull/12), formerly [gufo-org/gufo#735](https://github.com/gufo-org/gufo/pull/735). |
 
 ### Contributing a model
 

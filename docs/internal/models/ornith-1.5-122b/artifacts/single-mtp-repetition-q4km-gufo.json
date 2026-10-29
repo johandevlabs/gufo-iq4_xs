@@ -1,0 +1,215 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-38-generic",
+      "memoryTotalBytes": 130153123840,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "95934bef172662fb0f637e54840ec7d233384cb846c6edc92c40748ea513355f",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-28",
+  "mode": "mtp",
+  "model": {
+    "id": "Ornith-1.5-122B",
+    "variant": "q4km"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.160 tokens/word, template overhead 12 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 51.96,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.71,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 44073 --sessions 1 llm --model Ornith-1.5-122B-Q4_K_M.gguf --context 67840 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative mtp --mtp-model Ornith-1.5-122B-Q4_K_M.gguf --draft-tokens 2",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "c2622a4615f0e7c62d8bf8dd70957339c8c3d5b63ec89e3c9b86a6e1462ebff6",
+          "draft_n": 102,
+          "draft_n_accepted": 53,
+          "predicted_n": 128,
+          "prompt_n": 2034
+        }
+      ],
+      "pp": 987.93,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 32.2,
+      "tg_sd": null,
+      "workload": "repetition"
+    },
+    "16384": {
+      "acceptance": 46.07,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.47,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 44073 --sessions 1 llm --model Ornith-1.5-122B-Q4_K_M.gguf --context 67840 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative mtp --mtp-model Ornith-1.5-122B-Q4_K_M.gguf --draft-tokens 2",
+      "counts": [
+        {
+          "cache_n": 16331,
+          "completion_sha256": "138f36a203d9944701789dcf2d5731d7aff623ad50b9eb33b5108f9d862117b8",
+          "draft_n": 89,
+          "draft_n_accepted": 41,
+          "predicted_n": 128,
+          "prompt_n": 2042
+        }
+      ],
+      "pp": 721.37,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 25.74,
+      "tg_sd": null,
+      "workload": "repetition"
+    },
+    "32768": {
+      "acceptance": 40.91,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.54,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 44073 --sessions 1 llm --model Ornith-1.5-122B-Q4_K_M.gguf --context 67840 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative mtp --mtp-model Ornith-1.5-122B-Q4_K_M.gguf --draft-tokens 2",
+      "counts": [
+        {
+          "cache_n": 32733,
+          "completion_sha256": "c6100761990cae0e50e5871ed0f97077d858aaa224b4cca19cf5bcfb45dad358",
+          "draft_n": 110,
+          "draft_n_accepted": 45,
+          "predicted_n": 128,
+          "prompt_n": 2023
+        }
+      ],
+      "pp": 624.95,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 21.78,
+      "tg_sd": null,
+      "workload": "repetition"
+    },
+    "4096": {
+      "acceptance": 60.0,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.88,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 44073 --sessions 1 llm --model Ornith-1.5-122B-Q4_K_M.gguf --context 67840 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative mtp --mtp-model Ornith-1.5-122B-Q4_K_M.gguf --draft-tokens 2",
+      "counts": [
+        {
+          "cache_n": 4095,
+          "completion_sha256": "37917cda0e309dbe3bb205e3bd06b6ea6e5f909a4432ef82d9a2122994e31787",
+          "draft_n": 100,
+          "draft_n_accepted": 60,
+          "predicted_n": 128,
+          "prompt_n": 2039
+        }
+      ],
+      "pp": 898.76,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 33.27,
+      "tg_sd": null,
+      "workload": "repetition"
+    },
+    "65536": {
+      "acceptance": 44.94,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.45,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 44073 --sessions 1 llm --model Ornith-1.5-122B-Q4_K_M.gguf --context 67840 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative mtp --mtp-model Ornith-1.5-122B-Q4_K_M.gguf --draft-tokens 2",
+      "counts": [
+        {
+          "cache_n": 65480,
+          "completion_sha256": "6f96504f5607ca1c49c35a2d6b8f6b5d10bdb6d54e302d7a471825dd3d236b5d",
+          "draft_n": 89,
+          "draft_n_accepted": 40,
+          "predicted_n": 128,
+          "prompt_n": 2053
+        }
+      ],
+      "pp": 463.0,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 18.36,
+      "tg_sd": null,
+      "workload": "repetition"
+    },
+    "8192": {
+      "acceptance": 56.07,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.88,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 44073 --sessions 1 llm --model Ornith-1.5-122B-Q4_K_M.gguf --context 67840 --served-model-name bench --think off --max-pending-per-client 8 --prefill-chunk 2048 --prefill-decode-rounds 8 --speculative mtp --mtp-model Ornith-1.5-122B-Q4_K_M.gguf --draft-tokens 2",
+      "counts": [
+        {
+          "cache_n": 8188,
+          "completion_sha256": "536e0a693a37171dfaae414da03cf1e5c644c1fc15f41af2aa5aa909d62d0262",
+          "draft_n": 107,
+          "draft_n_accepted": 60,
+          "predicted_n": 128,
+          "prompt_n": 2043
+        }
+      ],
+      "pp": 816.58,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 31.2,
+      "tg_sd": null,
+      "workload": "repetition"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "44073",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "Ornith-1.5-122B-Q4_K_M.gguf",
+      "--context",
+      "67840",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--prefill-chunk",
+      "2048",
+      "--prefill-decode-rounds",
+      "8",
+      "--speculative",
+      "mtp",
+      "--mtp-model",
+      "Ornith-1.5-122B-Q4_K_M.gguf",
+      "--draft-tokens",
+      "2"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "d8535ed018f52dc8344a70eef135307a097fe668"
+  },
+  "table": "single-mtp-repetition-q4km",
+  "target": "gufo"
+}

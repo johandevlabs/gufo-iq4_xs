@@ -1,0 +1,81 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-38-generic",
+      "memoryTotalBytes": 130153123840,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "7.2.3",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "95934bef172662fb0f637e54840ec7d233384cb846c6edc92c40748ea513355f",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-10-28",
+  "mode": null,
+  "model": {
+    "id": "Ornith-1.5-122B",
+    "variant": null
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1-dev (build 386, commit 68d9053a)",
+    "file cache reset before each launch with `echo 3 > /proc/sys/vm/drop_caches`",
+    "readiness = HTTP 200 on /health"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "q4km": {
+      "command": "llama-server -m Ornith-1.5-122B-Q4_K_M.gguf -c 67840 -np 1 --port 51325 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "ready_s": 19.852,
+      "ready_s_sd": null,
+      "samples": 1
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "Ornith-1.5-122B-Q4_K_M.gguf",
+      "-c",
+      "67840",
+      "-np",
+      "1",
+      "--port",
+      "51325",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": true,
+    "revision": "d8535ed018f52dc8344a70eef135307a097fe668"
+  },
+  "table": "loading",
+  "target": "reference"
+}

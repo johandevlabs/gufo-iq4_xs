@@ -9,6 +9,7 @@ is [benchmarks](../benchmarks.md). Measure release binaries (`nix build`, then
 - [MiniMax H3](models/minimax-h3/BENCHMARKS.md)
 - [Qwen-Image-2.1](models/qwen-image-2.1/BENCHMARKS.md)
 - [Qwen3.6 35B-A3B](models/qwen3.6-35b-a3b/BENCHMARKS.md)
+- [Ornith 1.5 122B](models/ornith-1.5-122b/BENCHMARKS.md)
 - [Qwen3.8 27B](models/qwen3.8-27b/BENCHMARKS.md)
 - [Qwen3.8 Flash-Next](models/qwen3.8-flash-next/BENCHMARKS.md)
 - [Qwen3-ASR](models/qwen3-asr/BENCHMARKS.md)

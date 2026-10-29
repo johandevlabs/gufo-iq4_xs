@@ -1,0 +1,26 @@
+{
+  "sha256": {
+    "Target Q4_K_M": "729fe18c2491aaa446074a923e12f184f9f2239ffd5ce3dae47b0ce9cf8df40c"
+  },
+  "sources": {
+    "q4km": "ornith-ai/Ornith-1.5-122B-GGUF, revision 8d5893d767c449a4f18dd08f4bb6d0d6d4426175, Ornith-1.5-122B-Q4_K_M.gguf; carries one MTP layer, used as the MTP draft"
+  },
+  "scope": "Pinned artifacts for the October 28, 2026 benchmark tables.",
+  "benchmarks-2026-10-28": {
+    "gufo": {
+      "revision": "d8535ed0",
+      "dirty": false,
+      "build": "CMake Release with host ROCm 7.2.2 clang (not the pinned Nix 7.2.3 toolchain)",
+      "binarySha256": "8da9a6628c45ff3e6c034eda4702128c3a0e95ac813878fc09e4bd9f19f7493b",
+      "change": "Ornith 1.5 122B on Strycast staging 03d06ea0"
+    },
+    "reference": {
+      "name": "llama.cpp",
+      "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+      "backend": "ROCm gfx1151, host ROCm 7.2.2 clang, -mllvm --amdgpu-unroll-threshold-local=600 as in the pinned recipe; the recipe's -DLLAMA_HIP_UMA=ON is not read by this revision's CMake",
+      "binarySha256": "290ff40c479d3e29ba14b1160f295ec34d4b75d0608c7a2288bd77d80c23f1a6",
+      "ggmlHipSha256": "d70bc036681f5f1b94f6262b5a774764bc651c9e893a6bd5f6787fa119662e25",
+      "speculative": "MTP: --spec-type draft-mtp with the target as draft model fails to load (a second 72 GiB copy does not fit), so MTP cells are N/A"
+    }
+  }
+}
