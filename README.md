@@ -16,7 +16,7 @@ Gufo's first choice there but are worth running anyway:
   text-to-speech, embeddings and reranking.
 
 Strycast tracks Gufo releases and is rebased on each one (currently Gufo
-v0.22.0). Everything Gufo supports still works here; the models below are the
+v0.26.0). Everything Gufo supports still works here; the models below are the
 additions. Strycast is not affiliated with gufo-org: report problems with
 these models here, not upstream.
 
@@ -44,7 +44,7 @@ bar:
 - Each model gets a guide under `docs/models` with its files pinned to a
   revision, plus `BENCHMARKS.md` and `QUALITY.md`.
 - Changes must leave the outputs of Gufo's own models byte-identical.
-- Build with the ROCm 7.2.3 toolchain Gufo pins; other compilers can break the
+- Build with the ROCm 10.1 toolchain Gufo pins; other compilers can break the
   bit-exact checks.
 
 A model PR can be opened at any stage, so the work is visible and can be
