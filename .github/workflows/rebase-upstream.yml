@@ -1,0 +1,42 @@
+name: Rebase onto Gufo
+
+# Strycast is rebased on each Gufo release. The staging and main rulesets block
+# force-pushes for everyone but this workflow, which replaces a branch only
+# with a checked rebase: see tools/ci/rebase-upstream.sh and "Rebasing onto
+# Gufo" in README.md.
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request to apply: rebase/<tag> -> staging, or staging -> main"
+        required: true
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: rebase-upstream
+  cancel-in-progress: false
+
+jobs:
+  replace:
+    name: Replace the branch with the rebase
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the rebase and replace the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          ACTOR: ${{ github.actor }}
+        run: bash tools/ci/rebase-upstream.sh

@@ -53,6 +53,27 @@ llama.cpp runs the same GGUF on the same machine; otherwise there is little
 reason to run it on Strycast. The model's `BENCHMARKS.md` carries that
 comparison, and its guide lists any gaps that remain.
 
+### Rebasing onto Gufo
+
+Each Gufo release is brought in by rebasing, not merging, so Strycast stays a
+short series of commits on top of a Gufo tag. Nobody can force-push `staging`
+or `main` by hand; the [Rebase onto Gufo](.github/workflows/rebase-upstream.yml)
+workflow does it:
+
+1. Rebase `staging` onto the new tag on a branch named `rebase/<tag>`, update
+   "currently Gufo" above, and open a PR against `staging`.
+2. Run the GPU checks for every Strycast model and for Gufo's own models, put
+   the results in the PR, and add the `gpu-checked` label.
+3. Run the workflow with the PR number. It checks that the branch sits exactly
+   on the tag, that no Strycast commit was dropped and that the required checks
+   passed, then tags the old head `archive/staging-<old tag>` and replaces
+   `staging`.
+4. Promote with a `staging` → `main` PR as usual, labelled `gpu-checked`, and
+   run the workflow again with that PR to replace `main`.
+
+After a rebase, move an open branch onto the new `staging` with
+`git rebase --onto origin/staging archive/staging-<old tag> <branch>`.
+
 The rest of this README is Gufo's.
 
 ## About Gufo
