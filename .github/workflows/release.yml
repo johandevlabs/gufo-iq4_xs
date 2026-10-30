@@ -1,0 +1,92 @@
+name: Strycast release
+
+on:
+  # Every push to main (a promotion or a rebase) once its checks and Linux
+  # package build pass.
+  workflow_run:
+    workflows: [ Repository checks ]
+    types: [ completed ]
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Commit on main to release (default main's head)
+        default: ''
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: strycast-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish release
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.publish.outputs.tag }}
+    permissions:
+      actions: read # the Linux package artifacts
+      contents: write # the tag and release
+      pull-requests: read # the promotion PR's notes
+    steps:
+      - name: Select commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          sha=${RUN_SHA:-$REVISION}
+          if [ -z "$sha" ]; then
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.commit.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Publish the release
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.commit.outputs.sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: bash tools/ci/strycast-release.sh
+
+  image:
+    name: Publish OCI image
+    needs: release
+    if: needs.release.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read # the release bundle
+      packages: write # ghcr.io/<owner>/strycast
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+          persist-credentials: false
+
+      - name: Build and push the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ needs.release.outputs.tag }}
+          ACTOR: ${{ github.actor }}
+        run: bash tools/ci/strycast-image.sh

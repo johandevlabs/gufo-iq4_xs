@@ -18,7 +18,9 @@ with a verb; a reusable workflow's jobs appear as `caller / called job`.
 | `devlab-comment.yml` | Functional reporting | Update PR comment | GitHub Ubuntu | When Linux validation starts or ends. Keeps the PR comment current, also for forks, without running PR code. |
 | `pr-title.yml` | PR title | Validate PR title | GitHub Ubuntu | PR opened, edited, reopened or updated. |
 | `docs-website.yml` | Website docs | Request website development docs | GitHub Ubuntu | Pushes to main that change public docs, manual. Sends `gufo-docs` so gufo.blog refreshes its `development` docs. |
-| `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Manual. Waits for the required checks, publishes the release and sends the tag to Toolboxes and the website. |
+| `release-please.yml` | Release automation | Prepare, merge and publish release | GitHub Ubuntu | Gufo only (skipped outside `gufo-org/gufo`). Manual. Waits for the required checks, publishes the release and sends the tag to Toolboxes and the website. |
+| `release.yml` | Strycast release | Publish release | GitHub Ubuntu | After a successful Repository checks push run on main, or manual with a commit. Tags `v<Gufo version>-strycast.<n>` and attaches the Linux bundle the nightly run tested for that tree, else the push run's own build. |
+| `release.yml` | Strycast release | Publish OCI image | GitHub Ubuntu | After the release job, also when the commit was already released. Builds `tools/ci/Containerfile` from the release's bundle, checks `gufo --version`, and pushes `ghcr.io/<owner>/strycast:<version>` and `latest` unless that version exists. |
 
 ## Required checks
 

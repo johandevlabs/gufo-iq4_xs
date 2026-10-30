@@ -62,7 +62,10 @@ def launcher(directory, name, loader, libraries, environment):
     text += 'root=$(CDPATH= cd -- "$here/.." && pwd -P)\n'
     text += 'unset LD_LIBRARY_PATH\n'
     for key, value in environment.items():
-        text += f'export {key}="$root/{value}"\n'
+        # Paths beside the launcher stay relative to it: a release renames
+        # the bundle's executable directory.
+        base = '$here' if value.startswith('./') else '$root'
+        text += f'export {key}="{base}/{value.removeprefix("./")}"\n'
     paths = ':'.join('$root/' + path for path in libraries)
     text += f'exec "$root/{loader}" --library-path "{paths}" "$here/libexec/{name}" "$@"\n'
     script.write_text(text)
@@ -125,7 +128,7 @@ def pack(package, revision, destination):
     for name in ('ffmpeg', 'ffprobe'):
         shutil.copy2(ffmpeg[0] / 'bin' / name, destination / 'libexec' / name)
         launcher(destination, name, loader, libraries, {})
-        environment['GUFO_' + name.upper()] = destination.relative_to(root).as_posix() + '/' + name
+        environment['GUFO_' + name.upper()] = './' + name
     launcher(destination, 'gufo', loader, libraries, environment)
     (destination / 'gufo-server').symlink_to('gufo')
     executable = destination / 'libexec/gufo'

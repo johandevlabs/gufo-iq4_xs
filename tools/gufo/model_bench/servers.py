@@ -103,6 +103,11 @@ class HipMemory:
     @classmethod
     def for_binary(cls, gufo_binary: Path) -> "HipMemory | None":
         """Resolve libamdhip64 the way the Gufo binary links it."""
+        # A portable bundle starts Gufo through its own loader, which ldd
+        # cannot follow; GUFO_HIP_LIBRARY names the same CLR directly.
+        override = os.environ.get("GUFO_HIP_LIBRARY")
+        if override:
+            return cls(Path(override))
         executable = gufo_binary.resolve()
         if sys.platform == "win32":
             # Under WDDM, hipMemGetInfo counts only the calling process's

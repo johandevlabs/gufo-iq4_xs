@@ -1,0 +1,16 @@
+# Strycast runtime image: a release's portable Linux bundle on a small base.
+# The bundle carries its own glibc loader, ROCm runtime and FFmpeg, so the base
+# only provides a shell. Built by tools/ci/strycast-image.sh.
+FROM docker.io/library/debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4
+
+# Same user and home as Gufo's gufo-runtime image, so its podman commands work.
+RUN groupadd --gid 1000 gufo \
+ && useradd --uid 1000 --gid 1000 --create-home --home-dir /home/gufo --shell /bin/bash gufo
+
+COPY strycast /opt/strycast
+# On PATH rather than symlinked: the launcher finds the bundle from its own path.
+ENV PATH=/opt/strycast/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+USER 1000:1000
+WORKDIR /home/gufo
+CMD ["/bin/bash"]

@@ -20,10 +20,16 @@ v0.26.0). Everything Gufo supports still works here; the models below are the
 additions. Strycast is not affiliated with gufo-org: report problems with
 these models here, not upstream.
 
-| Model | Status |
-| --- | --- |
-| [Qwen3.6 35B-A3B](docs/models/qwen3.6-35b-a3b/README.md) | Unsloth UD-Q4_K_XL / UD-Q6_K_XL / UD-Q8_K_XL and lmstudio-community [Q4_K_M](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/blob/68a34855558af61cbef0324d31f411be8a506b08/Qwen3.6-35B-A3B-Q4_K_M.gguf), AR, MTP (Unsloth files), DFlash2, batched serving. Formerly [gufo-org/gufo#299](https://github.com/gufo-org/gufo/pull/299). |
-| [Ornith 1.5 122B](docs/models/ornith-1.5-122b/README.md) (Qwen3.5-122B-A10B fine-tune) | Q4_K_M, AR, MTP, images, batched serving. Contributed by [@lucasmcoleman](https://github.com/lucasmcoleman) in [#12](https://github.com/slimsami/strycast/pull/12), formerly [gufo-org/gufo#735](https://github.com/gufo-org/gufo/pull/735). |
+| Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
+| --- | --- | --- | --- | --- |
+| [Qwen3.6 35B-A3B](docs/models/qwen3.6-35b-a3b/README.md) | Q4/Q4_K_M/Q6/Q8, AR, DFlash2, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) / [Q6_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf) · lmstudio [Q4_K_M](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/blob/68a34855558af61cbef0324d31f411be8a506b08/Qwen3.6-35B-A3B-Q4_K_M.gguf) · [DFlash2 Q8_0](https://huggingface.co/aminya/Qwen3.6-35B-A3B-DFlash2-GGUF/blob/1e26e3499d865b9d2fc55e019d65b3f0e8ab6846/Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf) | Q4: **3,400.57 tok/s pp**; up to **218.56 tok/s tg** single user and **269.74 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.6-35b-a3b/BENCHMARKS.md) | [Quality](docs/models/qwen3.6-35b-a3b/QUALITY.md) |
+| [Ornith 1.5 122B](docs/models/ornith-1.5-122b/README.md) (Qwen3.5-122B-A10B fine-tune) | Q4_K_M, images, AR, MTP | [Q4_K_M](https://huggingface.co/ornith-ai/Ornith-1.5-122B-GGUF/blob/8d5893d767c449a4f18dd08f4bb6d0d6d4426175/Ornith-1.5-122B-Q4_K_M.gguf) · [mmproj BF16](https://huggingface.co/ornith-ai/Ornith-1.5-122B-GGUF/blob/8d5893d767c449a4f18dd08f4bb6d0d6d4426175/mmproj-Ornith-1.5-122B-BF16.gguf) | **1,079.22 tok/s pp** (AR); up to **36.39 tok/s tg** single user with MTP; multiple users not measured yet · [Benchmarks](docs/models/ornith-1.5-122b/BENCHMARKS.md) | [Quality](docs/models/ornith-1.5-122b/QUALITY.md) |
+
+Same measurement rules as Gufo's [table below](#models-and-benchmarks).
+Qwen3.6 35B-A3B was [gufo-org/gufo#299](https://github.com/gufo-org/gufo/pull/299);
+Ornith 1.5 122B was contributed by [@lucasmcoleman](https://github.com/lucasmcoleman)
+in [#12](https://github.com/slimsami/strycast/pull/12), formerly
+[gufo-org/gufo#735](https://github.com/gufo-org/gufo/pull/735).
 
 ### Credits
 
@@ -44,6 +50,9 @@ report problems with them in their own repositories.
   Windows 11 build for 64 GiB Strix Halo machines, with SSD expert streaming,
   UD-Q3_K_XL for Qwen3.8 Flash-Next, MiniMax H3 (first/last frame and the
   turbo LoRA) and Wan 2.2 TI2V-5B.
+- [neuhaus/gufo](https://github.com/neuhaus/gufo): Gufo RDMA for two Strix
+  Halo machines linked by InfiniBand, RoCE v2 or USB4, with tensor parallelism,
+  so Qwen3.8 Flash-Next runs at Q8 with longer contexts.
 
 ### Contributing a model
 
@@ -90,6 +99,30 @@ admin:
 After a rebase, move an open branch onto the new `staging` with
 `git rebase --onto origin/staging archive/staging-<old tag> <branch>`.
 
+### Nightly run and releases
+
+Each night a Strix Halo machine runs the GPU tests, Gufo's functional suite
+and the model benchmarks on the head of `staging`
+([details](tools/nightly/README.md)). It reports to the `staging` → `main`
+promotion PR, opening it when needed, sets a `nightly/athena` status on it,
+and labels it `gpu-checked` after a passing night, so it can be merged in the
+morning. The nightly run is being set up, and the status will become a
+required check for merging into `main`.
+
+Every push to `main`, whether a promotion or a rebase, is released once its
+checks pass, by the [Strycast release](.github/workflows/release.yml)
+workflow. It tags the commit `v<Gufo version>-strycast.<n>` (for example
+`v0.26.0-strycast.1`), takes the release notes from the promotion PR, and
+attaches the portable Linux bundle the nightly run tested for that tree (or,
+for a rebase pushed straight to `main`, the bundle CI built). The bundle
+carries its own ROCm runtime, so a Strix Halo machine needs only the amdgpu
+kernel driver. The same bundle is published as an OCI image,
+`ghcr.io/slimsami/strycast:<version>` and `:latest`, which runs with the
+Quickstart's `podman run` options below. The latest bundle that passed a night
+is also published as the
+[`nightly`](https://github.com/slimsami/strycast/releases/tag/nightly)
+pre-release.
+
 The rest of this README is Gufo's.
 
 ## About Gufo
@@ -102,9 +135,6 @@ Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unifie
 See the [changelog](CHANGELOG.md) and [GitHub Releases](https://github.com/gufo-org/gufo/releases)
 for user-facing changes and release history.
 
-> [!TIP]
-> Check out **[Gufo RDMA for Dual Strix Halo](https://github.com/neuhaus/gufo)**, a Gufo variant that has not been merged yet!
-
 ## Models and benchmarks
 
 All model documentation lives under [docs/models](docs/models/README.md):
@@ -112,7 +142,6 @@ All model documentation lives under [docs/models](docs/models/README.md):
 | Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
 | --- | --- | --- | --- | --- |
 | [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
-| [Qwen3.6 35B-A3B](docs/models/qwen3.6-35b-a3b/README.md) | Q4/Q4_K_M/Q6/Q8, AR, DFlash2, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf) / [Q6_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q6_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/blob/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d/Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf) · lmstudio [Q4_K_M](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/blob/68a34855558af61cbef0324d31f411be8a506b08/Qwen3.6-35B-A3B-Q4_K_M.gguf) · [DFlash2 Q8_0](https://huggingface.co/aminya/Qwen3.6-35B-A3B-DFlash2-GGUF/blob/1e26e3499d865b9d2fc55e019d65b3f0e8ab6846/Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf) | Q4: **3,266.95 tok/s pp**; up to **213.95 tok/s tg** single user and **253.43 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.6-35b-a3b/BENCHMARKS.md) | [Quality](docs/models/qwen3.6-35b-a3b/QUALITY.md) |
 | [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/d96201194f103c906994f283f504209dc8d2a10c/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/d96201194f103c906994f283f504209dc8d2a10c/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
 | [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **474.87 tok/s pp**; up to **29.57 tok/s tg** single user with DSpark and **77.12 aggregated tok/s** on 8 concurrent requests with AR · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
 | [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/models/qwen3-asr/QUALITY.md) |

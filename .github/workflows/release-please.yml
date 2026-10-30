@@ -14,6 +14,8 @@ concurrency:
 jobs:
   release:
     name: Prepare, merge and publish release
+    # Gufo's own releases; Strycast releases through release.yml.
+    if: github.repository == 'gufo-org/gufo'
     runs-on: ubuntu-latest
     # The release PR waits for the full Devlab functional run (about an hour).
     timeout-minutes: 180

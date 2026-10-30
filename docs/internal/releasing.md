@@ -1,5 +1,12 @@
 # Releasing
 
+> **Strycast:** this page describes Gufo's own release process, which is
+> skipped outside `gufo-org/gufo`. Strycast releases every push to `main` as
+> `v<Gufo version>-strycast.<n>`, with a Linux bundle and an OCI image
+> (`ghcr.io/slimsami/strycast`), through `.github/workflows/release.yml`; see
+> [Nightly run and releases](../../README.md#nightly-run-and-releases) and
+> [CI workflows](ci.md). The pull request title rules below still apply.
+
 How pull request titles drive versions, how a release is cut and published, and
 how the extension API is versioned alongside. What a version promises to users
 is in [versions](../versions.md).
