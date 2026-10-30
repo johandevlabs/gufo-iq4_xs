@@ -31,6 +31,19 @@ these models here, not upstream.
   up Ornith 1.5 122B: its attention, MMVQ decode and chat-template support, and
   Gufo's device-memory weights change ([gufo-org/gufo#708](https://github.com/gufo-org/gufo/pull/708)),
   which every Qwen model here now uses.
+- [@D3rPapts](https://github.com/D3rPapts) wrote the MMQ dispatch for K-quant
+  35B experts in decode ([#7](https://github.com/slimsami/strycast/pull/7)),
+  which put UD-Q4_K_XL ahead of llama.cpp in every multi-user row.
+
+### Related forks
+
+Other community forks of Gufo for Strix Halo. They are not part of Strycast;
+report problems with them in their own repositories.
+
+- [D3rPapts/gufo_windows](https://github.com/D3rPapts/gufo_windows): a native
+  Windows 11 build for 64 GiB Strix Halo machines, with SSD expert streaming,
+  UD-Q3_K_XL for Qwen3.8 Flash-Next, MiniMax H3 (first/last frame and the
+  turbo LoRA) and Wan 2.2 TI2V-5B.
 
 ### Contributing a model
 
