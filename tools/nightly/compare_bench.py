@@ -8,8 +8,9 @@ the tolerance or on a speculative output that differs from AR.
 
 With --set-aside, the artifacts of every single-user or multi-user table with a
 regression move to NEW_DIR/first and FILE lists the tables to measure again, one
-`INDEX CONFIG TABLE` line each (INDEX counts the LABEL groups from 0). The next
-comparison keeps the better of the two measurements of each value.
+`INDEX CONFIG TABLE` line each (INDEX counts the LABEL groups from 0; CONFIG
+bench-arhash.json is the AR reference config run.sh writes). The next comparison
+keeps the better of the two measurements of each value.
 """
 
 import json
@@ -60,11 +61,15 @@ def multi_metrics(results):
 def table_of(name):
     """(config file, table id) of the model-bench run that wrote this artifact."""
     single = re.fullmatch(r'single-(ar|dflash2|mtp)(?:-repetition)?-(\w+)-gufo\.json', name)
-    multi = re.fullmatch(r'multi-\w+-(\w+)-gufo-(ar|dflash2|mtp)\.json', name)
+    multi = re.fullmatch(r'multi-(ar|mixed|repetition)-(\w+)-gufo-(ar|dflash2|mtp)\.json', name)
     if single:
         mode, variant = single.groups()
     elif multi:
-        variant, mode = multi.groups()
+        kind, variant, mode = multi.groups()
+        if kind != 'ar' and mode == 'ar':
+            # The C1 AR references of the mixed and repetition prompts come from the
+            # one-user AR variant of the DFlash2 table that run.sh writes.
+            return 'bench-arhash.json', f'multi-dflash2-{variant}'
     else:
         return None
     return ('bench-mtp.json' if mode == 'mtp' else 'bench.json',
@@ -146,6 +151,11 @@ def main(args):
     for index, (label, committed, new) in enumerate(groups):
         regressions, improvements, missing, compared, measured_twice = [], [], [], 0, []
         regressed_tables = set()
+        # A table measured again that no longer writes one of its artifacts keeps the
+        # first measurement rather than reporting the table as not measured.
+        for first in sorted((new / 'first').glob('*-gufo*.json')):
+            if not (new / first.name).exists():
+                shutil.copy(first, new / first.name)
         for path in sorted(new.glob('*-gufo*.json')):
             reference = committed / path.name
             if not reference.exists():
@@ -192,7 +202,10 @@ def main(args):
             print('No committed artifact to compare: ' + ', '.join(f'`{name}`' for name in missing) + '\n')
         failed |= bool(regressions or problems or not_run)
         # AR tables first: the speculative multi-user tables check against their C1 outputs.
-        for config, table in sorted(regressed_tables, key=lambda t: (t[1].split('-')[1] != 'ar', t)):
+        def ar_first(entry):
+            config, table = entry
+            return config != 'bench-arhash.json' and table.split('-')[1] != 'ar', entry
+        for config, table in sorted(regressed_tables, key=ar_first):
             if not set_aside:
                 break
             retry.append(f'{index} {config} {table}')

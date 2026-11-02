@@ -171,12 +171,27 @@ open(path, "w").write(json.dumps(plan, indent=2) + "\n")' "$out/functional-plan.
     > "$out/logs/functional.log" 2>&1
   local rc=$?
   cp "$out/functional-results/summary.json" "$out/functional-report/" 2>/dev/null
-  python3 "$src/tests/functional/report.py" --plan "$out/functional-plan.json" \
-    --results "$out/functional-report" --authorize success \
-    --smoke "$([ $rc = 0 ] && echo success || echo failure)" --run-url "$RUN_URL" \
-    --comment "$out/functional.md" --status "$out/functional.env" > "$out/logs/functional-report.log" 2>&1
-  { echo "### Gufo functional suite"; echo; grep -v '^<!-- devlab-functional -->$' "$out/functional.md"; echo; } \
-    >> "$report"
+  render_functional() {
+    python3 "$src/tests/functional/report.py" --plan "$out/functional-plan.json" \
+      --results "$out/functional-report" --authorize success \
+      --smoke "$([ $rc = 0 ] && echo success || echo failure)" --run-url "$RUN_URL" \
+      --comment "$out/functional.md" --status "$out/functional.env" >> "$out/logs/functional-report.log" 2>&1
+  }
+  render_functional
+  # Two paired repeats per side can both land on the slow side of a bimodal
+  # startup phase: a model whose phases came out slower is timed again with six
+  # repeats, and that timing counts.
+  local again=
+  if [ $rc = 0 ] && ! grep -q '^state=success$' "$out/functional.env" && ! late "the second functional timing"; then
+    log "time the slower functional models again"
+    again=$("$venv/bin/python" "$src/tools/nightly/retime_functional.py" --plan "$out/functional-plan.json" \
+      --report "$out/functional-report" --assets "$FUNCTIONAL_ASSETS" --binary "$head_gufo" \
+      --base-binary "$base_gufo" --logs "$out/logs/functional" 2>> "$out/logs/functional.log")
+    [ -n "$again" ] && render_functional
+  fi
+  { echo "### Gufo functional suite"; echo
+    [ -n "$again" ] && echo "Timed again with six repeats after a first slower verdict, that timing counts: $(sed 's/.*/`&`/' <<< "$again" | paste -sd, - | sed 's/,/, /g')" && echo
+    grep -v '^<!-- devlab-functional -->$' "$out/functional.md"; echo; } >> "$report"
   grep -q '^state=success$' "$out/functional.env" || rc=1
   [ $rc = 0 ] || fail "functional suite"
 }
@@ -242,7 +257,9 @@ PY
   while read -r index config table; do
     late "the second measurement of $table" && break
     log "measure $table again"
-    if [ "$index" = 0 ]; then
+    if [ "$config" = bench-arhash.json ]; then
+      mb35 "${table##*-}" "$out/bench-arhash.json" "$table"
+    elif [ "$index" = 0 ]; then
       mb35 "${table##*-}" "$c35/$config" "$table"
     else
       mbo "$corn/$config" "$table"

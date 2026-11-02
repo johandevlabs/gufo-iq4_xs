@@ -17,7 +17,11 @@ promotion to `main` is ready to merge in the morning. The host's launcher
 2. **Gufo's functional suite.** The full tier on Gufo's own models
    (Flash-Next, 27B, Embedding Gemma 2, Qwen3 ASR and the three TTS
    variants), using the `staging` bundle, with server phases timed against
-   the `main` bundle.
+   the `main` bundle. A model whose phases come out slower in both paired
+   repeats is timed again with six repeats by
+   [`retime_functional.py`](retime_functional.py), and that timing counts:
+   some startup phases are bimodal on either binary, so two repeats can both
+   land slow by chance.
 3. **Benchmarks.** Every Gufo table of the Strycast models, measured with the
    `staging` bundle and compared with the committed artifacts by
    [`compare_bench.py`](compare_bench.py). A night fails when a value drops by
@@ -25,7 +29,8 @@ promotion to `main` is ready to merge in the morning. The host's launcher
    or 2 s (loading) or 0.5 GiB (memory), or when a speculative completion
    differs from AR. A single-user or multi-user table that regressed is
    measured once more and the better value counts, since concurrent tables
-   move up to 10% between two runs of one binary.
+   move up to 10% between two runs of one binary. An artifact the second run
+   does not write keeps its first measurement.
 
 Phases still pending at 05:45 are skipped, which fails the night, so the host
 is back in production by 06:00.
