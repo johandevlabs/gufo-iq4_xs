@@ -187,7 +187,8 @@ def main(args):
         print(f'{compared} values compared; {checked} speculative completions checked against AR, '
               f'{len(problems)} differ.\n')
         if measured_twice:
-            print('Measured twice after a first regression, keeping the better value: '
+            print('Measured again after a first regression (single-user tables as the mean of three '
+                  'samples), keeping the better value: '
                   + ', '.join(f'`{name}`' for name in measured_twice) + '\n')
         header = '| Table | Row | Metric | Committed | Tonight | Change |\n| --- | --- | --- | ---: | ---: | ---: |'
         if regressions:

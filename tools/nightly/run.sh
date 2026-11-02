@@ -219,12 +219,12 @@ PY
   mb35() {
     $py tools/bench/model-bench.py --model qwen3.6-35b-a3b --gufo "$head_gufo" --config "$2" \
       --artifacts-dir "$art/35b" --log-dir "$out/logs/bench" --gguf "$1=${gguf[$1]}" --draft "$Q35_DRAFT" \
-      run --target gufo --table "$3" >> "$out/logs/bench.log" 2>&1 || fail "benchmark $3"
+      run --target gufo --table "$3" "${@:4}" >> "$out/logs/bench.log" 2>&1 || fail "benchmark $3"
   }
   mbo() {
     $py tools/bench/model-bench.py --model ornith-1.5-122b --gufo "$head_gufo" --config "$1" \
       --artifacts-dir "$art/ornith" --log-dir "$out/logs/bench" --gguf "q4km=$ORNITH_GGUF" \
-      run --target gufo --table "$2" >> "$out/logs/bench.log" 2>&1 || fail "benchmark Ornith $2"
+      run --target gufo --table "$2" "${@:3}" >> "$out/logs/bench.log" 2>&1 || fail "benchmark Ornith $2"
   }
   cd "$src" || return
   for v in q4 q6 q8 q4km; do
@@ -251,18 +251,22 @@ PY
   mbo "$corn/bench.json" loading
   local groups=("Qwen3.6 35B-A3B" "$c35" "$art/35b" "Ornith 1.5 122B" "$corn" "$art/ornith")
   # A table that regressed is measured once more, and the better value counts:
-  # concurrent tables move up to 10% between two runs of one binary.
+  # concurrent tables move up to 10% between two runs of one binary. Single-user
+  # rows are one sample each, and deep prefill rows moved 7-10% between two runs
+  # of one binary, so they are measured again as the mean of three.
   python3 "$src/tools/nightly/compare_bench.py" --set-aside "$out/bench-retry.txt" "${groups[@]}" > /dev/null
-  local index config table
+  local index config table reps
   while read -r index config table; do
     late "the second measurement of $table" && break
     log "measure $table again"
+    reps=()
+    [[ $table = single-* ]] && reps=(--repetitions 3)
     if [ "$config" = bench-arhash.json ]; then
       mb35 "${table##*-}" "$out/bench-arhash.json" "$table"
     elif [ "$index" = 0 ]; then
-      mb35 "${table##*-}" "$c35/$config" "$table"
+      mb35 "${table##*-}" "$c35/$config" "$table" "${reps[@]}"
     else
-      mbo "$corn/$config" "$table"
+      mbo "$corn/$config" "$table" "${reps[@]}"
     fi
   done < "$out/bench-retry.txt"
   python3 "$src/tools/nightly/compare_bench.py" "${groups[@]}" >> "$report" || fail "benchmark regressions"

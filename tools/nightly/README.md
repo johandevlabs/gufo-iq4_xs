@@ -29,8 +29,10 @@ promotion to `main` is ready to merge in the morning. The host's launcher
    or 2 s (loading) or 0.5 GiB (memory), or when a speculative completion
    differs from AR. A single-user or multi-user table that regressed is
    measured once more and the better value counts, since concurrent tables
-   move up to 10% between two runs of one binary. An artifact the second run
-   does not write keeps its first measurement.
+   move up to 10% between two runs of one binary. A single-user table is
+   measured again as the mean of three samples, since each of its rows is a
+   single sample and deep prefill rows moved 7-10% between two runs. An
+   artifact the second run does not write keeps its first measurement.
 
 Phases still pending at 05:45 are skipped, which fails the night, so the host
 is back in production by 06:00.
