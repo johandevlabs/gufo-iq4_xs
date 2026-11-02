@@ -2,7 +2,8 @@ name: Linux validation
 
 on:
   # Same trigger and fork approval policy as CI. The check is advisory: it is
-  # not required for merging.
+  # not required for merging. Strycast has no strix-halo runner, so there only
+  # the hosted package build runs; the Athena nightly covers the GPU checks.
   pull_request:
     types: [ opened, synchronize, reopened, ready_for_review ]
   workflow_dispatch:
@@ -36,7 +37,7 @@ jobs:
   authorize:
     name: Authorize and select checks
     if: >-
-      github.repository == 'gufo-org/gufo' &&
+      (github.repository == 'gufo-org/gufo' || github.repository == 'slimsami/strycast') &&
       (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -97,7 +98,9 @@ jobs:
       # Advisory only: devlab/functional is not a required check, so cluster
       # problems never block merging.
       - name: Publish pending status
-        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        if: >-
+          github.repository == 'gufo-org/gufo' &&
+          (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.revision.outputs.head }}
@@ -142,7 +145,7 @@ jobs:
           modes=()
           [[ "$RUN_AR" == true ]] && modes+=(--ar)
           [[ "$RUN_BENCHMARK" == true ]] && modes+=(--benchmark)
-          git fetch https://github.com/gufo-org/gufo.git "refs/pull/$PR_NUMBER/head:refs/ci/pr" "$APPROVED_MERGE"
+          git fetch "https://github.com/$GITHUB_REPOSITORY.git" "refs/pull/$PR_NUMBER/head:refs/ci/pr" "$APPROVED_MERGE"
           [[ "$(git rev-parse refs/ci/pr)" == "$APPROVED_HEAD" ]] || {
             echo "::error::PR changed after this run started; the new push starts its own run."
             exit 1
@@ -184,13 +187,15 @@ jobs:
   build:
     name: Build
     needs: authorize
-    if: needs.authorize.outputs.has_work == 'true'
+    # On Strycast the build is the whole check, so it runs for every PR and
+    # skips the baseline package that only the GPU comparison uses.
+    if: needs.authorize.outputs.has_work == 'true' || github.repository != 'gufo-org/gufo'
     permissions:
       contents: read
     uses: ./.github/workflows/linux-build.yml
     with:
       revision: ${{ needs.authorize.outputs.merge }}
-      baseline: ${{ needs.authorize.outputs.base }}
+      baseline: ${{ github.repository == 'gufo-org/gufo' && needs.authorize.outputs.base || '' }}
       artifact-name: linux-devlab-${{ github.run_attempt }}
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -200,7 +205,7 @@ jobs:
     # Downloads overlap hosted compilation; consume the finalized artifact as
     # soon as it exists rather than waiting for hosted cache-save post steps.
     needs: authorize
-    if: needs.authorize.outputs.has_work == 'true'
+    if: github.repository == 'gufo-org/gufo' && needs.authorize.outputs.has_work == 'true'
     runs-on: [ linux, strix-halo, devlab-dispatch ]
     timeout-minutes: 360
     permissions:
@@ -524,7 +529,7 @@ jobs:
     name: Publish results
     needs: [ authorize, smoke ]
     # Hosted job: the PR write token never reaches the GPU host.
-    if: always() && needs.authorize.outputs.head != ''
+    if: always() && github.repository == 'gufo-org/gufo' && needs.authorize.outputs.head != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
