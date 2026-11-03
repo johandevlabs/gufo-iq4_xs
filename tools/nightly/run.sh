@@ -216,15 +216,23 @@ config['tables'] = {'multi-dflash2': table}
 json.dump(config, open(sys.argv[2], 'w'), indent=1)
 PY
   local -A gguf=([q4]=$Q35_Q4 [q6]=$Q35_Q6 [q8]=$Q35_Q8 [q4km]=$Q35_Q4KM)
+  local measuring_again=
+  bench_failed() {
+    # Rows that fail when measured again keep their first value, which
+    # compare_bench.py still judges. Later repetitions use other prompts, and
+    # the repetition corpus can stop at EOS on them (Ornith, 2026-11-03).
+    if [ -n "$measuring_again" ]; then log "$1: a row failed when measured again; its first value stands"
+    else fail "$1"; fi
+  }
   mb35() {
     $py tools/bench/model-bench.py --model qwen3.6-35b-a3b --gufo "$head_gufo" --config "$2" \
       --artifacts-dir "$art/35b" --log-dir "$out/logs/bench" --gguf "$1=${gguf[$1]}" --draft "$Q35_DRAFT" \
-      run --target gufo --table "$3" "${@:4}" >> "$out/logs/bench.log" 2>&1 || fail "benchmark $3"
+      run --target gufo --table "$3" "${@:4}" >> "$out/logs/bench.log" 2>&1 || bench_failed "benchmark $3"
   }
   mbo() {
     $py tools/bench/model-bench.py --model ornith-1.5-122b --gufo "$head_gufo" --config "$1" \
       --artifacts-dir "$art/ornith" --log-dir "$out/logs/bench" --gguf "q4km=$ORNITH_GGUF" \
-      run --target gufo --table "$2" "${@:3}" >> "$out/logs/bench.log" 2>&1 || fail "benchmark Ornith $2"
+      run --target gufo --table "$2" "${@:3}" >> "$out/logs/bench.log" 2>&1 || bench_failed "benchmark Ornith $2"
   }
   cd "$src" || return
   for v in q4 q6 q8 q4km; do
@@ -256,6 +264,7 @@ PY
   # of one binary, so they are measured again as the mean of three.
   python3 "$src/tools/nightly/compare_bench.py" --set-aside "$out/bench-retry.txt" "${groups[@]}" > /dev/null
   local index config table reps
+  measuring_again=1
   while read -r index config table; do
     late "the second measurement of $table" && break
     log "measure $table again"
@@ -269,6 +278,7 @@ PY
       mbo "$corn/$config" "$table" "${reps[@]}"
     fi
   done < "$out/bench-retry.txt"
+  measuring_again=
   python3 "$src/tools/nightly/compare_bench.py" "${groups[@]}" >> "$report" || fail "benchmark regressions"
 }
 

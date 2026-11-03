@@ -77,14 +77,17 @@ def table_of(name):
 
 
 def best(first, second):
-    """Per value, the better of two measurements of one table."""
+    """Per value, the better of two measurements of one table. A row that failed
+    the second time keeps its first value."""
     merged = dict(second)
     for key, (value, higher, tolerance) in first.items():
-        if key in merged:
-            other = merged[key][0]
-            better = value > other if higher else value < other
-            if better:
-                merged[key] = (value, higher, tolerance)
+        if key not in merged:
+            merged[key] = (value, higher, tolerance)
+            continue
+        other = merged[key][0]
+        better = value > other if higher else value < other
+        if better:
+            merged[key] = (value, higher, tolerance)
     return merged
 
 
@@ -123,7 +126,10 @@ def exactness(new_dir):
         for depth, row in spec_rows.items():
             if depth in ar_rows:
                 checked += 1
-                if completion_hashes(row) != completion_hashes(ar_rows[depth]):
+                # A table measured again keeps one hash per repetition; compare
+                # the repetitions both tables ran.
+                pairs = zip(completion_hashes(row), completion_hashes(ar_rows[depth]))
+                if any(spec != ar for spec, ar in pairs):
                     problems.append(f'{name} depth {depth}')
     for path in sorted(new_dir.glob('multi-*-gufo-*.json')):
         for key, result in load(path).get('results', {}).items():

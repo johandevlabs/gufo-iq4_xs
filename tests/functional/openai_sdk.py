@@ -814,17 +814,22 @@ def check_batches(client, model, checks, width, vision=False, speculative="off")
              for pair in words]
     serial = [chat_result(client, body) for body in short]
     batched, references = [], []
-    for offset in (0, 1):
-        indices = [(index + offset) % len(short) for index in range(len(short))]
-        for group in range(0, len(indices) - width + 1, width):
-            members = indices[group:group + width]
-            barrier = threading.Barrier(width)
-            def together(index):
-                barrier.wait(timeout=30)
-                return chat_result(client, short[index], True)
-            with ThreadPoolExecutor(width) as pool:
-                batched += list(pool.map(together, members))
-            references += [serial[index] for index in members]
+    # A reply of a few tokens can finish before its peer's prefill does, so a
+    # pass may share no step. Repeat the pairings until one row ran batched.
+    for _ in range(4):
+        for offset in (0, 1):
+            indices = [(index + offset) % len(short) for index in range(len(short))]
+            for group in range(0, len(indices) - width + 1, width):
+                members = indices[group:group + width]
+                barrier = threading.Barrier(width)
+                def together(index):
+                    barrier.wait(timeout=30)
+                    return chat_result(client, short[index], True)
+                with ThreadPoolExecutor(width) as pool:
+                    batched += list(pool.map(together, members))
+                references += [serial[index] for index in members]
+        if max(row["usage"]["gufo"]["physical_execution_width"] for row in batched) > 1:
+            break
     assert max(row["usage"]["gufo"]["physical_execution_width"] for row in batched) > 1, batched
     for row, reference in zip(batched, references, strict=True):
         assert (row["text"], row["finish"]) == (reference["text"], reference["finish"]), (
