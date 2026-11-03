@@ -215,6 +215,21 @@ table = dict(config['tables']['multi-dflash2'], modes=['ar'], concurrency=[1],
 config['tables'] = {'multi-dflash2': table}
 json.dump(config, open(sys.argv[2], 'w'), indent=1)
 PY
+  # Only Q6, the variant production served and the GPU tests load, keeps the
+  # 128K depth: it is about 40% of a single-user table's time. The other
+  # variants stop at 64K; the comparison skips rows a night did not measure.
+  local f
+  for f in bench.json bench-mtp.json; do
+    python3 - "$c35/$f" "$out/short-$f" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))
+for table in config['tables'].values():
+    if 'depths' in table:
+        table['depths'] = [depth for depth in table['depths'] if depth <= 65536]
+json.dump(config, open(sys.argv[2], 'w'), indent=1)
+PY
+  done
+  cfg35() { if [ "$1" = q6 ]; then echo "$c35/$2"; else echo "$out/short-$2"; fi; }
   local -A gguf=([q4]=$Q35_Q4 [q6]=$Q35_Q6 [q8]=$Q35_Q8 [q4km]=$Q35_Q4KM)
   local measuring_again=
   bench_failed() {
@@ -238,9 +253,9 @@ PY
   for v in q4 q6 q8 q4km; do
     late "benchmarks from 35B $v" && return
     log "35B $v"
-    mb35 $v "$c35/bench.json" single-ar-$v
-    mb35 $v "$c35/bench.json" single-dflash2-$v
-    [ $v = q4km ] || mb35 $v "$c35/bench-mtp.json" single-mtp-$v
+    mb35 $v "$(cfg35 $v bench.json)" single-ar-$v
+    mb35 $v "$(cfg35 $v bench.json)" single-dflash2-$v
+    [ $v = q4km ] || mb35 $v "$(cfg35 $v bench-mtp.json)" single-mtp-$v
     mb35 $v "$out/bench-arhash.json" multi-dflash2-$v
     mb35 $v "$c35/bench.json" multi-ar-$v
     mb35 $v "$c35/bench.json" multi-dflash2-$v
@@ -273,7 +288,7 @@ PY
     if [ "$config" = bench-arhash.json ]; then
       mb35 "${table##*-}" "$out/bench-arhash.json" "$table"
     elif [ "$index" = 0 ]; then
-      mb35 "${table##*-}" "$c35/$config" "$table" "${reps[@]}"
+      mb35 "${table##*-}" "$(cfg35 "${table##*-}" "$config")" "$table" "${reps[@]}"
     else
       mbo "$corn/$config" "$table" "${reps[@]}"
     fi
