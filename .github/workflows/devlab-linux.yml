@@ -3,7 +3,8 @@ name: Linux validation
 on:
   # Same trigger and fork approval policy as CI. The check is advisory: it is
   # not required for merging. Strycast has no strix-halo runner, so there only
-  # the hosted package build runs; the Athena nightly covers the GPU checks.
+  # the hosted package build and kernel scratch check run; the Athena nightly
+  # covers the GPU checks.
   pull_request:
     types: [ opened, synchronize, reopened, ready_for_review ]
   workflow_dispatch:
@@ -187,15 +188,15 @@ jobs:
   build:
     name: Build
     needs: authorize
-    # On Strycast the build is the whole check, so it runs for every PR and
-    # skips the baseline package that only the GPU comparison uses.
+    # On Strycast the build and its kernel scratch check are the whole check,
+    # so they run for every PR.
     if: needs.authorize.outputs.has_work == 'true' || github.repository != 'gufo-org/gufo'
     permissions:
       contents: read
     uses: ./.github/workflows/linux-build.yml
     with:
       revision: ${{ needs.authorize.outputs.merge }}
-      baseline: ${{ github.repository == 'gufo-org/gufo' && needs.authorize.outputs.base || '' }}
+      baseline: ${{ needs.authorize.outputs.base }}
       artifact-name: linux-devlab-${{ github.run_attempt }}
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}

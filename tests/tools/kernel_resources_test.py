@@ -52,6 +52,19 @@ class KernelResourcesTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "offload bundler not found"):
                 RESOURCES.find_bundler("/missing/bundler")
 
+    def test_known_kernels_pass_only_when_no_worse(self):
+        budget = {"default_max_scratch": 0, "allow": {"limited": {"max_scratch": 64}}}
+        kernel = lambda scratch: {"scratch": scratch, "vgpr": 64, "vgpr_spill": 0}
+        candidate = {"clean": kernel(0), "limited": kernel(64), "same": kernel(32),
+                     "grew": kernel(48), "new": kernel(16)}
+        base = {"clean": kernel(0), "limited": kernel(64), "same": kernel(32), "grew": kernel(32)}
+        failing, tolerated = RESOURCES.over_budget(candidate, budget, base)
+        self.assertEqual(sorted(n for n, _, _ in failing), ["grew", "new"])
+        self.assertEqual([n for n, _, _ in tolerated], ["same"])
+        failing, tolerated = RESOURCES.over_budget(candidate, budget)
+        self.assertEqual(sorted(n for n, _, _ in failing), ["grew", "new", "same"])
+        self.assertEqual(tolerated, [])
+
 
 if __name__ == "__main__":
     unittest.main()

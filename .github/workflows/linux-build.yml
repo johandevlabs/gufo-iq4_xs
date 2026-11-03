@@ -141,3 +141,25 @@ jobs:
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
+
+      # Runs after the uploads so a failure still leaves the packages. Kernels
+      # already over the allowance file in the baseline pass when they are no
+      # worse; new or grown scratch fails.
+      - name: Check kernel scratch against the allowance file
+        if: inputs.baseline != ''
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/kernel-resources"
+          "$RUNNER_TEMP/kernel-resources/bin/pip" install --quiet zstandard==0.23.0
+          status=0
+          # Stale-allowance notes would bury the result.
+          "$RUNNER_TEMP/kernel-resources/bin/python" tools/ci/check-kernel-resources.py \
+            linux-artifacts/candidate/libexec/gufo --baseline tools/ci/kernel-resources.json \
+            --known linux-artifacts/baseline/libexec/gufo \
+            | grep -v '^note:' | tee kernel-resources.log || status=$?
+          {
+            printf '### Kernel scratch\n\n```text\n'
+            cat kernel-resources.log
+            printf '```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

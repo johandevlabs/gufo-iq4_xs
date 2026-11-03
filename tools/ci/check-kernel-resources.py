@@ -14,6 +14,10 @@ Modes:
   check-kernel-resources.py BINARY --baseline FILE
       Compare each kernel with the allowance in FILE. The default allowance is
       0 bytes. Exit status 1 if a kernel uses more scratch than its allowance.
+  check-kernel-resources.py BINARY --baseline FILE --known BASE_BINARY
+      The same, but a kernel over its allowance passes when BASE_BINARY has
+      it with at least as much scratch. A pull request then fails only for
+      kernels it adds or makes worse, not for debt already in its base.
   check-kernel-resources.py BINARY --write-baseline FILE
       Write FILE with an allowance for each kernel that uses scratch now.
   check-kernel-resources.py BINARY --report [FILTER]
@@ -323,6 +327,23 @@ def compare(base: dict, cand: dict) -> int:
     return 1 if grew else 0
 
 
+def over_budget(kernels: dict, budget: dict, known: dict | None = None):
+    """Return (failing, tolerated) lists of (name, scratch, limit).
+
+    With KNOWN, the kernels of a base binary, a kernel over its limit is
+    tolerated when KNOWN has it with at least as much scratch."""
+    default = int(budget.get("default_max_scratch", 0))
+    allow = budget.get("allow", {})
+    failing, tolerated = [], []
+    for n, k in kernels.items():
+        limit = int(allow.get(n, {}).get("max_scratch", default))
+        if k["scratch"] <= limit:
+            continue
+        base = (known or {}).get(n)
+        (tolerated if base and base["scratch"] >= k["scratch"] else failing).append((n, k["scratch"], limit))
+    return failing, tolerated
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("binary")
@@ -332,6 +353,8 @@ def main() -> int:
     ap.add_argument("--bundler", default=None, help="path of clang-offload-bundler, for compressed bundles")
     ap.add_argument("--note", default="", help="text that --write-baseline records in the file")
     ap.add_argument("--compare", metavar="BASE_BINARY", help="list the kernels that are worse than in BASE_BINARY")
+    ap.add_argument("--known", metavar="BASE_BINARY",
+                    help="with --baseline, pass kernels over budget that are no worse than in BASE_BINARY")
     args = ap.parse_args()
 
     bundler = find_bundler(args.bundler)
@@ -360,10 +383,9 @@ def main() -> int:
     if not args.baseline:
         ap.error("one of --baseline, --write-baseline or --report is required")
     budget = json.loads(Path(args.baseline).read_text())
-    default = int(budget.get("default_max_scratch", 0))
     allow = budget.get("allow", {})
-    bad = [(n, k["scratch"], int(allow.get(n, {}).get("max_scratch", default)))
-           for n, k in kernels.items() if k["scratch"] > int(allow.get(n, {}).get("max_scratch", default))]
+    known = binary_kernels(args.known, bundler) if args.known else None
+    bad, tolerated = over_budget(kernels, budget, known)
     stale = sorted(set(allow) - set(kernels))
     dm = demangle([n for n, _, _ in bad] + stale)
     for n, have, limit in sorted(bad, key=lambda t: -t[1]):
@@ -371,7 +393,8 @@ def main() -> int:
         print(f"FAIL {have:5d} B scratch (limit {limit}), vgpr {k['vgpr']}, spill {k['vgpr_spill']}: {dm[n]}")
     for n in stale:
         print(f"note: allowance for a kernel that no longer exists: {dm[n]}")
-    print(f"{len(kernels)} kernels checked, {len(using)} use scratch, {len(bad)} over budget")
+    known_note = f" ({len(tolerated)} more no worse than in the base binary)" if known is not None else ""
+    print(f"{len(kernels)} kernels checked, {len(using)} use scratch, {len(bad)} over budget{known_note}")
     return 1 if bad else 0
 
 
