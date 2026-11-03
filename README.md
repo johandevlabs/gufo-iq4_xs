@@ -16,7 +16,7 @@ Gufo's first choice there but are worth running anyway:
   text-to-speech, embeddings and reranking.
 
 Strycast tracks Gufo releases and is rebased on each one (currently Gufo
-v0.26.0). Everything Gufo supports still works here; the models below are the
+v0.28.1). Everything Gufo supports still works here; the models below are the
 additions. Strycast is not affiliated with gufo-org: report problems with
 these models here, not upstream.
 
