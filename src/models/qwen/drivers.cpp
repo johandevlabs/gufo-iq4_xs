@@ -366,6 +366,19 @@ int RunQwenBenchmarkImpl(
     const std::shared_ptr<const core::GgufReader>& reader,
     std::chrono::steady_clock::time_point model_load_start) {
   std::string err;
+  // The model benchmark measures one greedy request; concurrency and sampling
+  // belong to the serving benchmark. Gufo's bench CLI checked this before the
+  // Qwen driver moved into the extension, and qwen27b.cli still expects it.
+  if (opt.concurrency != std::vector<std::size_t>{1}) {
+    std::cerr << "Error: concurrent model benchmarks currently support DS4 "
+                 "only; use the serving benchmark for Qwen\n";
+    return 1;
+  }
+  if (!opt.sampling.can_use_unmodified_argmax()) {
+    std::cerr << "Error: sampled model benchmarks support DS4 and Flash-Next; "
+                 "use the serving benchmark for Qwen\n";
+    return 1;
+  }
   int device_count = 0;
   if (hipGetDeviceCount(&device_count) != hipSuccess || device_count == 0) {
     std::cerr << "Error: No HIP GPU devices available for benchmarking.\n";
