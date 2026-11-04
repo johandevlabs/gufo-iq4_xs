@@ -30,9 +30,11 @@ promotion to `main` is ready to merge in the morning. The host's launcher
    differs from AR. A single-user or multi-user table that regressed is
    measured once more and the better value counts, since concurrent tables
    move up to 10% between two runs of one binary. A single-user table is
-   measured again as the mean of three samples, since each of its rows is a
-   single sample and deep prefill rows moved 7-10% between two runs. An
-   artifact the second run does not write keeps its first measurement.
+   measured twice more on the same prompts and the best of the three counts,
+   since each of its rows is a single sample and some rows sit at one of two
+   levels from run to run (Ornith prefill at 8K: 940 or 981 tok/s on one
+   binary). An artifact a later run does not write keeps an earlier
+   measurement.
 
 Phases still pending at 05:45 are skipped, which fails the night, so the host
 is back in production by 06:00.

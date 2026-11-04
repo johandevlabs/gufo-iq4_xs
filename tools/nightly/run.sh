@@ -275,23 +275,34 @@ PY
   local groups=("Qwen3.6 35B-A3B" "$c35" "$art/35b" "Ornith 1.5 122B" "$corn" "$art/ornith")
   # A table that regressed is measured once more, and the better value counts:
   # concurrent tables move up to 10% between two runs of one binary. Single-user
-  # rows are one sample each, and deep prefill rows moved 7-10% between two runs
-  # of one binary, so they are measured again as the mean of three.
+  # rows are one sample each and some sit at one of two levels from run to run
+  # (Ornith pp at 8K: 940 or 981 tok/s on one binary), so they are measured
+  # twice more on the same prompts, and the best of the three counts. A mean
+  # over other prompts (--repetitions) cannot recover a slow first run.
   python3 "$src/tools/nightly/compare_bench.py" --set-aside "$out/bench-retry.txt" "${groups[@]}" > /dev/null
-  local index config table reps
+  local index config table group pass passes
   measuring_again=1
   while read -r index config table; do
-    late "the second measurement of $table" && break
-    log "measure $table again"
-    reps=()
-    [[ $table = single-* ]] && reps=(--repetitions 3)
-    if [ "$config" = bench-arhash.json ]; then
-      mb35 "${table##*-}" "$out/bench-arhash.json" "$table"
-    elif [ "$index" = 0 ]; then
-      mb35 "${table##*-}" "$(cfg35 "${table##*-}" "$config")" "$table" "${reps[@]}"
-    else
-      mbo "$corn/$config" "$table" "${reps[@]}"
-    fi
+    group=$art/35b
+    [ "$index" = 0 ] || group=$art/ornith
+    passes=1
+    [[ $table = single-* ]] && passes=2
+    for ((pass = 1; pass <= passes; pass++)); do
+      late "measuring $table again" && break 2
+      log "measure $table again ($pass/$passes)"
+      if [ "$config" = bench-arhash.json ]; then
+        mb35 "${table##*-}" "$out/bench-arhash.json" "$table"
+      elif [ "$index" = 0 ]; then
+        mb35 "${table##*-}" "$(cfg35 "${table##*-}" "$config")" "$table"
+      else
+        mbo "$corn/$config" "$table"
+      fi
+      # Keep this pass's artifacts beside the first ones for compare_bench.py.
+      if [ "$pass" -lt "$passes" ]; then
+        mkdir -p "$group/again"
+        mv -f "$group/${table%-*}"*"-${table##*-}-gufo.json" "$group/again/" 2>/dev/null || true
+      fi
+    done
   done < "$out/bench-retry.txt"
   measuring_again=
   python3 "$src/tools/nightly/compare_bench.py" "${groups[@]}" >> "$report" || fail "benchmark regressions"

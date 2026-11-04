@@ -10,7 +10,8 @@ With --set-aside, the artifacts of every single-user or multi-user table with a
 regression move to NEW_DIR/first and FILE lists the tables to measure again, one
 `INDEX CONFIG TABLE` line each (INDEX counts the LABEL groups from 0; CONFIG
 bench-arhash.json is the AR reference config run.sh writes). The next comparison
-keeps the better of the two measurements of each value.
+keeps the best measurement of each value, from NEW_DIR, NEW_DIR/first and
+NEW_DIR/again (an extra single-user measurement).
 """
 
 import json
@@ -26,6 +27,8 @@ AR_TOLERANCE = 0.03
 SPECULATIVE_TOLERANCE = 0.08
 LOADING_TOLERANCE = (0.15, 2.0)  # relative, or absolute seconds, whichever is larger
 MEMORY_TOLERANCE_GIB = 0.5
+# Earlier measurements of a table measured again, oldest first.
+EARLIER = ('first', 'again')
 
 
 def load(path):
@@ -78,7 +81,7 @@ def table_of(name):
 
 def best(first, second):
     """Per value, the better of two measurements of one table. A row that failed
-    the second time keeps its first value."""
+    a later time keeps its earlier value."""
     merged = dict(second)
     for key, (value, higher, tolerance) in first.items():
         if key not in merged:
@@ -157,21 +160,24 @@ def main(args):
     for index, (label, committed, new) in enumerate(groups):
         regressions, improvements, missing, compared, measured_twice = [], [], [], 0, []
         regressed_tables = set()
-        # A table measured again that no longer writes one of its artifacts keeps the
-        # first measurement rather than reporting the table as not measured.
-        for first in sorted((new / 'first').glob('*-gufo*.json')):
-            if not (new / first.name).exists():
-                shutil.copy(first, new / first.name)
+        # A table measured again that no longer writes one of its artifacts keeps an
+        # earlier measurement rather than reporting the table as not measured.
+        for earlier in EARLIER[::-1]:
+            for path in sorted((new / earlier).glob('*-gufo*.json')):
+                if not (new / path.name).exists():
+                    shutil.copy(path, new / path.name)
         for path in sorted(new.glob('*-gufo*.json')):
             reference = committed / path.name
             if not reference.exists():
                 missing.append(path.name)
                 continue
             before, after = metrics(path.name, load(reference)), metrics(path.name, load(path))
-            first = new / 'first' / path.name
-            if first.exists():
-                after = best(metrics(path.name, load(first)), after)
-                measured_twice.append(path.name)
+            measured = [new / earlier / path.name for earlier in EARLIER]
+            measured = [earlier for earlier in measured if earlier.exists()]
+            for earlier in measured:
+                after = best(metrics(path.name, load(earlier)), after)
+            if measured:
+                measured_twice.append((path.name, len(measured) + 1))
             for key, (value, higher, tolerance) in after.items():
                 if key not in before:
                     continue
@@ -193,9 +199,8 @@ def main(args):
         print(f'{compared} values compared; {checked} speculative completions checked against AR, '
               f'{len(problems)} differ.\n')
         if measured_twice:
-            print('Measured again after a first regression (single-user tables as the mean of three '
-                  'samples), keeping the better value: '
-                  + ', '.join(f'`{name}`' for name in measured_twice) + '\n')
+            print('Measured again after a first regression, keeping the best value: '
+                  + ', '.join(f'`{name}` ({count} times)' for name, count in measured_twice) + '\n')
         header = '| Table | Row | Metric | Committed | Tonight | Change |\n| --- | --- | --- | ---: | ---: | ---: |'
         if regressions:
             print('Regressions:\n\n' + header + '\n' + '\n'.join(regressions) + '\n')
