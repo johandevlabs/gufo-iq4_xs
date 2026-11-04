@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -11,14 +13,12 @@
 #include <utility>
 #include <vector>
 
+#include "qfn_mmq.h"
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
-#include <gufo/ext/experimental/hip_utils.hpp>
-#include "qfn_mmq.h"
-#include <gufo/ext/experimental/snapshot_transfer.hpp>
+#include "src/families/qwen/kernels/ops/moe.hpp"
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
-#include "src/families/qwen/kernels/ops/moe.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
 namespace gufo::hip {

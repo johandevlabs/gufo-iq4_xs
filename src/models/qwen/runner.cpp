@@ -708,9 +708,8 @@ public:
           execution_policy_, DraftKind(), speculative_options_, dflash_policy_,
           model_->GetTokenizer().UsesOrnithChatTemplate());
     } else {
-      component_identity_ =
-          QwenProcessIdentity(model_.get(), dflash_model_.get(), max_context_,
-                              mtp_model_.get());
+      component_identity_ = QwenProcessIdentity(
+          model_.get(), dflash_model_.get(), max_context_, mtp_model_.get());
     }
   }
 
@@ -1480,8 +1479,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     speculative_options.use_batched_verification = true;
     speculative_options.retain_frontier_logits = true;
     speculative_options.enable_adaptive_draft_length = false;
-  } else if (options.speculative.backend ==
-             ext::TextSpeculativeBackend::kMtp) {
+  } else if (options.speculative.backend == ext::TextSpeculativeBackend::kMtp) {
     if (options.speculative.draft_model_path.empty()) {
       if (error)
         *error = "MTP HTTP decoding requires --mtp-model";

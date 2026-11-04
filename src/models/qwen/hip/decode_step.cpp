@@ -3,14 +3,13 @@
 
 #include <gufo/ext/experimental/dispatch_telemetry.hpp>
 #include <gufo/ext/experimental/hip_utils.hpp>
-
-#include "src/families/qwen/hip_common/attention_policy.hpp"
-#include "src/families/qwen/kernels/ops.hpp"
-#include "src/models/qwen/hip/executor.hpp"
 #include <stdexcept>
 
-#include "src/families/qwen/kernels/ops/moe.hpp"
 #include "qfn_mmq.h"
+#include "src/families/qwen/hip_common/attention_policy.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
+#include "src/families/qwen/kernels/ops/moe.hpp"
+#include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/modules/modules.hpp"
 #include "src/models/qwen/modules/moe.hpp"
 

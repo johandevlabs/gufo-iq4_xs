@@ -716,12 +716,11 @@ int main(int argc, const char* const* argv) {
                       .min_draft_tokens = 2}) &&
             error.find("min-draft-tokens") != std::string::npos,
         "DFlash must reject an unused adaptive draft floor");
-    Expect(
-        !LoadBackend(backend, model, &error, context, state_count, {}, {},
-                     {.backend = gufo::server::TextSpeculativeBackend::kMtp,
-                      .min_draft_tokens = 2}) &&
-            error.find("min-draft-tokens") != std::string::npos,
-        "MTP must reject an adaptive draft floor");
+    Expect(!LoadBackend(backend, model, &error, context, state_count, {}, {},
+                        {.backend = gufo::server::TextSpeculativeBackend::kMtp,
+                         .min_draft_tokens = 2}) &&
+               error.find("min-draft-tokens") != std::string::npos,
+           "MTP must reject an adaptive draft floor");
     Expect(LoadBackend(backend, model, &error, context, state_count, {},
                        {.max_pending_requests_per_client = 8}),
            error);

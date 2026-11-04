@@ -8,13 +8,13 @@
 #include <string_view>
 #include <vector>
 
+#include "qfn_mmq.h"
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
+#include "src/families/qwen/kernels/ops/moe.hpp"
 #include "src/families/qwen/kernels/verify_gemm_27b.hpp"
-#include "qfn_mmq.h"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/families/qwen/kernels/ops/moe.hpp"
 #include "src/models/qwen/modules/moe.hpp"
 
 namespace gufo::hip {

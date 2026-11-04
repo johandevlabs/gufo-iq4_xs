@@ -138,8 +138,7 @@ std::optional<core::ModelConfig> ExtractQwenConfig(
   if (config.IsMoE() &&
       (config.expert_used_count == 0 ||
        config.expert_used_count > config.expert_count ||
-       config.expert_ff_length == 0 ||
-       config.expert_shared_ff_length == 0)) {
+       config.expert_ff_length == 0 || config.expert_shared_ff_length == 0)) {
     if (error_msg != nullptr) {
       *error_msg = "Model config has incomplete MoE hyperparameters";
     }

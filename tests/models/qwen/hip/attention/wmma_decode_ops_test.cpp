@@ -24,6 +24,7 @@
 #include <hip/hip_runtime.h>
 
 #include <gufo/ext/experimental/hip_utils.hpp>
+
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
 #include "tests/models/qwen/hip/support/device.hpp"

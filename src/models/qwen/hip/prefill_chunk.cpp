@@ -9,10 +9,10 @@
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/hip_common/gemm_route.hpp"
 #include "src/families/qwen/kernels/ops.hpp"
-#include "src/families/qwen/kernels/ops/prefill_fp16.hpp"
-#include "src/models/qwen/hip/executor.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"
+#include "src/families/qwen/kernels/ops/prefill_fp16.hpp"
 #include "src/families/qwen/kernels/ops/routed_f16.hpp"
+#include "src/models/qwen/hip/executor.hpp"
 #include "src/models/qwen/modules/moe.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
@@ -65,7 +65,7 @@ RoutedHostState& GetRoutedHostState() {
 /// Q8_0 (whole 64-element blocks) and Q4_K, Q5_K and Q6_K (whole 256-element
 /// superblocks).
 std::optional<moe_f16::WeightType> RoutedWeightType(core::GgmlType type,
-                                                   std::size_t k) {
+                                                    std::size_t k) {
   if (type == core::GgmlType::kQ8_0 && k % 64 == 0) {
     return moe_f16::WeightType::kQ8_0;
   }
@@ -356,10 +356,10 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     const bool gate_ok =
         pair ||
         moe_f16::RoutedF16Gemm(view.gate_exps.data, *gate_type, x_half,
-                              moe.routed_tiles.data(), n_tiles, tile_rows,
-                              moe.routed_bounds.data(), moe.rows_token.data(),
-                              moe.rows_slot.data(), nullptr, moe.gate_e.data(),
-                              nullptr, expert_ff, hidden, stream);
+                               moe.routed_tiles.data(), n_tiles, tile_rows,
+                               moe.routed_bounds.data(), moe.rows_token.data(),
+                               moe.rows_slot.data(), nullptr, moe.gate_e.data(),
+                               nullptr, expert_ff, hidden, stream);
     // up applies SwiGLU against the gate only on its F16 output; F32 rows for
     // a non-routed down projection take the separate SwiGLU below.
     const bool up_ok =
@@ -425,11 +425,11 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     const auto down = [&](const std::int32_t* tiles, std::uint32_t count,
                           std::uint32_t rows) {
       return count == 0 ||
-             moe_f16::RoutedF16Gemm(view.down_exps.data, *down_type, act_half,
-                                   tiles, count, rows, moe.routed_bounds.data(),
-                                   moe.rows_slot.data(), moe.rows_slot.data(),
-                                   nullptr, nullptr, down_half, hidden,
-                                   expert_ff, stream);
+             moe_f16::RoutedF16Gemm(
+                 view.down_exps.data, *down_type, act_half, tiles, count, rows,
+                 moe.routed_bounds.data(), moe.rows_slot.data(),
+                 moe.rows_slot.data(), nullptr, nullptr, down_half, hidden,
+                 expert_ff, stream);
     };
     if (!(down_mixed
               ? (down(moe.routed_tiles.data() + n_tiles, n_pair, kPairRows) &&

@@ -53,8 +53,9 @@ inline constexpr std::string_view QwenStateAbi(
 inline constexpr std::string_view QwenStateAbi(
     bool speculative, bool fp16_attention_kv,
     bool bf16_recurrent_state) noexcept {
-  return QwenStateAbi(speculative ? QwenDraftKind::kDFlash : QwenDraftKind::kNone,
-                      fp16_attention_kv, bf16_recurrent_state);
+  return QwenStateAbi(
+      speculative ? QwenDraftKind::kDFlash : QwenDraftKind::kNone,
+      fp16_attention_kv, bf16_recurrent_state);
 }
 
 bool IsSha256Hex(std::string_view value) noexcept;

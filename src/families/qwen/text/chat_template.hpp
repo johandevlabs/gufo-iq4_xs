@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/text.hpp>
 #include <memory>
 #include <optional>
 #include <span>
@@ -11,7 +12,6 @@
 #include <utility>
 #include <vector>
 
-#include <gufo/ext/text.hpp>
 #include "src/core/gguf_reader.hpp"
 #include "src/core/reasoning.hpp"
 #include "src/families/qwen/text/tokenizer.hpp"

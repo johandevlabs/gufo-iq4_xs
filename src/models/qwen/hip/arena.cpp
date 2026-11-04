@@ -11,9 +11,9 @@
 #include <type_traits>
 #include <utility>
 
+#include "qfn_mmq.h"
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
-#include "qfn_mmq.h"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace gufo::hip {

@@ -14,8 +14,9 @@
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 
-#include "src/core/hip/detail/hip_graph_decode_executor.hpp"
 #include <gufo/ext/experimental/hip_utils.hpp>
+
+#include "src/core/hip/detail/hip_graph_decode_executor.hpp"
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 #include "src/families/qwen/hip_common/attention_policy.hpp"

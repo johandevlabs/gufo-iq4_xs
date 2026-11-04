@@ -13,9 +13,9 @@
 #include <utility>
 #include <vector>
 
+#include "qfn_mmq.h"
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
-#include "qfn_mmq.h"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace gufo::hip {

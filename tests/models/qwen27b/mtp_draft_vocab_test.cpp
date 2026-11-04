@@ -24,8 +24,7 @@ constexpr TokenId kPrefix = sp::kMtpDraftVocab;
 // Two special tokens above the prefix, as in the Qwen vocabulary.
 constexpr TokenId kImStart = 248045;
 constexpr TokenId kImEnd = 248046;
-constexpr std::size_t kWindow =
-    gufo::speculative::kDraftVocabWindow;
+constexpr std::size_t kWindow = gufo::speculative::kDraftVocabWindow;
 // Ordinary tokens above the prefix.
 constexpr TokenId kRareA = kPrefix + 10;
 constexpr TokenId kRareB = kPrefix + 20;

@@ -12,9 +12,9 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/families/qwen/text/tokenizer.hpp"
 
 namespace {
 using Token = gufo::tokenization::TokenId;
