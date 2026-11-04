@@ -17,19 +17,22 @@
       "id": "qwen27-q4",
       "capability": "text_generation",
       "keys": [
-        "gguf:qwen27"
+        "gguf:qwen27",
+        "gguf:qwen35moe"
       ],
       "model_ids": [
         "qwen27"
       ],
       "speculative": [
-        "dflash2"
+        "dflash2",
+        "mtp"
       ],
       "target": "gufo_qwen_hip",
       "entry": "qwen_provider_register",
       "serving": {
         "draft_options": {
-          "dflash2": "--dflash-model"
+          "dflash2": "--dflash-model",
+          "mtp": "--mtp-model"
         }
       }
     }
@@ -47,6 +50,19 @@
         "qwen27-q4"
       ],
       "help": "DFlash2 draft model path for speculative decoding"
+    },
+    {
+      "name": "--mtp-model",
+      "type": "path",
+      "commands": [
+        "serve",
+        "bench",
+        "prompt"
+      ],
+      "providers": [
+        "qwen27-q4"
+      ],
+      "help": "MTP draft model path for speculative decoding"
     }
   ],
   "targets": {

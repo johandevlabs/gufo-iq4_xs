@@ -13,6 +13,13 @@ bool ProbeQwenGguf(const core::GgufReader& reader) {
   if (architecture == "deepseek4" || architecture == "qwen4exp") {
     return false;
   }
+  // Qwen3.6-35B-A3B and Ornith-1.5-122B share the hybrid runner with routed
+  // MoE layers (Strycast).
+  if (architecture == "qwen35moe") {
+    const auto width =
+        reader.GetMetadataUint64("qwen35moe.embedding_length").value_or(0);
+    return width == 2048 || width == 3072;
+  }
   if (architecture != "qwen" && architecture != "qwen2" &&
       architecture != "qwen35" && architecture != "qwen38") {
     return false;

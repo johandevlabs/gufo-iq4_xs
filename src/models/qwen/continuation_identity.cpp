@@ -26,16 +26,35 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     const hip::QwenExecutionPolicy& execution_policy, bool speculative,
     const speculative::SpeculativeOptions& speculative_options,
     speculative::DFlashDraftPolicy draft_policy) {
+  return QwenCompatibilityIdentity(
+      artifact_fingerprint, draft_artifact_fingerprint, max_context,
+      execution_policy,
+      speculative ? QwenDraftKind::kDFlash : QwenDraftKind::kNone,
+      speculative_options, draft_policy, false);
+}
+
+std::vector<std::uint8_t> QwenCompatibilityIdentity(
+    std::string_view artifact_fingerprint,
+    std::string_view draft_artifact_fingerprint, std::uint32_t max_context,
+    const hip::QwenExecutionPolicy& execution_policy, QwenDraftKind draft_kind,
+    const speculative::SpeculativeOptions& speculative_options,
+    speculative::DFlashDraftPolicy draft_policy, bool ornith_template) {
   if (!IsSha256Hex(artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen disk cache requires an artifact fingerprint");
   }
-  if (speculative && !IsSha256Hex(draft_artifact_fingerprint)) {
+  if (draft_kind == QwenDraftKind::kDFlash &&
+      !IsSha256Hex(draft_artifact_fingerprint)) {
     throw std::invalid_argument(
         "Qwen DFlash disk cache requires a draft artifact fingerprint");
   }
+  if (draft_kind == QwenDraftKind::kMtp &&
+      !IsSha256Hex(draft_artifact_fingerprint)) {
+    throw std::invalid_argument(
+        "Qwen MTP disk cache requires a draft artifact fingerprint");
+  }
   const std::string_view state_abi =
-      QwenStateAbi(speculative, execution_policy.UsesFp16AttentionKv(),
+      QwenStateAbi(draft_kind, execution_policy.UsesFp16AttentionKv(),
                    execution_policy.UsesBf16RecurrentState());
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
@@ -43,9 +62,15 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "artifact_id=" << ext::kGgufIdentityScheme << ':'
            << artifact_fingerprint << '\n'
            << "tokenizer=embedded-in-artifact\n"
-           << "chat_template=qwen38-reasoning-compiled-v3\n"
+           << "chat_template="
+           << (ornith_template ? "ornith-compiled-v1"
+                               : "qwen38-reasoning-compiled-v3")
+           << '\n'
            << "chat_template_reference_sha256="
-           << tokenization::QwenChatTemplate::OfficialTemplateSha256() << '\n'
+           << (ornith_template
+                   ? tokenization::QwenChatTemplate::OrnithTemplateSha256()
+                   : tokenization::QwenChatTemplate::OfficialTemplateSha256())
+           << '\n'
            << "state_abi=" << state_abi << "-component-v2\n"
            << "payload_layout=qwen-component-v2\n"
            << "checkpoint_frontier=complete-prefix-v1\n"
@@ -65,7 +90,7 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "position_policy=absolute-v1\n"
            << "rope_window_policy=qwen-gguf-config-v1\n"
            << "adapters=none\n";
-  if (speculative) {
+  if (draft_kind == QwenDraftKind::kDFlash) {
     identity
         << "draft_backend=dflash2-gfx1151-v1\n"
         << "draft_artifact_id=" << ext::kGgufIdentityScheme << ':'
@@ -88,6 +113,31 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
         << (speculative_options.use_batched_verification ? "true" : "false")
         << '\n'
         << "draft_target_verification=decode-equivalent-v1\n";
+  } else if (draft_kind == QwenDraftKind::kMtp) {
+    // The state layout and proposal strategy are both part of the identity:
+    // MTP keeps a full-context cache plus the last target hidden row, and its
+    // proposal chain is greedy, so neither may cross-reuse DFlash2 entries.
+    identity
+        << "draft_backend=qwen-mtp-gfx1151-v1\n"
+        << "draft_artifact_id=" << ext::kGgufIdentityScheme << ':'
+        << draft_artifact_fingerprint << '\n'
+        << "draft_state_layout=qwen-mtp-full-kv-and-hidden-row-v1\n"
+        << "draft_propose=mtp-chain-greedy-v1\n"
+        << "draft_max_tokens=" << speculative_options.max_draft_tokens << '\n'
+        << "draft_min_tokens=" << speculative_options.min_draft_tokens << '\n'
+        << "draft_initial_tokens=" << speculative_options.initial_draft_tokens
+        << '\n'
+        << "draft_rolling_window=" << speculative_options.rolling_window << '\n'
+        << std::setprecision(std::numeric_limits<float>::max_digits10)
+        << "draft_target_acceptance="
+        << speculative_options.target_acceptance_rate << '\n'
+        << "draft_adaptive="
+        << (speculative_options.enable_adaptive_draft_length ? "true" : "false")
+        << '\n'
+        << "draft_batched_verification="
+        << (speculative_options.use_batched_verification ? "true" : "false")
+        << '\n'
+        << "draft_target_verification=decode-equivalent-v1\n";
   }
   const std::string canonical = identity.str();
   return {canonical.begin(), canonical.end()};
@@ -95,12 +145,15 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
 
 std::vector<std::uint8_t> QwenProcessIdentity(const void* model,
                                               const void* draft,
-                                              std::uint32_t max_context) {
+                                              std::uint32_t max_context,
+                                              const void* mtp) {
   std::ostringstream identity;
   identity << "schema=gufo-process-qwen-component-v2\n"
            << "model_instance=" << model << '\n'
-           << "draft_instance=" << draft << '\n'
-           << "context_tokens=" << max_context << '\n';
+           << "draft_instance=" << draft << '\n';
+  if (mtp != nullptr)
+    identity << "mtp_instance=" << mtp << '\n';
+  identity << "context_tokens=" << max_context << '\n';
   const auto canonical = identity.str();
   return {canonical.begin(), canonical.end()};
 }
