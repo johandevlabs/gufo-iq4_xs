@@ -15,10 +15,11 @@ Gufo's first choice there but are worth running anyway:
   Assistant voice control) that leaves room on the same box for speech-to-text,
   text-to-speech, embeddings and reranking.
 
-Strycast tracks Gufo releases and is rebased on each one (currently Gufo
-v0.28.1). Everything Gufo supports still works here; the models below are the
-additions. Strycast is not affiliated with gufo-org: report problems with
-these models here, not upstream.
+Strycast tracks Gufo releases and is rebased on each one, or on a newer Gufo
+`main` commit when it needs work that is not released yet (currently Gufo
+main 1c75887b). Everything Gufo supports still works here; the models below
+are the additions. Strycast is not affiliated with gufo-org: report problems
+with these models here, not upstream.
 
 | Model | Inference modes | Hugging Face weights | Benchmarks | Quality |
 | --- | --- | --- | --- | --- |
@@ -84,26 +85,30 @@ comparison, and its guide lists any gaps that remain.
 ### Rebasing onto Gufo
 
 Each Gufo release is brought in by rebasing, not merging, so Strycast stays a
-short series of commits on top of a Gufo tag. The rulesets block force-pushes
+short series of commits on top of a Gufo tag, or of a Gufo `main` commit
+between releases. The rulesets block force-pushes
 to `staging` and `main`, so a rebase goes through the
 [Check a Gufo rebase](.github/workflows/rebase-upstream.yml) workflow and an
 admin:
 
-1. Rebase `staging` onto the new tag on a branch named `rebase/<tag>`, update
-   "currently Gufo" above, and open a PR against `staging`.
+1. Rebase `staging` onto the new tag on a branch named `rebase/<tag>` (or onto
+   a `main` commit on `rebase/main-<commit>`), update "currently Gufo" above
+   (`v0.28.1`, or `main` and the commit's first eight hex digits), and open a
+   PR against `staging`.
 2. Run the GPU checks for every Strycast model and for Gufo's own models, put
    the results in the PR, and add the `gpu-checked` label.
 3. Run the workflow with the PR number. It checks that the branch sits exactly
-   on the tag, that no Strycast commit was dropped and that the required checks
-   passed, then prints the commands that tag the old head
-   `archive/staging-<old tag>` and replace `staging`.
+   on the tag or `main` commit, that it is newer than the current base, that
+   no Strycast commit was dropped and that the required checks passed, then
+   prints the commands that tag the old head `archive/staging-<old base>` and
+   replace `staging`.
 4. An admin sets the ruleset's bypass for the repository admin role to
    "always", runs those commands and sets it back to "pull requests only".
 5. Promote with a `staging` → `main` PR as usual, labelled `gpu-checked`, and
    repeat steps 3 and 4 with that PR to replace `main`.
 
 After a rebase, move an open branch onto the new `staging` with
-`git rebase --onto origin/staging archive/staging-<old tag> <branch>`.
+`git rebase --onto origin/staging archive/staging-<old base> <branch>`.
 
 ### Nightly run and releases
 

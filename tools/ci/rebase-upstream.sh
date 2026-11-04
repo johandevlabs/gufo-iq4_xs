@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Check a prepared rebase of staging or main onto a newer Gufo release, and
-# print the commands that replace the branch. Run by
+# Check a prepared rebase of staging or main onto a newer Gufo release or
+# Gufo main commit, and print the commands that replace the branch. Run by
 # .github/workflows/rebase-upstream.yml. The rulesets block force-pushes, so an
 # admin lifts that for the push itself: see "Rebasing onto Gufo" in README.md.
 #
@@ -28,7 +28,7 @@ sha=$(field .head.sha)
 [ "$head_repo" = "$REPO" ] || fail "PR #$PR comes from $head_repo, not $REPO."
 case "$base:$head" in
   staging:rebase/* | main:staging) ;;
-  *) fail "PR #$PR is $head -> $base; expected rebase/<tag> -> staging or staging -> main." ;;
+  *) fail "PR #$PR is $head -> $base; expected rebase/<base> -> staging or staging -> main." ;;
 esac
 jq -e --arg label "$LABEL" '.labels | map(.name) | index($label)' <<<"$pr_json" >/dev/null ||
   fail "PR #$PR has no '$LABEL' label. Add it once the GPU checks in the PR description pass."
@@ -38,20 +38,34 @@ git fetch --quiet --no-tags origin "+refs/heads/$base:refs/remotes/origin/$base"
 [ "$(git rev-parse "origin/$head")" = "$sha" ] || fail "$head moved while the workflow started; run it again."
 old=$(git rev-parse "origin/$base")
 
-# The Gufo release a branch is based on: the closest upstream tag.
-gufo_base() { git describe --tags --abbrev=0 --match 'upstream/v*' "$1" | sed 's|^upstream/||'; }
-old_tag=$(gufo_base "$old")
-new_tag=$(gufo_base "$sha")
-newest=$(printf '%s\n%s\n' "$old_tag" "$new_tag" | sort -V | tail -1)
-if [ "$new_tag" = "$old_tag" ] || [ "$newest" != "$new_tag" ]; then
+# The Gufo commit a branch is based on: where it leaves Gufo's main. That is
+# a release tag (upstream/v*) when it sits exactly on one, otherwise the main
+# commit itself. `name` is how the README states it, `slug` names the archive.
+gufo_base() {
+  local commit tag
+  commit=$(git merge-base "$1" upstream/main)
+  if tag=$(git describe --tags --exact-match --match 'upstream/v*' "$commit" 2>/dev/null); then
+    echo "$tag"
+  else
+    echo "$commit"
+  fi
+}
+gufo_name() { case $1 in upstream/v*) echo "${1#upstream/}" ;; *) echo "main ${1:0:8}" ;; esac; }
+gufo_slug() { gufo_name "$1" | tr ' ' '-'; }
+old_ref=$(gufo_base "$old")
+new_ref=$(gufo_base "$sha")
+old_tag=$(gufo_name "$old_ref")
+new_tag=$(gufo_name "$new_ref")
+if [ "$(git rev-parse "$new_ref^{commit}")" = "$(git rev-parse "$old_ref^{commit}")" ] ||
+   ! git merge-base --is-ancestor "$old_ref" "$new_ref"; then
   fail "$head is based on Gufo $new_tag, which is not newer than $base's $old_tag."
 fi
 
-# Exactly on the tag: every commit past it must be Strycast's, not upstream's.
-own=$(git rev-list --count "$sha" --not "upstream/$new_tag" upstream/main)
-past_tag=$(git rev-list --count "upstream/$new_tag..$sha")
+# Exactly on the base: every commit past it must be Strycast's, not upstream's.
+own=$(git rev-list --count "$sha" --not "$new_ref" upstream/main)
+past_tag=$(git rev-list --count "$new_ref..$sha")
 [ "$own" = "$past_tag" ] ||
-  fail "$head carries $((past_tag - own)) upstream commits past $new_tag; rebase onto the tag itself."
+  fail "$head carries $((past_tag - own)) upstream commits past $new_tag; rebase onto it itself."
 
 if [ "$base" = main ]; then
   git fetch --quiet --no-tags origin '+refs/heads/staging:refs/remotes/origin/staging'
@@ -62,8 +76,8 @@ git show "$sha:README.md" | tr '\n' ' ' | grep -q "currently Gufo $new_tag" ||
   fail "README.md does not say 'currently Gufo $new_tag'."
 
 # Every Strycast commit must survive the rebase; new ones are allowed.
-subjects() { git log --no-merges --format=%s "upstream/$1..$2" | sort -u; }
-dropped=$(comm -23 <(subjects "$old_tag" "$old") <(subjects "$new_tag" "$sha"))
+subjects() { git log --no-merges --format=%s "$1..$2" | sort -u; }
+dropped=$(comm -23 <(subjects "$old_ref" "$old") <(subjects "$new_ref" "$sha"))
 [ -z "$dropped" ] || fail "commits missing after the rebase: $(tr '\n' ';' <<<"$dropped")"
 
 # The checks the target branch requires must have passed on this commit. A
@@ -81,7 +95,7 @@ while IFS= read -r check; do
   [ "$passed" -gt 0 ] || fail "required check '$check' has not passed on $sha."
 done <<<"$required"
 
-archive="archive/$base-$old_tag"
+archive="archive/$base-$(gufo_slug "$old_ref")"
 if git ls-remote --exit-code --tags origin "refs/tags/$archive" >/dev/null; then
   archive="$archive-$(date -u +%Y%m%d%H%M)"
 fi
@@ -91,12 +105,12 @@ fi
   echo
   echo "- Pull request: #$PR ($head, \`${sha:0:8}\`)"
   echo "- Previous head \`${old:0:8}\`, to archive as \`$archive\`"
-  echo "- Strycast commits: $(git rev-list --count --no-merges "upstream/$old_tag..$old") -> $own"
+  echo "- Strycast commits: $(git rev-list --count --no-merges "$old_ref..$old") -> $own"
   echo
   echo '<details><summary>git range-diff</summary>'
   echo
   echo '```'
-  git range-diff --no-color "upstream/$old_tag..$old" "upstream/$new_tag..$sha" | head -n 3000
+  git range-diff --no-color "$old_ref..$old" "$new_ref..$sha" | head -n 3000
   echo '```'
   echo '</details>'
 } >>"$summary"
