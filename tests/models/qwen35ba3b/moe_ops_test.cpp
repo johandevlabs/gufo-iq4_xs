@@ -24,6 +24,7 @@
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"
+#include "src/families/qwen/kernels/ops/routed_f16.hpp"
 #include "src/families/qwen/kernels/ops/swiglu.hpp"
 #include "src/families/qwen/kernels/ops/norm_residual.hpp"
 #include "src/families/qwen/kernels/ops/ssm.hpp"
@@ -674,18 +675,19 @@ std::vector<std::uint8_t> RandomExperts(GgmlType type, std::size_t rows,
 }
 
 namespace routed = gufo::models::qwen38_flash_next::rocm;
+namespace moe_f16 = gufo::hip::moe_f16;
 
 struct RoutedCase {
   GgmlType type;
-  routed::WeightType weight_type;
+  moe_f16::WeightType weight_type;
   const char* name;
 };
 
 constexpr std::array<RoutedCase, 4> kRoutedCases{{
-    {GgmlType::kQ8_0, routed::WeightType::kQ8_0, "Q8_0"},
-    {GgmlType::kQ6_K, routed::WeightType::kQ6_K, "Q6_K"},
-    {GgmlType::kQ5_K, routed::WeightType::kQ5_K, "Q5_K"},
-    {GgmlType::kQ4_K, routed::WeightType::kQ4_K, "Q4_K"},
+    {GgmlType::kQ8_0, moe_f16::WeightType::kQ8_0, "Q8_0"},
+    {GgmlType::kQ6_K, moe_f16::WeightType::kQ6_K, "Q6_K"},
+    {GgmlType::kQ5_K, moe_f16::WeightType::kQ5_K, "Q5_K"},
+    {GgmlType::kQ4_K, moe_f16::WeightType::kQ4_K, "Q4_K"},
 }};
 
 /// Flash-Next's routed F16 expert GEMM on this model's expert shapes, against
@@ -699,7 +701,7 @@ void CheckRoutedF16(hipStream_t stream) {
     const GgmlType type = routed_case.type;
     const auto weight_type = routed_case.weight_type;
     const char* type_name = routed_case.name;
-    const bool wide = routed::RoutedF16WideTilesSupported(weight_type);
+    const bool wide = moe_f16::RoutedF16WideTilesSupported(weight_type);
     Expect(wide == (type == GgmlType::kQ8_0 || type == GgmlType::kQ6_K),
            std::string("unexpected wide-tile support for ") + type_name);
     constexpr std::uint32_t kExperts = 64;
@@ -775,7 +777,7 @@ void CheckRoutedF16(hipStream_t stream) {
                                     x_rows * shape.k, stream);
           const auto* rows_in =
               shape.per_slot_input ? d_rows_slot.data() : d_rows_token.data();
-          const bool launched = routed::RoutedF16Gemm(
+          const bool launched = moe_f16::RoutedF16Gemm(
               d_w.data(), weight_type,
               reinterpret_cast<const __half*>(d_x_half.data()), d_tiles.data(),
               static_cast<std::uint32_t>(tiles.size()), tile_rows,
@@ -910,7 +912,7 @@ void CheckRoutedPair(hipStream_t stream) {
         gufo::test::DeviceBuffer<std::int32_t> d_tiles(tiles);
         gufo::test::DeviceBuffer<std::uint16_t> d_out(
             std::vector<std::uint16_t>(slots * kM, 0x7E00U));  // F16 NaN
-        Expect(routed::RoutedGatedF16Gemm(
+        Expect(moe_f16::RoutedGatedF16Gemm(
                    d_gate.data(), d_up.data(), weight_type,
                    reinterpret_cast<const __half*>(d_x_half.data()),
                    d_tiles.data(), static_cast<std::uint32_t>(tiles.size()),

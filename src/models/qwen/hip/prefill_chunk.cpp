@@ -12,6 +12,7 @@
 #include "src/families/qwen/kernels/ops/prefill_fp16.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"
+#include "src/families/qwen/kernels/ops/routed_f16.hpp"
 #include "src/models/qwen/modules/moe.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 
@@ -63,21 +64,21 @@ RoutedHostState& GetRoutedHostState() {
 /// The routed F16 GEMM's decode of an expert tensor, if it has one here:
 /// Q8_0 (whole 64-element blocks) and Q4_K, Q5_K and Q6_K (whole 256-element
 /// superblocks).
-std::optional<routed::WeightType> RoutedWeightType(core::GgmlType type,
+std::optional<moe_f16::WeightType> RoutedWeightType(core::GgmlType type,
                                                    std::size_t k) {
   if (type == core::GgmlType::kQ8_0 && k % 64 == 0) {
-    return routed::WeightType::kQ8_0;
+    return moe_f16::WeightType::kQ8_0;
   }
   if (k % 256 != 0) {
     return std::nullopt;
   }
   switch (type) {
     case core::GgmlType::kQ4_K:
-      return routed::WeightType::kQ4_K;
+      return moe_f16::WeightType::kQ4_K;
     case core::GgmlType::kQ5_K:
-      return routed::WeightType::kQ5_K;
+      return moe_f16::WeightType::kQ5_K;
     case core::GgmlType::kQ6_K:
-      return routed::WeightType::kQ6_K;
+      return moe_f16::WeightType::kQ6_K;
     default:
       return std::nullopt;
   }
@@ -271,7 +272,7 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
   // rows keeps the unpaired launches.
   const bool pair =
       routed_gate_up && routed_down && batch_size >= kRoutedPairMinTokens &&
-      *gate_type == *up_type && routed::RoutedGatedF16Supported(*gate_type);
+      *gate_type == *up_type && moe_f16::RoutedGatedF16Supported(*gate_type);
   std::uint32_t tile_rows = 16;
   std::uint32_t n_tiles = 0;
   std::uint32_t n_pair = 0;
@@ -346,7 +347,7 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     const auto paired_gate_up = [&](const std::int32_t* tiles,
                                     std::uint32_t count, std::uint32_t rows) {
       return count == 0 ||
-             routed::RoutedGatedF16Gemm(
+             moe_f16::RoutedGatedF16Gemm(
                  view.gate_exps.data, view.up_exps.data, *gate_type, x_half,
                  tiles, count, rows, moe.routed_bounds.data(),
                  moe.rows_token.data(), moe.rows_slot.data(), act_half,
@@ -354,7 +355,7 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     };
     const bool gate_ok =
         pair ||
-        routed::RoutedF16Gemm(view.gate_exps.data, *gate_type, x_half,
+        moe_f16::RoutedF16Gemm(view.gate_exps.data, *gate_type, x_half,
                               moe.routed_tiles.data(), n_tiles, tile_rows,
                               moe.routed_bounds.data(), moe.rows_token.data(),
                               moe.rows_slot.data(), nullptr, moe.gate_e.data(),
@@ -368,13 +369,13 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
                  paired_gate_up(moe.routed_tiles.data() + n_tiles + n_pair,
                                 n_narrow, kNarrowRows))
          : routed_down
-             ? routed::RoutedF16Gemm(
+             ? moe_f16::RoutedF16Gemm(
                    view.up_exps.data, *up_type, x_half, moe.routed_tiles.data(),
                    n_tiles, tile_rows, moe.routed_bounds.data(),
                    moe.rows_token.data(), moe.rows_slot.data(),
                    moe.gate_e.data(), nullptr, act_half, expert_ff, hidden,
                    stream)
-             : routed::RoutedF16Gemm(
+             : moe_f16::RoutedF16Gemm(
                    view.up_exps.data, *up_type, x_half, moe.routed_tiles.data(),
                    n_tiles, tile_rows, moe.routed_bounds.data(),
                    moe.rows_token.data(), moe.rows_slot.data(), nullptr,
@@ -420,11 +421,11 @@ void ExecuteMoePrefillChunk(QwenGpuArena& arena, const QwenMoeScratch& moe,
     // gate/up: fewer tiles, each expert's rows unchanged. Q4_K and Q5_K have
     // no 64- or 128-row tiles and keep the regular map.
     const bool down_mixed =
-        pair && routed::RoutedF16WideTilesSupported(*down_type);
+        pair && moe_f16::RoutedF16WideTilesSupported(*down_type);
     const auto down = [&](const std::int32_t* tiles, std::uint32_t count,
                           std::uint32_t rows) {
       return count == 0 ||
-             routed::RoutedF16Gemm(view.down_exps.data, *down_type, act_half,
+             moe_f16::RoutedF16Gemm(view.down_exps.data, *down_type, act_half,
                                    tiles, count, rows, moe.routed_bounds.data(),
                                    moe.rows_slot.data(), moe.rows_slot.data(),
                                    nullptr, nullptr, down_half, hidden,
