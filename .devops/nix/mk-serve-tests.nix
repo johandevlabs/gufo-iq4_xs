@@ -107,10 +107,11 @@ let
       provider = "deepseek4";
       dflashModel = "/draft";
     };
+    # Qwen advertises DFlash2 and MTP (Strycast); DSpark is DeepSeek's.
     wrongMode = fails {
       provider = "qwen27-q4";
-      speculative = "mtp";
-      mtpModel = "/draft";
+      speculative = "dspark";
+      dsparkModel = "/draft";
     };
     mixedDrafts = fails {
       dsparkModel = "/d";
