@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/families/qwen/config/qwen_config.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace {
@@ -100,7 +101,7 @@ int main(int argc, char** argv) {
     std::shared_ptr<const gufo::core::GgufReader> reader =
         gufo::core::GgufReader::OpenFile(argv[1], &error);
     Require(reader != nullptr, "open model failed: " + error);
-    const auto config = reader->ExtractModelConfig(&error);
+    const auto config = gufo::models::qwen::ExtractQwenConfig(*reader, &error);
     Require(config.has_value(), "model config failed: " + error);
     const std::size_t vocab = config->vocab_size;
     Require(length <= config->context_length,

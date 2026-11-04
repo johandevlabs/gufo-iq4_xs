@@ -15,7 +15,7 @@
 #include "src/families/qwen/kernels/ops.hpp"
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include "qfn_mmq.h"
-#include "src/core/hip/snapshot_transfer.hpp"
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include "src/models/qwen/hip/mtp.hpp"
 #include "src/models/qwen/hip/mtp/detail/allocation.hpp"
 #include "src/families/qwen/kernels/ops/moe.hpp"

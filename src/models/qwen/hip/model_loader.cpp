@@ -16,10 +16,6 @@
 #include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/families/qwen/text/chat_template.hpp"
 #include "qfn_mmq.h"
-#include "src/core/hip/heap_placement.hpp"
-#include "src/core/hip/weight_upload.hpp"
-#include "src/core/platform/pages.hpp"
-#include "src/core/platform/prefault.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace gufo::hip {

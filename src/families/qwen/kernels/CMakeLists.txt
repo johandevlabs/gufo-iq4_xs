@@ -54,6 +54,9 @@ target_include_directories(gufo_qwen_kernels SYSTEM PUBLIC
 target_link_libraries(gufo_qwen_kernels PUBLIC
   gufo_core
   gufo_qwen_hip_common)
+# The MMVQ decode route of LaunchGEMVRows (Ornith, Strycast) runs the vendored
+# llama.cpp vector kernel built with Flash-Next's MMQ library.
+target_link_libraries(gufo_qwen_kernels PUBLIC gufo_qwen38_flash_next_mmq)
 
 # HIP helpers must share the kernel's wave size, so compile this unit
 # separately while the other Qwen kernels retain wave32.

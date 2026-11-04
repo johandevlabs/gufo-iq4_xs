@@ -24,16 +24,16 @@ endif()
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen35ba3b_verify_bench
     ${CMAKE_CURRENT_SOURCE_DIR}/verify_bench.cpp)
-  target_link_libraries(qwen35ba3b_verify_bench PRIVATE gufo_core)
+  target_link_libraries(qwen35ba3b_verify_bench PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
 endif()
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen35ba3b_prefill_chunk_bench
     ${CMAKE_CURRENT_SOURCE_DIR}/prefill_chunk_bench.cpp)
-  target_link_libraries(qwen35ba3b_prefill_chunk_bench PRIVATE gufo_core)
+  target_link_libraries(qwen35ba3b_prefill_chunk_bench PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
 endif()
 
 # Offline AR teacher-forcing logits dump (not a ctest).
 if (ENGINE_ENABLE_HIP)
   add_executable(qwen_kl_probe ${PROJECT_SOURCE_DIR}/tools/qwen/kl_probe.cpp)
-  target_link_libraries(qwen_kl_probe PRIVATE gufo_core)
+  target_link_libraries(qwen_kl_probe PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
 endif()

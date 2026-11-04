@@ -14,6 +14,54 @@ namespace {
 
 constexpr unsigned kThreads = 256;
 
+__device__ __forceinline__ float SigmoidF(float x) {
+  return 1.0f / (1.0f + __expf(-x));
+}
+__device__ __forceinline__ float SiluF(float x) {
+  return x * SigmoidF(x);
+}
+
+/// Lane i receives lane (i ^ offset)'s value, as __shfl_xor(v, offset) does
+/// across a wave32. On gfx1151 it is a DPP row_xmask (offsets below 16) or
+/// v_permlanex16 (16): a register move instead of an LDS crossbar round trip
+/// (ds_bpermute). Only the transport differs, so reductions stay bitwise;
+/// every lane must be active, as the shuffle's callers already require.
+__device__ __forceinline__ int XorLane(int v, int offset) {
+#if defined(__gfx1151__)
+  switch (offset) {
+    case 1:
+      return __builtin_amdgcn_update_dpp(0, v, 0x161, 0xF, 0xF, false);
+    case 2:
+      return __builtin_amdgcn_update_dpp(0, v, 0x162, 0xF, 0xF, false);
+    case 4:
+      return __builtin_amdgcn_update_dpp(0, v, 0x164, 0xF, 0xF, false);
+    case 8:
+      return __builtin_amdgcn_update_dpp(0, v, 0x168, 0xF, 0xF, false);
+    case 16:
+      return __builtin_amdgcn_permlanex16(v, v, 0x76543210, 0xfedcba98, false,
+                                          false);
+  }
+#endif
+  return __shfl_xor(v, offset);
+}
+
+__device__ __forceinline__ unsigned XorLane(unsigned v, int offset) {
+  return static_cast<unsigned>(XorLane(static_cast<int>(v), offset));
+}
+
+__device__ __forceinline__ float XorLane(float v, int offset) {
+  return __builtin_bit_cast(float, XorLane(__builtin_bit_cast(int, v), offset));
+}
+
+// F16 WMMA fragments (wave32): sixteen halves per lane, eight F32
+// accumulators per lane.
+using v16h = __attribute__((__vector_size__(16 * sizeof(_Float16)))) _Float16;
+using v8f = __attribute__((__vector_size__(8 * sizeof(float)))) float;
+
+__device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
+}
+
 struct Q8_0Block {
   __half d;
   std::int8_t qs[32];

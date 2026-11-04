@@ -16,8 +16,10 @@
 
 namespace gufo::speculative {
 
-using models::qwen38_flash_next::kMtpDraftExtraRows;
-using models::qwen38_flash_next::kMtpDraftVocab;
+// The shared small-head geometry (draft_vocab.hpp) under the names this
+// header and the MTP executor use.
+inline constexpr std::uint32_t kMtpDraftVocab = kDraftVocabPrefix;
+inline constexpr std::uint32_t kMtpDraftExtraRows = kDraftVocabExtraRows;
 
 /// Rows of the Qwen3.5/3.6/3.8 vocabulary. Flash-Next's small draft head
 /// (draft_vocab.hpp) assumes this byte-level BPE vocabulary, whose early
@@ -124,7 +126,7 @@ private:
   }
 
   std::vector<std::int32_t> specials_;
-  models::qwen38_flash_next::MtpDraftVocab vocab_;
+  DraftVocab vocab_;
   std::vector<std::int32_t> history_;  ///< scanned tokens, as table IDs
   std::vector<std::int32_t> added_;
   bool stale_{true};
