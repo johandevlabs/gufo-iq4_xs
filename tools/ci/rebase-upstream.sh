@@ -110,7 +110,9 @@ fi
   echo '<details><summary>git range-diff</summary>'
   echo
   echo '```'
-  git range-diff --no-color "$old_ref..$old" "$new_ref..$sha" | head -n 3000
+  # sed reads the whole diff: head would stop early and, under pipefail, the
+  # SIGPIPE of a longer range-diff would fail the script.
+  git range-diff --no-color "$old_ref..$old" "$new_ref..$sha" | sed -n '1,3000p'
   echo '```'
   echo '</details>'
 } >>"$summary"
