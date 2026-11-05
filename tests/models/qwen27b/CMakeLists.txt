@@ -75,7 +75,8 @@ if (ENGINE_ENABLE_HIP)
   # The serving tier is one library now (RFC step 6); these tests keep naming
   # the models they drive directly.
   add_executable(inference_backend_gpu_test serving_test.cpp)
-  target_link_libraries(inference_backend_gpu_test PRIVATE gufo_serving)
+  target_link_libraries(inference_backend_gpu_test PRIVATE gufo_serving
+    gufo_qwen_hip gufo_qwen_text)
   add_executable(qwen_vision_serving_test ../qwen/vision_serving_test.cpp)
   target_link_libraries(qwen_vision_serving_test PRIVATE gufo_serving
     gufo_qwen_hip gufo_qwen38_flash_next_hip gufo_qwen_vision)

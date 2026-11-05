@@ -512,6 +512,8 @@ if (ENGINE_ENABLE_HIP AND GUFO_BUILD_TOOLS)
     ${GUFO_QWEN_LIBRARIES}
     gufo_qwen_kernels
     ${ROCTX_LIBRARY})
+  target_sources(gufo-kernel-bench PRIVATE src/cli/extension_diagnostics.cpp)
+  gufo_target_extensions(gufo-kernel-bench EXTENSIONS)
 
   add_executable(tune_hipblaslt tools/bench/tune_hipblaslt.cpp)
   target_link_libraries(tune_hipblaslt PRIVATE gufo_core gufo_qwen_kernels
@@ -686,13 +688,15 @@ function(gufo_qwen_image_21_register_tests)
       ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/weights_test.cpp)
     target_compile_definitions(qwen_image_21_weight_upload_test PRIVATE
       GUFO_TEST_WEIGHT_UPLOAD=1)
-    target_link_libraries(qwen_image_21_weight_upload_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    target_link_libraries(qwen_image_21_weight_upload_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip
+      hip::host roc::hipblas)
     add_test(NAME qwen_image_21_weight_upload_test COMMAND qwen_image_21_weight_upload_test)
     set_tests_properties(qwen_image_21_weight_upload_test PROPERTIES
       LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
     add_executable(qwen_image_21_kernel_test
       ${PROJECT_SOURCE_DIR}/tests/models/qwen_image_21/kernel_test.hip)
-    target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip)
+    target_link_libraries(qwen_image_21_kernel_test PRIVATE gufo_qwen_image_21 gufo_qwen_image_21_hip
+      hip::host roc::hipblas)
     add_test(NAME qwen_image_21_kernel_test COMMAND qwen_image_21_kernel_test)
     set_tests_properties(qwen_image_21_kernel_test PROPERTIES
       LABELS "gpu;qwen-image" SKIP_RETURN_CODE 77)
@@ -1193,7 +1197,10 @@ endfunction()
     tests/diagnostics/allocation_benchmark_test.cpp)
   target_compile_definitions(allocation_benchmark_test PRIVATE
     TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diagnostics")
-  target_link_libraries(allocation_benchmark_test PRIVATE gufo_diagnostics)
+  # gufo_diagnostics reports the built extensions, which only an executable defines.
+  target_sources(allocation_benchmark_test PRIVATE src/cli/extension_diagnostics.cpp)
+  target_link_libraries(allocation_benchmark_test PRIVATE gufo_diagnostics gufo_core)
+  gufo_target_extensions(allocation_benchmark_test EXTENSIONS)
   add_test(NAME allocation_benchmark_test COMMAND allocation_benchmark_test)
   set_tests_properties(allocation_benchmark_test PROPERTIES
     LABELS "gpu;hip;gfx1151;diagnostics;allocation;opt-c091")

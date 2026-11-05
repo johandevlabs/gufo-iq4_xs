@@ -87,6 +87,16 @@ gpu_tests() {
   # them from Python find it too.
   local flags
   flags=$(bash "$TOOLCHAIN/rocm10-link.sh")
+  # Some host C++ files include hipBLAS, hipBLASLt or rocBLAS headers without
+  # linking those libraries. ROCm installs keep every header under one prefix,
+  # but the pinned toolchain keeps each library in its own nix store path.
+  local incs="-isystem $TOOLCHAIN/rocm10-headers/include" p d
+  for p in clr-10.1 hipblas-10.1 hipblas-common-10.1 hipblaslt-gfx1151-10.1 rocblas-gfx1151-10.1 \
+           rocsolver-gfx1151-10.1 rocm-core-10.1 rocprofiler-register-10.1; do
+    for d in /nix/store/*-"$p"; do
+      [ -d "$d/include" ] && incs="$incs -isystem $d/include"
+    done
+  done
   if [ $venv_rc != 0 ]; then
     fail "test Python setup"
     return
@@ -94,7 +104,7 @@ gpu_tests() {
   if ! BUILD_TESTING=ON GUFO_BUILD_TOOLS=ON bash "$TOOLCHAIN/configure-rocm10.sh" "$src" nightly-gpu \
        > "$out/logs/configure.log" 2>&1 ||
      ! cmake -S "$src" -B "$tree" -DCMAKE_EXE_LINKER_FLAGS="$flags" -DCMAKE_SHARED_LINKER_FLAGS="$flags" \
-         -DPython3_EXECUTABLE="$venv/bin/python" \
+         -DPython3_EXECUTABLE="$venv/bin/python" -DCMAKE_CXX_FLAGS="$incs" \
        >> "$out/logs/configure.log" 2>&1 ||
      ! cmake --build "$tree" -j"$(nproc)" > "$out/logs/build.log" 2>&1; then
     fail "GPU test build"
