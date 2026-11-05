@@ -81,6 +81,13 @@ rm -rf "release/$name" "$work"
 # Notes: the promotion PR's description, which lists what reached main.
 pr=$(gh api "repos/$REPO/commits/$SHA/pulls" \
   --jq '[.[] | select(.base.ref == "main" and .merged_at != null)][0] // empty')
+# A rebase promotion replaces main with staging's head, which GitHub links
+# only to the staging PR that introduced it. The promotion PR still shows as
+# merged with that commit.
+if [ -z "$pr" ]; then
+  pr=$(gh api "repos/$REPO/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=20" \
+    --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"$SHA\")][0] // empty")
+fi
 {
   echo "Strycast on Gufo v$gufo, commit \`${SHA:0:8}\`."
   echo
