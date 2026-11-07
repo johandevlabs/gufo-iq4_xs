@@ -17,6 +17,19 @@ int main() {
 
   auto fp32_kv = production;
   fp32_kv.kv_cache_storage = QwenKvCacheStorage::kFp32;
+  auto q8_kv = production;
+  q8_kv.kv_cache_storage = QwenKvCacheStorage::kQ8;
+  assert(q8_kv.UsesQ8AttentionKv() && !q8_kv.UsesFp16AttentionKv());
+  assert(q8_kv.UsesTokenMajorAttentionKv() &&
+         production.UsesTokenMajorAttentionKv() &&
+         !fp32_kv.UsesTokenMajorAttentionKv());
+  assert(q8_kv.Fingerprint() != production.Fingerprint());
+  assert(q8_kv.Fingerprint() != fp32_kv.Fingerprint());
+  // One 256-wide head: FP32 1024 bytes, FP16 512, 8-bit 256 values + 8 scales.
+  assert(QwenKvRowBytes(QwenKvCacheStorage::kFp32, 256) == 1024);
+  assert(QwenKvRowBytes(QwenKvCacheStorage::kFp16, 256) == 512);
+  assert(QwenKvRowBytes(QwenKvCacheStorage::kQ8, 256) == 272);
+  assert(QwenKvRowBytes(QwenKvCacheStorage::kQ8, 512) == 544);
   auto bf16_recurrent = production;
   bf16_recurrent.recurrent_state_storage = QwenRecurrentStateStorage::kBf16;
   auto separate_qk_norm = production;

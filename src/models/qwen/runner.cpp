@@ -693,7 +693,8 @@ public:
       std::string artifact_fingerprint = {},
       std::string draft_artifact_fingerprint = {},
       std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model = nullptr,
-      std::size_t session_count = 1)
+      std::size_t session_count = 1,
+      hip::QwenKvCacheStorage kv_storage = hip::QwenKvCacheStorage::kFp16)
       : model_(std::move(model)),
         dflash_model_(std::move(dflash_model)),
         mtp_model_(std::move(mtp_model)),
@@ -701,7 +702,11 @@ public:
         speculative_options_(speculative_options),
         dflash_policy_(dflash_policy),
         session_count_(session_count),
-        execution_policy_(hip::QwenExecutionPolicy::Production()) {
+        execution_policy_([kv_storage] {
+          auto policy = hip::QwenExecutionPolicy::Production();
+          policy.kv_cache_storage = kv_storage;
+          return policy;
+        }()) {
     if (!artifact_fingerprint.empty()) {
       component_identity_ = QwenCompatibilityIdentity(
           artifact_fingerprint, draft_artifact_fingerprint, max_context_,
@@ -775,10 +780,10 @@ public:
     const bool speculative_enabled = DraftKind() != QwenDraftKind::kNone;
     return {
         .model_id = model_->GetConfig().model_name,
-        .state_abi = std::string(QwenStateAbi(
-                         DraftKind(), execution_policy_.UsesFp16AttentionKv(),
-                         execution_policy_.UsesBf16RecurrentState())) +
-                     "-component-v2",
+        .state_abi =
+            QwenStateAbi(DraftKind(), execution_policy_.kv_cache_storage,
+                         execution_policy_.UsesBf16RecurrentState()) +
+            "-component-v2",
         .max_context = max_context_,
         .capabilities =
             TextRunnerCapabilities{
@@ -1356,6 +1361,15 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     }
     reader = std::shared_ptr<const core::GgufReader>(std::move(reader_owner));
   }
+  if (!options.kv_cache.empty() && options.kv_cache != "f16" &&
+      options.kv_cache != "q8_0") {
+    if (error)
+      *error = "--kv-cache must be f16 or q8_0";
+    return nullptr;
+  }
+  const auto kv_storage = options.kv_cache == "q8_0"
+                              ? hip::QwenKvCacheStorage::kQ8
+                              : hip::QwenKvCacheStorage::kFp16;
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
     // The Qwen3.8-27B and Ornith-1.5-122B (qwen35moe) trunks take the shared
@@ -1401,6 +1415,17 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     if (error)
       *error = "HTTP context exceeds the loaded Qwen model context";
     return nullptr;
+  }
+  if (kv_storage == hip::QwenKvCacheStorage::kQ8) {
+    // The 8-bit kernels cover 256-wide heads, eight query heads per KV head
+    // and a 64-wide rotary span: Qwen3.6-35B-A3B.
+    const auto& config = model->GetConfig();
+    if (config.head_dim != 256 || config.rotary_dim != 64 ||
+        config.num_attention_heads != 8 * config.num_key_value_heads) {
+      if (error)
+        *error = "--kv-cache q8_0 supports Qwen3.6-35B-A3B only";
+      return nullptr;
+    }
   }
   if (options.speculative.backend == ext::TextSpeculativeBackend::kDSpark) {
     if (error)
@@ -1537,7 +1562,7 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
   auto runner = std::make_shared<QwenTextRunner>(
       std::move(model), max_context, std::move(dflash_model),
       speculative_options, dflash_policy, model_fingerprint, draft_fingerprint,
-      std::move(mtp_model), sessions);
+      std::move(mtp_model), sessions, kv_storage);
   // Each session's wide copies need a larger SSM replay ring (ResourceClaim).
   // Narrow the width until the configured sessions fit, rather than refusing
   // a session count the ordinary verifier width fits.

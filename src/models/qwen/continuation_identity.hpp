@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -56,6 +57,20 @@ inline constexpr std::string_view QwenStateAbi(
   return QwenStateAbi(
       speculative ? QwenDraftKind::kDFlash : QwenDraftKind::kNone,
       fp16_attention_kv, bf16_recurrent_state);
+}
+
+/// State ABI for any KV storage. The 8-bit cache shares the FP16 layout and
+/// ABI except for the element format, so its ABI names "q8_0-kv" in place of
+/// "fp16-kv".
+inline std::string QwenStateAbi(QwenDraftKind draft,
+                                hip::QwenKvCacheStorage kv_storage,
+                                bool bf16_recurrent_state) {
+  std::string abi(QwenStateAbi(draft,
+                               kv_storage != hip::QwenKvCacheStorage::kFp32,
+                               bf16_recurrent_state));
+  if (kv_storage == hip::QwenKvCacheStorage::kQ8)
+    abi.replace(abi.find("fp16-kv"), 7, "q8_0-kv");
+  return abi;
 }
 
 bool IsSha256Hex(std::string_view value) noexcept;

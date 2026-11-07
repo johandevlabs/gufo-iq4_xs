@@ -47,6 +47,7 @@ Text serving defaults match llama.cpp for context and generation length:
 | --- | --- |
 | `--context` | `0`: native context from model metadata, per session |
 | `--enable-yarn` | Off; Flash-Next requires it for `--context` above 262144 |
+| `--kv-cache` | `f16`; Qwen3.6 35B-A3B also takes `q8_0` ([guide](models/qwen3.6-35b-a3b/README.md#8-bit-kv-cache)) |
 | `--max-tokens` | `-1`: until EOS or remaining context is exhausted |
 | `--sessions` | `1` |
 | Thinking / reasoning effort | Enabled; Qwen `xhigh`, DeepSeek `high` |

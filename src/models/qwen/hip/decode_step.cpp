@@ -210,13 +210,11 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
             static_cast<const float*>(layer.attn_k_norm.data),
             attention_scratch.q.data(), attention_scratch.k.data(),
             arena.d_kv_cache, OffsetIfPresent(arena.d_kv_cache, total_k),
-            arena.d_attention_kv_f16,
-            OffsetIfPresent(
-                static_cast<std::uint16_t*>(arena.d_attention_kv_f16), total_k),
-            attn_layer_idx, d_in_pos, arena.GetMaxContext(),
-            config.num_attention_heads, config.num_key_value_heads,
-            config.head_dim, config.rotary_dim, config.rope_theta, 1e-6F,
-            arena.stream, rope);
+            arena.d_attention_kv_f16, arena.AttentionVPlane(), attn_layer_idx,
+            d_in_pos, arena.GetMaxContext(), config.num_attention_heads,
+            config.num_key_value_heads, config.head_dim, config.rotary_dim,
+            config.rope_theta, 1e-6F, arena.stream, rope,
+            arena.UsesQ8AttentionKv());
       } else {
         if (!layer.attn_q_norm.empty()) {
           LaunchPerHeadRMSNorm(
@@ -240,31 +238,28 @@ void ExecuteDecodeStep(QwenGpuArena& arena,
                    config.rope_theta, arena.stream, rope);
       }
 
-      // Softmax Attention + Gating
-      if (use_split_k_decode) {
+      // Softmax Attention + Gating. The 8-bit cache has only the split-K
+      // matrix-core route.
+      if (use_split_k_decode || arena.UsesQ8AttentionKv()) {
         LaunchAttention(
             attention_scratch.q.data(), attention_scratch.k.data(),
             attention_scratch.v.data(), ssm_scratch.gate.data(),
             arena.d_kv_cache, OffsetIfPresent(arena.d_kv_cache, total_k),
-            arena.d_attention_kv_f16,
-            OffsetIfPresent(
-                static_cast<std::uint16_t*>(arena.d_attention_kv_f16), total_k),
+            arena.d_attention_kv_f16, arena.AttentionVPlane(),
             ssm_scratch.out.data(), attn_layer_idx, pos, arena.GetMaxContext(),
             config.num_attention_heads, config.num_key_value_heads,
             config.head_dim, arena.stream, attention_scratch.split_k.data(),
-            fused_qknorm_rope_kv);
+            fused_qknorm_rope_kv, arena.UsesQ8AttentionKv());
       } else {
-        LaunchAttention(
-            attention_scratch.q.data(), attention_scratch.k.data(),
-            attention_scratch.v.data(), ssm_scratch.gate.data(),
-            arena.d_kv_cache, OffsetIfPresent(arena.d_kv_cache, total_k),
-            arena.d_attention_kv_f16,
-            OffsetIfPresent(
-                static_cast<std::uint16_t*>(arena.d_attention_kv_f16), total_k),
-            ssm_scratch.out.data(), attn_layer_idx, d_in_pos,
-            arena.GetMaxContext(), config.num_attention_heads,
-            config.num_key_value_heads, config.head_dim, arena.stream,
-            fused_qknorm_rope_kv);
+        LaunchAttention(attention_scratch.q.data(), attention_scratch.k.data(),
+                        attention_scratch.v.data(), ssm_scratch.gate.data(),
+                        arena.d_kv_cache,
+                        OffsetIfPresent(arena.d_kv_cache, total_k),
+                        arena.d_attention_kv_f16, arena.AttentionVPlane(),
+                        ssm_scratch.out.data(), attn_layer_idx, d_in_pos,
+                        arena.GetMaxContext(), config.num_attention_heads,
+                        config.num_key_value_heads, config.head_dim,
+                        arena.stream, fused_qknorm_rope_kv);
       }
 
       // Output projection, routed through the quant_gemm module (HIP

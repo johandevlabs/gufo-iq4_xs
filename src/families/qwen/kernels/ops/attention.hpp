@@ -29,6 +29,9 @@ void LaunchFusedQKVProjections(const void* q_w, core::GgmlType q_type,
 /// fallback supplies FP32 K/V. Tests may supply both representations. When
 /// skip_kv_write is true the selected KV cache is assumed already written
 /// (e.g. by the fused QK norm+RoPE kernel, opt-c010-qk-rope-kv).
+/// With kv_q8, k_cache_f16 and v_cache_f16 are the 8-bit planes (kv_q8.hpp);
+/// that route needs split-K scratch and eight query heads per KV head, and
+/// throws otherwise.
 void LaunchAttention(const float* q, const float* k, const float* v,
                      const float* gate, float* k_cache, float* v_cache,
                      void* k_cache_f16, void* v_cache_f16, float* out_context,
@@ -37,7 +40,7 @@ void LaunchAttention(const float* q, const float* k, const float* v,
                      std::uint32_t num_kv_heads, std::uint32_t head_dim,
                      hipStream_t stream = nullptr,
                      float* split_k_scratch = nullptr,
-                     bool skip_kv_write = false);
+                     bool skip_kv_write = false, bool kv_q8 = false);
 
 /// Merges split-K partials (running max, sum and unnormalized output per
 /// partition) into the gated attention context of `rows` positions.
@@ -51,25 +54,28 @@ void LaunchSplitKAttentionReduce(const float* gate, const float* scratch,
 /// consecutive rows start at `start_pos`; each row's result does not depend
 /// on the others. Returns false when the shape, the scratch or the rows'
 /// partitioning does not fit, so the caller can use the scalar route.
+/// kv_q8 reads the 8-bit cache (kv_q8.hpp) instead.
 [[nodiscard]] bool LaunchQwenWmmaDecodeAttention(
     const float* q, const float* gate, const void* k_cache_f16,
     const void* v_cache_f16, float* out_context, std::uint32_t layer_idx,
     std::uint32_t start_pos, std::size_t positions, std::uint32_t max_context,
     std::uint32_t num_heads, std::uint32_t num_kv_heads, std::uint32_t head_dim,
-    hipStream_t stream, std::span<float> scratch);
+    hipStream_t stream, std::span<float> scratch, bool kv_q8 = false);
 
 /// Runs consecutive verification queries with scalar decode arithmetic.
 /// The selected KV cache must already contain all rows. Each row sees only
 /// its causal prefix. Scratch for batch_size rows batches split-K too; a
 /// smaller span retains the scalar split-K fallback. Without scratch,
 /// supported GQA heads use bounded online attention at every causal depth.
+/// kv_q8 reads the 8-bit cache and needs at least one row of scratch.
 void LaunchCausalDecodeAttention(
     const float* q, const float* gate, float* k_cache, float* v_cache,
     void* k_cache_f16, void* v_cache_f16, float* out_context,
     std::uint32_t layer_idx, std::uint32_t start_pos, std::size_t batch_size,
     std::uint32_t max_context, std::uint32_t num_heads,
     std::uint32_t num_kv_heads, std::uint32_t head_dim,
-    hipStream_t stream = nullptr, std::span<float> split_k_scratch = {});
+    hipStream_t stream = nullptr, std::span<float> split_k_scratch = {},
+    bool kv_q8 = false);
 
 /// Computes Grouped-Query Softmax Attention reading position from device memory
 void LaunchAttention(const float* q, const float* k, const float* v,
@@ -83,7 +89,8 @@ void LaunchAttention(const float* q, const float* k, const float* v,
 /// Fuses per-head Q/K RMSNorm, RoPE, and the KV-cache write for a single decode
 /// token into one launch (opt-c010-qk-rope-kv). Writes the normed+roped Q into
 /// q_out and the normed+roped K into k_out, and K/V into every non-null cache
-/// representation supplied by the caller.
+/// representation supplied by the caller. With kv_q8 the half-precision
+/// pointers are 8-bit planes (kv_q8.hpp, 256-wide heads only).
 void LaunchFusedQKNormRoPEKvWrite(
     const float* q, const float* k, const float* v, const float* q_weight,
     const float* k_weight, float* q_out, float* k_out, float* k_cache,
@@ -93,7 +100,7 @@ void LaunchFusedQKNormRoPEKvWrite(
     std::uint32_t num_kv_heads, std::uint32_t head_dim,
     std::uint32_t rotary_dim, float rope_theta, float eps = 1e-6F,
     hipStream_t stream = nullptr,
-    const models::qwen::vision::DeviceRope* rope = nullptr);
+    const models::qwen::vision::DeviceRope* rope = nullptr, bool kv_q8 = false);
 
 /// Batched Causal Attention for B tokens with KV Cache. When skip_kv_write is
 /// true the KV cache is assumed already written by the fused prefill kernel
@@ -115,7 +122,8 @@ void LaunchBatchedAttention(const float* q, const float* k, const float* v,
 /// Batched fuse of per-head Q/K RMSNorm, RoPE, and the KV-cache write across B
 /// tokens into one launch (opt-c010-qk-rope-kv). Writes the normed+roped Q into
 /// q_out and the normed+roped K into k_out, and K/V into every non-null cache
-/// representation supplied by the caller.
+/// representation supplied by the caller. With kv_q8 the half-precision
+/// pointers are 8-bit planes (kv_q8.hpp; 256-wide heads, 64-wide rotary span).
 void LaunchBatchedFusedQKNormRoPEKvWrite(
     const float* q, const float* k, const float* v, const float* q_weight,
     const float* k_weight, float* q_out, float* k_out, float* k_cache,
@@ -125,7 +133,7 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     std::uint32_t num_kv_heads, std::uint32_t head_dim,
     std::uint32_t rotary_dim, float rope_theta, float eps = 1e-6F,
     hipStream_t stream = nullptr,
-    const models::qwen::vision::DeviceRope* rope = nullptr);
+    const models::qwen::vision::DeviceRope* rope = nullptr, bool kv_q8 = false);
 
 /// Qwen3.8-specific causal GQA tile for gfx1151. The kernel processes 16 query
 /// positions and two query heads per block while reusing one FP16 K/V tile.
@@ -155,6 +163,8 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
 /// must be a multiple of 32 below batch_size. Skipped output/LSE rows are
 /// untouched, and retained rows use the full call's original arithmetic.
 /// Returns false when the shape is unsupported, so the caller can fall back.
+/// kv_q8 reads an 8-bit cache that the caller already wrote (skip_kv_write
+/// must be set); it reads the cache directly and ignores the workspaces.
 [[nodiscard]] bool LaunchQwenWmmaAttention(
     const float* q, const float* k, const float* v, const float* gate,
     float* k_cache, float* v_cache, void* k_cache_f16, void* v_cache_f16,
@@ -164,7 +174,8 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     hipStream_t stream = nullptr, float* lse_out = nullptr,
     std::uint32_t key_begin = 0, bool skip_kv_write = false,
     std::span<float> packed_k_workspace = {},
-    std::span<float> packed_v_workspace = {}, std::size_t first_query = 0);
+    std::span<float> packed_v_workspace = {}, std::size_t first_query = 0,
+    bool kv_q8 = false);
 
 /// Large-batch causal attention using float32 QK/PV GEMMs and one reusable
 /// [batch, context] score buffer.

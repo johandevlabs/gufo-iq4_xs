@@ -21,7 +21,7 @@ void Reject(F&& fn) {
   }
   Require(rejected, "invalid geometry/frontier was accepted");
 }
-void Check(bool fp16, bool bf16) {
+void Check(hip::QwenKvCacheStorage kv, bool bf16) {
   gufo::core::ModelConfig c;
   c.num_layers = 64;
   c.hidden_size = 5120;
@@ -31,8 +31,7 @@ void Check(bool fp16, bool bf16) {
   c.ssm_time_step_rank = 48;
   c.ssm_inner_size = 6144;
   hip::QwenExecutionPolicy policy;
-  policy.kv_cache_storage =
-      fp16 ? hip::QwenKvCacheStorage::kFp16 : hip::QwenKvCacheStorage::kFp32;
+  policy.kv_cache_storage = kv;
   policy.recurrent_state_storage = bf16 ? hip::QwenRecurrentStateStorage::kBf16
                                         : hip::QwenRecurrentStateStorage::kFp32;
   qwen::ContinuationLayout layout(c, policy, 100000);
@@ -43,8 +42,14 @@ void Check(bool fp16, bool bf16) {
   const std::size_t fixed =
       48 * (163840 + 786432 * (bf16 ? 2 : 4)) + 2 * 993280 + 64 + 96;
   Require(layout.PrivateBytes() == fixed, "incorrect private state claim");
-  Require(layout.BytesPerToken() == (fp16 ? 65536 : 131072),
-          "incorrect KV stride");
+  // 16 attention layers x K and V x 4 KV heads x 256 values.
+  const std::size_t kv_stride = kv == hip::QwenKvCacheStorage::kFp16 ? 65536
+                                : kv == hip::QwenKvCacheStorage::kQ8 ? 34816
+                                                                     : 131072;
+  const std::uint32_t kv_version = kv == hip::QwenKvCacheStorage::kFp16 ? 1U
+                                   : kv == hip::QwenKvCacheStorage::kQ8 ? 3U
+                                                                        : 2U;
+  Require(layout.BytesPerToken() == kv_stride, "incorrect KV stride");
   for (auto position : {0U, 32768U, 100000U}) {
     const auto frontiers = layout.Positions(position);
     for (std::size_t i = 0; i < frontiers.size(); ++i) {
@@ -54,7 +59,7 @@ void Check(bool fp16, bool bf16) {
               "component boundary differs");
       if (part.part == qwen::ContinuationPart::kKey ||
           part.part == qwen::ContinuationPart::kValue) {
-        Require(part.descriptor.layout_version == (fp16 ? 1U : 2U),
+        Require(part.descriptor.layout_version == kv_version,
                 "KV layouts alias");
         Require(part.descriptor.rows_per_chunk == 256,
                 "unbounded chunk geometry");
@@ -69,9 +74,11 @@ void Check(bool fp16, bool bf16) {
 }  // namespace
 int main() {
   try {
-    for (bool fp16 : {false, true})
+    for (auto kv :
+         {hip::QwenKvCacheStorage::kFp32, hip::QwenKvCacheStorage::kFp16,
+          hip::QwenKvCacheStorage::kQ8})
       for (bool bf16 : {false, true})
-        Check(fp16, bf16);
+        Check(kv, bf16);
     std::cout << "Qwen continuation geometry: PASS\n";
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';

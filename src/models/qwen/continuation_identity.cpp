@@ -53,8 +53,8 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
     throw std::invalid_argument(
         "Qwen MTP disk cache requires a draft artifact fingerprint");
   }
-  const std::string_view state_abi =
-      QwenStateAbi(draft_kind, execution_policy.UsesFp16AttentionKv(),
+  const std::string state_abi =
+      QwenStateAbi(draft_kind, execution_policy.kv_cache_storage,
                    execution_policy.UsesBf16RecurrentState());
   std::ostringstream identity;
   identity << "schema=gufo-text-continuation-v2\n"
@@ -82,7 +82,10 @@ std::vector<std::uint8_t> QwenCompatibilityIdentity(
            << "attention_split_count="
            << hip::detail::kSplitKDecodeAttentionMaxSplits << '\n'
            << "kv_storage="
-           << (execution_policy.UsesFp16AttentionKv() ? "fp16" : "fp32") << '\n'
+           << (execution_policy.UsesFp16AttentionKv() ? "fp16"
+               : execution_policy.UsesQ8AttentionKv() ? "q8_0"
+                                                      : "fp32")
+           << '\n'
            << "recurrent_storage="
            << (execution_policy.UsesBf16RecurrentState() ? "bf16" : "fp32")
            << '\n'

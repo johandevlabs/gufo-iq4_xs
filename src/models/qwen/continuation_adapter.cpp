@@ -918,9 +918,10 @@ std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
     return {};
   if (first >= end || end > state.position)
     throw std::invalid_argument("invalid Qwen borrowed range");
-  // FP32 planes are head-major, so a token range is not contiguous. Its
+  // FP32 planes are head-major, so a token range is not contiguous (FP16 and
+  // 8-bit planes are token-major). Its
   // canonical host representation still goes through TransferRows.
-  if (!policy_.UsesFp16AttentionKv())
+  if (!policy_.UsesTokenMajorAttentionKv())
     return {};
   Check(hipStreamSynchronize(state.executor->arena_.stream));
   const auto& c = model_->GetConfig();
@@ -972,7 +973,7 @@ cache::Completion ContinuationAdapter::TransferRows(
                                 ? c.FullAttentionLayerCount()
                                 : 0;
   auto* native =
-      static_cast<std::byte*>(policy_.UsesFp16AttentionKv()
+      static_cast<std::byte*>(policy_.UsesTokenMajorAttentionKv()
                                   ? arena.d_attention_kv_f16
                                   : static_cast<void*>(arena.d_kv_cache)) +
       (plane + layer) * context_ * row;
@@ -980,7 +981,7 @@ cache::Completion ContinuationAdapter::TransferRows(
     if (first == end)
       return;
     const auto direction = load ? hipMemcpyDefault : hipMemcpyDeviceToHost;
-    if (policy_.UsesFp16AttentionKv()) {
+    if (policy_.UsesTokenMajorAttentionKv()) {
       auto* device = native + first * row;
       Check(load ? hip::CopySnapshotToDevice(device, bytes, (end - first) * row,
                                              transfer.Native())

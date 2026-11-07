@@ -426,6 +426,26 @@ public:
     return static_cast<std::size_t>(config_.FullAttentionLayerCount()) *
            config_.num_key_value_heads * max_context_ * config_.head_dim;
   }
+  [[nodiscard]] bool UsesQ8AttentionKv() const noexcept {
+    return policy_.UsesQ8AttentionKv();
+  }
+  /// Bytes of one K or V plane of the token-major cache, FP16 or 8-bit.
+  [[nodiscard]] std::size_t GetAttentionKvPlaneBytes() const noexcept {
+    return static_cast<std::size_t>(config_.FullAttentionLayerCount()) *
+           max_context_ *
+           QwenKvRowBytes(
+               policy_.kv_cache_storage,
+               static_cast<std::size_t>(config_.num_key_value_heads) *
+                   config_.head_dim);
+  }
+  /// V plane of the token-major cache: it follows the K plane at
+  /// d_attention_kv_f16. nullptr when the FP32 reference cache is used.
+  [[nodiscard]] void* AttentionVPlane() const noexcept {
+    return d_attention_kv_f16 == nullptr
+               ? nullptr
+               : static_cast<std::uint8_t*>(d_attention_kv_f16) +
+                     GetAttentionKvPlaneBytes();
+  }
   [[nodiscard]] QwenRecurrentStateStorage GetRecurrentStateStorage()
       const noexcept {
     return policy_.recurrent_state_storage;

@@ -23,7 +23,8 @@ ContinuationLayout::ContinuationLayout(const core::ModelConfig& c,
     : context_(context) {
   if (!c.IsValidQwen() || !context || context > c.context_length ||
       (policy.kv_cache_storage != hip::QwenKvCacheStorage::kFp16 &&
-       policy.kv_cache_storage != hip::QwenKvCacheStorage::kFp32) ||
+       policy.kv_cache_storage != hip::QwenKvCacheStorage::kFp32 &&
+       policy.kv_cache_storage != hip::QwenKvCacheStorage::kQ8) ||
       (policy.recurrent_state_storage !=
            hip::QwenRecurrentStateStorage::kFp32 &&
        policy.recurrent_state_storage != hip::QwenRecurrentStateStorage::kBf16))
@@ -50,8 +51,12 @@ ContinuationLayout::ContinuationLayout(const core::ModelConfig& c,
   };
   add(ContinuationPart::kMetadata, 0, kContinuationMetadataBytes);
   add(ContinuationPart::kLogits, 0, Product({c.vocab_size, sizeof(float)}));
-  const auto kv_row = Product({c.num_key_value_heads, c.head_dim,
-                               policy.UsesFp16AttentionKv() ? 2U : 4U});
+  const auto kv_row = hip::QwenKvRowBytes(
+      policy.kv_cache_storage, Product({c.num_key_value_heads, c.head_dim}));
+  // Component versions: 1 FP16, 2 FP32, 3 8-bit.
+  const std::uint32_t kv_version = policy.UsesFp16AttentionKv() ? 1U
+                                   : policy.UsesQ8AttentionKv() ? 3U
+                                                                : 2U;
   const auto key_width = Product({2, c.ssm_group_count, c.ssm_state_size});
   if (key_width > std::numeric_limits<std::uint32_t>::max() - c.ssm_inner_size)
     throw std::invalid_argument(
@@ -63,10 +68,8 @@ ContinuationLayout::ContinuationLayout(const core::ModelConfig& c,
        hip::QwenRecurrentStateElementBytes(policy.recurrent_state_storage)});
   for (std::uint32_t layer = 0; layer < c.num_layers; ++layer) {
     if ((layer + 1) % c.full_attention_interval == 0) {
-      add(ContinuationPart::kKey, kv_row, 0, layer,
-          policy.UsesFp16AttentionKv() ? 1 : 2);
-      add(ContinuationPart::kValue, kv_row, 0, layer,
-          policy.UsesFp16AttentionKv() ? 1 : 2);
+      add(ContinuationPart::kKey, kv_row, 0, layer, kv_version);
+      add(ContinuationPart::kValue, kv_row, 0, layer, kv_version);
     } else {
       add(ContinuationPart::kConvolution, 0, conv, layer);
       add(ContinuationPart::kRecurrent, 0, recurrent, layer,

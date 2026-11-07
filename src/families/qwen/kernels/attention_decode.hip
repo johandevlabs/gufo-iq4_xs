@@ -6,14 +6,33 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 #include <gufo/ext/experimental/dispatch_telemetry.hpp>
 #include "src/families/qwen/hip_common/attention_policy.hpp"
 #include "src/families/qwen/kernels/attention_decode_split_k.hpp"
 #include "src/families/qwen/kernels/attention_decode_verify_wave64.hpp"
+#include "src/families/qwen/kernels/kv_q8.hpp"
 #include "src/families/qwen/kernels/ops/attention.hpp"
 
 namespace gufo::hip {
+
+// One 256-thread block per KV head: wave w quantizes block w of K and of V.
+__global__ void WriteQ8KVCacheKernel(const float* __restrict__ k,
+                                     const float* __restrict__ v,
+                                     std::uint8_t* __restrict__ k_cache,
+                                     std::uint8_t* __restrict__ v_cache,
+                                     std::uint32_t layer_idx, std::uint32_t pos,
+                                     std::uint32_t max_context,
+                                     std::uint32_t num_kv_heads) {
+  const std::uint32_t kv_h = blockIdx.x;
+  const std::uint32_t tid = threadIdx.x;
+  const std::size_t row =
+      kv_q8::RowOffset(layer_idx, pos, kv_h, max_context, num_kv_heads);
+  const std::size_t src = static_cast<std::size_t>(kv_h) * kv_q8::kHeadDim;
+  kv_q8::StoreBlock(k[src + tid], tid % 32u, k_cache + row, tid / 32u);
+  kv_q8::StoreBlock(v[src + tid], tid % 32u, v_cache + row, tid / 32u);
+}
 
 __global__ void WriteKVCacheKernel(
     const float* __restrict__ k, const float* __restrict__ v,
@@ -862,7 +881,30 @@ void LaunchAttention(const float* q, const float* k, const float* v,
                      std::uint32_t max_context, std::uint32_t num_heads,
                      std::uint32_t num_kv_heads, std::uint32_t head_dim,
                      hipStream_t stream, float* split_k_scratch,
-                     bool skip_kv_write) {
+                     bool skip_kv_write, bool kv_q8) {
+  // The 8-bit cache has only the matrix-core route, at every length, so a
+  // verification row and the same position decoded alone stay identical.
+  if (kv_q8) {
+    if (split_k_scratch == nullptr || head_dim != kv_q8::kHeadDim)
+      throw std::invalid_argument(
+          "8-bit KV attention needs 256-wide heads and split-K scratch");
+    if (!skip_kv_write) {
+      WriteQ8KVCacheKernel<<<num_kv_heads, kv_q8::kHeadDim, 0, stream>>>(
+          k, v, static_cast<std::uint8_t*>(k_cache_f16),
+          static_cast<std::uint8_t*>(v_cache_f16), layer_idx, pos, max_context,
+          num_kv_heads);
+    }
+    detail::EmitAttentionDispatch("decode_wmma_q8", "");
+    if (!LaunchQwenWmmaDecodeAttention(
+            q, gate, k_cache_f16, v_cache_f16, out_context, layer_idx, pos, 1,
+            max_context, num_heads, num_kv_heads, head_dim, stream,
+            {split_k_scratch,
+             detail::DecodeAttentionScratchElements(num_heads, head_dim)},
+            true))
+      throw std::invalid_argument(
+          "8-bit KV attention supports eight query heads per KV head");
+    return;
+  }
   // 1. Write K and V into every non-null selected KV representation across all
   // num_kv_heads. May be skipped when a fused kernel already wrote the cache
   // (opt-c010-qk-rope-kv).
@@ -955,11 +997,31 @@ void LaunchCausalDecodeAttention(
     std::uint32_t layer_idx, std::uint32_t start_pos, std::size_t batch_size,
     std::uint32_t max_context, std::uint32_t num_heads,
     std::uint32_t num_kv_heads, std::uint32_t head_dim, hipStream_t stream,
-    std::span<float> scratch) {
+    std::span<float> scratch, bool kv_q8) {
   const std::size_t row_scratch =
       detail::DecodeAttentionScratchElements(num_heads, head_dim);
   float* const split_k_scratch =
       scratch.size() >= row_scratch ? scratch.data() : nullptr;
+  if (kv_q8) {
+    if (split_k_scratch != nullptr && scratch.size() / batch_size >= row_scratch &&
+        LaunchQwenWmmaDecodeAttention(q, gate, k_cache_f16, v_cache_f16,
+                                      out_context, layer_idx, start_pos,
+                                      batch_size, max_context, num_heads,
+                                      num_kv_heads, head_dim, stream, scratch,
+                                      true))
+      return;
+    const std::size_t width = static_cast<std::size_t>(num_heads) * head_dim;
+    for (std::size_t row = 0; row < batch_size; ++row) {
+      LaunchAttention(q + row * width, nullptr, nullptr,
+                      gate == nullptr ? nullptr : gate + row * width, nullptr,
+                      nullptr, k_cache_f16, v_cache_f16,
+                      out_context + row * width, layer_idx,
+                      start_pos + static_cast<std::uint32_t>(row), max_context,
+                      num_heads, num_kv_heads, head_dim, stream,
+                      split_k_scratch, true, true);
+    }
+    return;
+  }
   if (batch_size > 1 && scratch.size() / batch_size >= row_scratch &&
       split_k_scratch != nullptr &&
       detail::IsSplitKDecodeAttentionSupported(

@@ -9,7 +9,25 @@ namespace gufo::hip {
 enum class QwenKvCacheStorage : std::uint8_t {
   kFp32,
   kFp16,
+  // Opt-in 8-bit cache (--kv-cache q8_0): FP16 order, 256 int8 values and 8
+  // FP16 scales per position and KV head (kernels/kv_q8.hpp).
+  kQ8,
 };
+
+/// Bytes that `values` consecutive KV values occupy: one FP32 head row, or
+/// one position of a token-major FP16 or 8-bit plane (whole 32-value blocks).
+[[nodiscard]] constexpr std::size_t QwenKvRowBytes(
+    QwenKvCacheStorage storage, std::size_t values) noexcept {
+  switch (storage) {
+    case QwenKvCacheStorage::kFp32:
+      return values * sizeof(float);
+    case QwenKvCacheStorage::kFp16:
+      return values * sizeof(std::uint16_t);
+    case QwenKvCacheStorage::kQ8:
+      return (values / 32) * (32 + sizeof(std::uint16_t));
+  }
+  return 0;
+}
 
 enum class QwenRecurrentStateStorage : std::uint8_t {
   kFp32,
@@ -43,6 +61,16 @@ struct QwenExecutionPolicy {
     return kv_cache_storage == QwenKvCacheStorage::kFp16;
   }
 
+  [[nodiscard]] constexpr bool UsesQ8AttentionKv() const noexcept {
+    return kv_cache_storage == QwenKvCacheStorage::kQ8;
+  }
+
+  /// FP16 and 8-bit caches share the token-major plane d_attention_kv_f16;
+  /// only the FP32 reference cache is head-major in d_kv_cache.
+  [[nodiscard]] constexpr bool UsesTokenMajorAttentionKv() const noexcept {
+    return kv_cache_storage != QwenKvCacheStorage::kFp32;
+  }
+
   [[nodiscard]] constexpr bool UsesBf16RecurrentState() const noexcept {
     return recurrent_state_storage == QwenRecurrentStateStorage::kBf16;
   }
@@ -51,7 +79,8 @@ struct QwenExecutionPolicy {
   [[nodiscard]] constexpr std::uint64_t Fingerprint() const noexcept {
     return (static_cast<std::uint64_t>(fuse_qk_norm_rope_kv) << 0U) |
            (static_cast<std::uint64_t>(UsesFp16AttentionKv()) << 8U) |
-           (static_cast<std::uint64_t>(UsesBf16RecurrentState()) << 9U);
+           (static_cast<std::uint64_t>(UsesBf16RecurrentState()) << 9U) |
+           (static_cast<std::uint64_t>(UsesQ8AttentionKv()) << 10U);
   }
 };
 

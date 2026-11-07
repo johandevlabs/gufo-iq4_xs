@@ -7,7 +7,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
+#include "src/families/qwen/kernels/kv_q8.hpp"
 #include "src/families/qwen/kernels/ops/attention.hpp"
 #include "src/families/qwen/kernels/ops/token.hpp"
 #include "src/families/qwen/hip_common/quant_ops.hpp"
@@ -185,7 +187,9 @@ __launch_bounds__(256, 4) __global__ void BatchedFusedQKNormRoPEKvWriteKernel(
 // lane p of registers 0 and 1, and the reduction is the same descending tree.
 // Every expression is unchanged, so the outputs are bit-identical; the block
 // needs no LDS and no barrier. The inputs may alias the outputs: a wave reads
-// its whole head before writing it.
+// its whole head before writing it. With kQ8 the half-precision pointers are
+// 8-bit planes, and register w is quantized as block w.
+template<bool kQ8>
 __launch_bounds__(32) __global__ void BatchedFusedQKNormRoPEKvWriteWaveKernel(
     const float* q, const float* k, const float* __restrict__ v,
     const float* __restrict__ q_weight, const float* __restrict__ k_weight,
@@ -288,6 +292,33 @@ __launch_bounds__(32) __global__ void BatchedFusedQKNormRoPEKvWriteWaveKernel(
       ((static_cast<std::size_t>(layer_idx) * max_context + cur_pos) *
        kv_total) +
       (static_cast<std::size_t>(kv_h) * kHeadDim);
+  if constexpr (kQ8) {
+    const std::size_t row =
+        kv_q8::RowOffset(layer_idx, cur_pos, kv_h, max_context, num_kv_heads);
+    auto* k_row = reinterpret_cast<std::uint8_t*>(k_cache_f16) + row;
+    auto* v_row = reinterpret_cast<std::uint8_t*>(v_cache_f16) + row;
+#pragma unroll
+    for (int w = 0; w < kWaves; ++w) {
+      const std::size_t i = (32 * w) + lane;
+      k_out[head_base + i] = values[w];
+      if (k_cache != nullptr) {
+        k_cache[cache_offset + i] = values[w];
+      }
+      kv_q8::StoreBlock(values[w], static_cast<std::uint32_t>(lane), k_row,
+                        static_cast<std::uint32_t>(w));
+    }
+#pragma unroll
+    for (int w = 0; w < kWaves; ++w) {
+      const std::size_t i = (32 * w) + lane;
+      const float val = v[head_base + i];
+      if (v_cache != nullptr) {
+        v_cache[cache_offset + i] = val;
+      }
+      kv_q8::StoreBlock(val, static_cast<std::uint32_t>(lane), v_row,
+                        static_cast<std::uint32_t>(w));
+    }
+    return;
+  }
 #pragma unroll
   for (int w = 0; w < kWaves; ++w) {
     const std::size_t i = (32 * w) + lane;
@@ -321,11 +352,22 @@ void LaunchBatchedFusedQKNormRoPEKvWrite(
     std::uint32_t max_context, std::uint32_t num_heads,
     std::uint32_t num_kv_heads, std::uint32_t head_dim,
     std::uint32_t rotary_dim, float rope_theta, float eps, hipStream_t stream,
-    const models::qwen::vision::DeviceRope* rope) {
+    const models::qwen::vision::DeviceRope* rope, bool kv_q8) {
   const dim3 grid(num_heads + num_kv_heads,
                   static_cast<unsigned int>(batch_size));
+  if (kv_q8) {
+    if (head_dim != 256 || rotary_dim != 64)
+      throw std::invalid_argument(
+          "8-bit KV cache needs 256-wide heads with a 64-wide rotary span");
+    BatchedFusedQKNormRoPEKvWriteWaveKernel<true><<<grid, 32, 0, stream>>>(
+        q, k, v, q_weight, k_weight, q_out, k_out, k_cache, v_cache,
+        static_cast<__half*>(k_cache_f16), static_cast<__half*>(v_cache_f16),
+        layer_idx, start_pos, batch_size, max_context, num_heads, num_kv_heads,
+        rope_theta, eps, rope);
+    return;
+  }
   if (head_dim == 256 && rotary_dim == 64) {
-    BatchedFusedQKNormRoPEKvWriteWaveKernel<<<grid, 32, 0, stream>>>(
+    BatchedFusedQKNormRoPEKvWriteWaveKernel<false><<<grid, 32, 0, stream>>>(
         q, k, v, q_weight, k_weight, q_out, k_out, k_cache, v_cache,
         static_cast<__half*>(k_cache_f16), static_cast<__half*>(v_cache_f16),
         layer_idx, start_pos, batch_size, max_context, num_heads, num_kv_heads,
