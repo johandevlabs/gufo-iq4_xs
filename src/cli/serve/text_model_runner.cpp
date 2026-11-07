@@ -1125,6 +1125,18 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens,
   frontier = std::min(frontier, stop);
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
+  // The draft's context window must be complete where the state is next
+  // used: the prompt snapshot, a shared-prefix checkpoint or the prompt end.
+  // Grid checkpoints are optional copies for late edits; they keep whatever
+  // context the draft has, and a restore from one drafts less until the
+  // window refills.
+  auto horizon = impl_->prefill_offset < snapshot_position
+                     ? snapshot_position
+                     : impl_->prompt.size();
+  for (const auto position : impl_->shared_checkpoints)
+    if (position > impl_->prefill_offset)
+      horizon = std::min(horizon, position);
+  impl_->runner->SetDraftContextHorizon(state, horizon);
   // Prompt targets captured in place, in order, with the bytes each
   // reserved. They are published after the step, as AdvancePromptTarget
   // reaches each of them.
