@@ -17,7 +17,7 @@ Gufo's first choice there but are worth running anyway:
 
 Strycast tracks Gufo releases and is rebased on each one, or on a newer Gufo
 `main` commit when it needs work that is not released yet (currently Gufo
-main 1c75887b). Everything Gufo supports still works here; the models below
+main f07fd2fe). Everything Gufo supports still works here; the models below
 are the additions. Strycast is not affiliated with gufo-org: report problems
 with these models here, not upstream.
 
