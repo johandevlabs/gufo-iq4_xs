@@ -106,7 +106,8 @@ gpu_tests() {
      ! cmake -S "$src" -B "$tree" -DCMAKE_EXE_LINKER_FLAGS="$flags" -DCMAKE_SHARED_LINKER_FLAGS="$flags" \
          -DPython3_EXECUTABLE="$venv/bin/python" -DCMAKE_CXX_FLAGS="$incs" \
        >> "$out/logs/configure.log" 2>&1 ||
-     ! cmake --build "$tree" -j"$(nproc)" > "$out/logs/build.log" 2>&1; then
+     ! cmake --build "$tree" -j"$(nproc)" --target all qwen38_flash_next_model_tests \
+         > "$out/logs/build.log" 2>&1; then
     fail "GPU test build"
     { echo "### GPU tests"; echo; echo "The test tree did not build:"; echo
       echo '```'; grep -E "error:|FAILED:" "$out/logs/build.log" | sort -u | head -20; echo '```'; echo; } >> "$report"
@@ -119,6 +120,9 @@ gpu_tests() {
     export GUFO_QWEN27B_MTP_MODEL=$QWEN27_GGUF GUFO_QWEN_GGUF=$QWEN27_GGUF
     export GUFO_QWEN35BA3B_MODEL=$Q35_Q6 EMBEDDING_GEMMA2_MODEL_ROOT=$EMBEDDING_ROOT
     export QWEN3_ASR_MODEL_ROOT=$ASR_ROOT
+    # Flash-Next's in-pass checkpoint test, built outside `all`, skips itself
+    # unless the host names the model.
+    export QWEN38_FLASH_NEXT_MODEL=${FLASH_NEXT_GGUF:-} QWEN38_FLASH_NEXT_MTP_MODEL=${FLASH_NEXT_MTP:-}
     ctest -E '^(minimax_h3_|ds4\.|qwen_mtp_reference_test$|kernel_resources_test$)' --timeout 1800 --output-junit "$out/ctest.xml" \
       > "$out/logs/ctest.log" 2>&1
   )
