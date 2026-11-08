@@ -1,0 +1,186 @@
+From acf9acd3ce656344ff53bdecd4bfb4fda8969f33 Mon Sep 17 00:00:00 2001
+From: Sami Slimani <slimsamister@gmail.com>
+Date: Thu, 5 Nov 2026 22:07:31 +0100
+Subject: [PATCH 4/6] port: concurrent draft cap through the draft backends
+
+Strycast bounded each step's draft through a core change
+(SpeculativeVerifier::VerifyStep max_draft_tokens and
+StepRequest::max_draft_tokens). Gufo's verifier has no per-step bound, so the
+runner sets the cap on the session's MTP or DFlash2 backend
+(SetStepDraftCap), which clamps max_tokens where it enters a proposal: the
+single, sampled, per-request and batched paths. The verifier accepts a shorter
+proposal than it asked for, and the lookup copies and the DFlash2 length
+controller read the bound from max_tokens as before, so the proposals match
+the core cap's. A zero cap returns an empty proposal, which the verifier runs
+as a target-only step.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ q35/model/hip/dflash.hpp         |  7 +++++++
+ q35/model/hip/dflash/backend.cpp |  4 +++-
+ q35/model/hip/mtp.hpp            |  6 ++++++
+ q35/model/hip/mtp/backend.cpp    | 11 +++++++----
+ q35/model/runner.cpp             | 17 ++++++++++++++---
+ 5 files changed, 37 insertions(+), 8 deletions(-)
+
+diff --git a/q35/model/hip/dflash.hpp b/q35/model/hip/dflash.hpp
+index 37909ba..a1644a7 100644
+--- a/q35/model/hip/dflash.hpp
++++ b/q35/model/hip/dflash.hpp
+@@ -9,6 +9,7 @@
+ #include <gufo/ext/draft_backend.hpp>
+ #include <gufo/ext/gguf_reader.hpp>
+ #include <gufo/ext/prompt_lookup.hpp>
++#include <limits>
+ #include <memory>
+ #include <span>
+ #include <string>
+@@ -339,6 +340,11 @@ struct QwenDFlashGpuDraftConfig {
+ /// interface.
+ class QwenDFlashGpuDraftBackend final : public speculative::IDraftBackend {
+ public:
++  /// Upper bound on the next proposals' draft length: the concurrent draft
++  /// cap the runner sets before each verification step. Gufo's verifier has
++  /// no per-step bound, so the backend clamps the length it is asked for.
++  void SetStepDraftCap(std::uint32_t cap) noexcept { step_draft_cap_ = cap; }
++
+   /// Committed target rows the draft leaves pending for its next proposal,
+   /// as continuation snapshots expect (an ordinary verification's rows).
+   static constexpr std::size_t kMaxPendingRows = 8;
+@@ -430,6 +436,7 @@ public:
+   }
+ 
+ private:
++  std::uint32_t step_draft_cap_{std::numeric_limits<std::uint32_t>::max()};
+   void InjectPendingFeatures(std::uint32_t position);
+   /// Brings the request's draft table up to its committed history and
+   /// returns whether this block, anchored on `tokens.back()`, drafts through
+diff --git a/q35/model/hip/dflash/backend.cpp b/q35/model/hip/dflash/backend.cpp
+index 532f4a8..ad8661e 100644
+--- a/q35/model/hip/dflash/backend.cpp
++++ b/q35/model/hip/dflash/backend.cpp
+@@ -423,7 +423,8 @@ std::vector<speculative::DraftProposal> QwenDFlashGpuDraftBackend::ProposeBatch(
+             ? backend.config_.max_context - request.position - 1U
+             : 0U;
+     controllers[index] = &backend.controller_;
+-    budgets[index] = std::min(request.max_tokens, budget);
++    budgets[index] =
++        std::min({request.max_tokens, budget, backend.step_draft_cap_});
+     positions[index] = request.position;
+   }
+   const auto shared_count =
+@@ -668,6 +669,7 @@ speculative::DraftProposal QwenDFlashGpuDraftBackend::ProposeImpl(
+   if (!primed_ || prompt_tokens.empty() || current_pos == 0) {
+     throw std::logic_error("DFlash GPU draft backend is not primed");
+   }
++  max_tokens = std::min(max_tokens, step_draft_cap_);
+   if (proposal_active_) {
+     throw std::logic_error("DFlash GPU proposal feedback is pending");
+   }
+diff --git a/q35/model/hip/mtp.hpp b/q35/model/hip/mtp.hpp
+index d9cd2c8..07a4bff 100644
+--- a/q35/model/hip/mtp.hpp
++++ b/q35/model/hip/mtp.hpp
+@@ -375,6 +375,11 @@ struct QwenMtpGpuDraftConfig {
+ /// Stateful MTP draft provider backed by the production HIP executor.
+ class QwenMtpGpuDraftBackend final : public speculative::IDraftBackend {
+ public:
++  /// Upper bound on the next proposals' draft length: the concurrent draft
++  /// cap the runner sets before each verification step. Gufo's verifier has
++  /// no per-step bound, so the backend clamps the length it is asked for.
++  void SetStepDraftCap(std::uint32_t cap) noexcept { step_draft_cap_ = cap; }
++
+   [[nodiscard]] static std::unique_ptr<QwenMtpGpuDraftBackend> Create(
+       std::shared_ptr<const QwenMtpGpuModel> model,
+       QwenMtpGpuDraftConfig config = {}, std::string* error_msg = nullptr);
+@@ -451,6 +456,7 @@ public:
+   }
+ 
+ private:
++  std::uint32_t step_draft_cap_{std::numeric_limits<std::uint32_t>::max()};
+   QwenMtpGpuDraftBackend(std::unique_ptr<QwenMtpGpuExecutor> executor,
+                          QwenMtpGpuDraftConfig config);
+   friend class models::qwen::ContinuationAdapter;
+diff --git a/q35/model/hip/mtp/backend.cpp b/q35/model/hip/mtp/backend.cpp
+index 86e4f26..2d89f20 100644
+--- a/q35/model/hip/mtp/backend.cpp
++++ b/q35/model/hip/mtp/backend.cpp
+@@ -362,7 +362,8 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::Propose(
+ 
+   speculative::DraftProposal proposal;
+   proposal.start_pos = current_pos;
+-  const std::uint32_t count = std::min(max_tokens, config_.max_draft_tokens);
++  const std::uint32_t count =
++      std::min({max_tokens, config_.max_draft_tokens, step_draft_cap_});
+   if (count == 0) {
+     return proposal;
+   }
+@@ -412,7 +413,8 @@ speculative::DraftProposal QwenMtpGpuDraftBackend::ProposeSampled(
+ 
+   speculative::DraftProposal proposal;
+   proposal.start_pos = current_pos;
+-  const std::uint32_t count = std::min(max_tokens, config_.max_draft_tokens);
++  const std::uint32_t count =
++      std::min({max_tokens, config_.max_draft_tokens, step_draft_cap_});
+   if (count == 0) {
+     return proposal;
+   }
+@@ -516,8 +518,9 @@ std::vector<speculative::DraftProposal> QwenMtpGpuDraftBackend::ProposeBatch(
+   for (std::size_t index = 0; index < requests.size(); ++index) {
+     const auto& request = requests[index];
+     const auto& backend = *backends[index];
+-    const auto count =
+-        std::min(request.max_tokens, backend.config_.max_draft_tokens);
++    const auto count = std::min({request.max_tokens,
++                                 backend.config_.max_draft_tokens,
++                                 backend.step_draft_cap_});
+     if (backend.executor_->GetNextPosition() + count >
+         backend.executor_->GetMaxContext()) {
+       throw std::invalid_argument(
+diff --git a/q35/model/runner.cpp b/q35/model/runner.cpp
+index c039153..6d0a437 100644
+--- a/q35/model/runner.cpp
++++ b/q35/model/runner.cpp
+@@ -519,6 +519,15 @@ public:
+     rollback_position_.reset();
+   }
+ 
++  /// Bounds the draft of this session's next verification step (the
++  /// concurrent draft cap); the draft backend applies it to its proposals.
++  void SetStepDraftCap(std::uint32_t cap) noexcept {
++    if (dflash_backend_ != nullptr)
++      dflash_backend_->SetStepDraftCap(cap);
++    if (mtp_backend_ != nullptr)
++      mtp_backend_->SetStepDraftCap(cap);
++  }
++
+   [[nodiscard]] TextDecodeStep DecodeSpeculative(
+       std::size_t max_tokens, sampling::SamplerState& sampler,
+       std::uint32_t max_draft_tokens) {
+@@ -527,9 +536,10 @@ public:
+     if (PrepareSpeculativeDecode(max_tokens, working_sampler, result)) {
+       const auto request = VerificationRequest(
+           max_tokens - result.selections.size(), working_sampler);
++      SetStepDraftCap(max_draft_tokens);
+       auto verification = verifier_->VerifyStep(
+           sequence_, request.position, request.current_token, request.eos_id,
+-          request.max_emitted_tokens, working_sampler, max_draft_tokens);
++          request.max_emitted_tokens, working_sampler);
+       FinishSpeculativeDecode(std::move(verification), working_sampler, result);
+     }
+     sampler.SetRngState(working_sampler.rng_state());
+@@ -1066,8 +1076,9 @@ public:
+         indices.push_back(index);
+       }
+     }
+-    for (auto& request : requests)
+-      request.max_draft_tokens = DraftCap(request.sampler, requests.size());
++    for (std::size_t item = 0; item < requests.size(); ++item)
++      states[indices[item]]->SetStepDraftCap(
++          DraftCap(requests[item].sampler, requests.size()));
+     auto verified = speculative::SpeculativeVerifier::VerifyBatch(requests);
+     for (std::size_t item = 0; item < indices.size(); ++item) {
+       const std::size_t index = indices[item];
+-- 
+2.43.0
+

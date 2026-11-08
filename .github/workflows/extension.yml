@@ -1,0 +1,135 @@
+name: qwen35moe Gufo extension
+
+# Generates slimsami/strycast-qwen35moe-gufo-extension from Strycast
+# (tools/extension/qwen35moe) and builds it as a loadable module against the
+# Gufo revision in gufo-revision, with the same `gufo extension install`
+# that Gufo users run. Each Strycast release publishes the tree and tags it
+# with the release's tag; pull requests that touch the copied code only build.
+
+on:
+  workflow_run:
+    workflows: [ Strycast release ]
+    types: [ completed ]
+  pull_request:
+    paths:
+      - tools/extension/qwen35moe/**
+      - src/families/qwen/**
+      - src/models/qwen/**
+      - src/models/qwen38_flash_next/kernels/**
+      - .github/workflows/extension.yml
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Strycast commit to generate from (default main's head)
+        default: ''
+        type: string
+      publish:
+        description: Push the result to the extension repository
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen35moe-extension-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  extension:
+    name: Generate and build the extension
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out Strycast
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.revision || github.event.pull_request.head.sha || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate
+        id: generate
+        run: |
+          set -euo pipefail
+          bash tools/extension/qwen35moe/generate.sh "$RUNNER_TEMP/extension"
+          echo "gufo=$(tr -d '[:space:]' < tools/extension/qwen35moe/gufo-revision)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=$(git tag --points-at HEAD 'v*-strycast.*' | sort -V | tail -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://gufo.cachix.org
+            extra-trusted-public-keys = gufo.cachix.org-1:rfZe3n4lHINgyoACKzs5EthIZmBNvEyCCtufUpth0PE=
+
+      # Gufo's flake builds the module in the sandbox with `gufo extension
+      # install`; gufo itself comes from Gufo's binary cache.
+      - name: Build the module against Gufo ${{ steps.generate.outputs.gufo }}
+        env:
+          GUFO: ${{ steps.generate.outputs.gufo }}
+          EXTENSION: ${{ runner.temp }}/extension
+        run: |
+          set -euo pipefail
+          rm -rf "$EXTENSION/.git"
+          nix build --impure --print-build-logs --out-link gufo-with-extension --expr "
+            let
+              gufo = builtins.getFlake \"github:gufo-org/gufo/$GUFO\";
+              source = builtins.path { path = \"$EXTENSION\"; name = \"strycast-qwen35moe\"; };
+            in gufo.lib.x86_64-linux.withExtensionModules { extensions = [ \"\${source}\" ]; }"
+          ./gufo-with-extension/bin/gufo extension list
+          ./gufo-with-extension/bin/gufo diagnose --section extensions --json > diagnose.json
+          python3 - <<'PY'
+          import json
+          providers = json.load(open('diagnose.json')).get('providers', [])
+          found = [p for p in providers if p.get('id') == 'qwen35moe']
+          print(json.dumps(found, indent=1))
+          if not found or not all(p.get('available') for p in found):
+              raise SystemExit('provider qwen35moe is missing or unavailable')
+          PY
+          ./gufo-with-extension/bin/gufo serve llm --help | grep -F -- '--kv-cache'
+
+      - name: Publish to the extension repository
+        if: >-
+          github.event_name == 'workflow_run' ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish)
+        env:
+          DEPLOY_KEY: ${{ secrets.EXTENSION_DEPLOY_KEY }}
+          EXTENSION: ${{ runner.temp }}/extension
+          GUFO: ${{ steps.generate.outputs.gufo }}
+          SHA: ${{ steps.generate.outputs.sha }}
+          TAG: ${{ steps.generate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          [ -n "$DEPLOY_KEY" ] || { echo "::error::EXTENSION_DEPLOY_KEY is not set"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/extension && chmod 600 ~/.ssh/extension
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/extension -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone -q git@github.com:slimsami/strycast-qwen35moe-gufo-extension.git published
+          # README, NOTICE and licenses/ are maintained in that repository.
+          rm -rf published/q35
+          cp -r "$EXTENSION"/q35 "$EXTENSION"/extension.json "$EXTENSION"/extension.cmake \
+            "$EXTENSION"/LICENSE published/
+          printf '%s\n' "$GUFO" > published/GUFO_REVISION
+          cd published
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No change since the last publish."
+          else
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -q -m "Strycast ${TAG:-${SHA:0:8}}" \
+                -m "Generated from slimsami/strycast@$SHA by tools/extension/qwen35moe/generate.sh; built as a module against gufo-org/gufo@$GUFO."
+          fi
+          if [ -n "$TAG" ] && ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            git tag "$TAG"
+            git push -q origin HEAD:main "refs/tags/$TAG"
+          else
+            git push -q origin HEAD:main
+          fi
+          echo "Published $(git rev-parse --short HEAD) ${TAG:-(no tag)}"

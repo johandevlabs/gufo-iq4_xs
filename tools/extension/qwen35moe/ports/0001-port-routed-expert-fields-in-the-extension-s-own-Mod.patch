@@ -1,0 +1,149 @@
+From 070fe136a72a0533a084adbc2020748dc2292211 Mon Sep 17 00:00:00 2001
+From: Sami Slimani <slimsamister@gmail.com>
+Date: Thu, 5 Nov 2026 22:05:39 +0100
+Subject: [PATCH 1/6] port: routed-expert fields in the extension's own
+ ModelConfig
+
+Strycast added expert_count, expert_used_count, expert_ff_length,
+expert_shared_ff_length and IsMoE() to Gufo's core ModelConfig. An external
+extension cannot change core, so strycast::core::ModelConfig extends Gufo's
+struct with them; the copy names it as core::ModelConfig.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ q35/family/config/model_config.hpp | 26 ++++++++++++++++++++++++++
+ q35/family/config/qwen_config.hpp  |  2 +-
+ q35/model/continuation_layout.hpp  |  2 +-
+ q35/model/hip/executor.hpp         |  2 +-
+ q35/model/modules/module_ctx.hpp   |  2 +-
+ q35/model/ssm.hpp                  |  2 +-
+ q35/model/state.hpp                |  2 +-
+ q35/ns.hpp                         |  4 ++++
+ 8 files changed, 36 insertions(+), 6 deletions(-)
+ create mode 100644 q35/family/config/model_config.hpp
+
+diff --git a/q35/family/config/model_config.hpp b/q35/family/config/model_config.hpp
+new file mode 100644
+index 0000000..5e5a54d
+--- /dev/null
++++ b/q35/family/config/model_config.hpp
+@@ -0,0 +1,26 @@
++#pragma once
++
++#include "q35/ns.hpp"
++
++#include <cstdint>
++
++#include <gufo/ext/model_config.hpp>
++
++namespace strycast::core {
++
++/// Gufo's ModelConfig plus the routed-expert shape of qwen35moe targets. The
++/// copy names this type as core::ModelConfig, so it replaces Gufo's within the
++/// extension and still binds wherever the public API takes Gufo's.
++struct ModelConfig : ::gufo::core::ModelConfig {
++  // MoE (qwen35moe): zero expert_count denotes a dense FFN model.
++  std::uint32_t expert_count{0};
++  std::uint32_t expert_used_count{0};
++  std::uint32_t expert_ff_length{0};
++  std::uint32_t expert_shared_ff_length{0};
++
++  [[nodiscard]] constexpr bool IsMoE() const noexcept {
++    return expert_count > 0;
++  }
++};
++
++}  // namespace strycast::core
+diff --git a/q35/family/config/qwen_config.hpp b/q35/family/config/qwen_config.hpp
+index 87c2223..9c787d5 100644
+--- a/q35/family/config/qwen_config.hpp
++++ b/q35/family/config/qwen_config.hpp
+@@ -5,7 +5,7 @@
+ #include <optional>
+ #include <string>
+ 
+-#include <gufo/ext/model_config.hpp>
++#include "q35/family/config/model_config.hpp"
+ 
+ namespace strycast::models::qwen {
+ 
+diff --git a/q35/model/continuation_layout.hpp b/q35/model/continuation_layout.hpp
+index 3eaa0dc..8b5631a 100644
+--- a/q35/model/continuation_layout.hpp
++++ b/q35/model/continuation_layout.hpp
+@@ -3,7 +3,7 @@
+ #define GUFO_MODELS_QWEN_CONTINUATION_LAYOUT_HPP_
+ 
+ #include <gufo/ext/adapter.hpp>
+-#include <gufo/ext/model_config.hpp>
++#include "q35/family/config/model_config.hpp"
+ #include <gufo/ext/types.hpp>
+ #include <span>
+ #include <vector>
+diff --git a/q35/model/hip/executor.hpp b/q35/model/hip/executor.hpp
+index 3b23be2..f7e9f6f 100644
+--- a/q35/model/hip/executor.hpp
++++ b/q35/model/hip/executor.hpp
+@@ -7,7 +7,7 @@
+ #include <cstdint>
+ #include <exception>
+ #include <functional>
+-#include <gufo/ext/model_config.hpp>
++#include "q35/family/config/model_config.hpp"
+ #include <memory>
+ #include <optional>
+ #include <span>
+diff --git a/q35/model/modules/module_ctx.hpp b/q35/model/modules/module_ctx.hpp
+index fa51665..e859382 100644
+--- a/q35/model/modules/module_ctx.hpp
++++ b/q35/model/modules/module_ctx.hpp
+@@ -3,7 +3,7 @@
+ #define GUFO_MODELS_QWEN_MODULES_MODULE_CTX_HPP_
+ 
+ #include <cstdint>
+-#include <gufo/ext/model_config.hpp>
++#include "q35/family/config/model_config.hpp"
+ 
+ #include "q35/model/state.hpp"
+ 
+diff --git a/q35/model/ssm.hpp b/q35/model/ssm.hpp
+index 832eaf3..b43bccf 100644
+--- a/q35/model/ssm.hpp
++++ b/q35/model/ssm.hpp
+@@ -4,7 +4,7 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
+-#include <gufo/ext/model_config.hpp>
++#include "q35/family/config/model_config.hpp"
+ #include <span>
+ #include <vector>
+ 
+diff --git a/q35/model/state.hpp b/q35/model/state.hpp
+index 8ffb0a0..7d21f11 100644
+--- a/q35/model/state.hpp
++++ b/q35/model/state.hpp
+@@ -9,7 +9,7 @@
+ #include <cstring>
+ #include <gufo/ext/experimental/ggml_dequant.hpp>
+ #include <gufo/ext/gguf_reader.hpp>
+-#include <gufo/ext/model_config.hpp>
++#include "q35/family/config/model_config.hpp"
+ #include <limits>
+ #include <memory>
+ #include <optional>
+diff --git a/q35/ns.hpp b/q35/ns.hpp
+index 070ad4d..10eee4d 100644
+--- a/q35/ns.hpp
++++ b/q35/ns.hpp
+@@ -32,3 +32,7 @@ namespace strycast::quant { using namespace ::gufo::quant; }
+ namespace strycast::sampling { using namespace ::gufo::sampling; }
+ namespace strycast::server { using namespace ::gufo::server; }
+ namespace strycast::speculative { using namespace ::gufo::speculative; }
++
++// The extension's own ModelConfig (routed-expert fields) must be the only
++// core::ModelConfig any translation unit sees.
++#include "q35/family/config/model_config.hpp"
+-- 
+2.43.0
+

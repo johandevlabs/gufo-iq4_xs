@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "name": "strycast_qwen35moe",
+  "version": "0.0.1",
+  "api_version": ">= 0.2.0",
+  "entry": "strycast_qwen35moe_register",
+  "registration_target": "strycast_q35",
+  "depends": [],
+  "platforms": [
+    "linux"
+  ],
+  "providers": [
+    {
+      "id": "qwen35moe",
+      "capability": "text_generation",
+      "keys": [
+        "gguf:qwen35moe"
+      ],
+      "model_ids": [
+        "qwen35moe"
+      ],
+      "speculative": [
+        "dflash2",
+        "mtp"
+      ],
+      "target": "strycast_q35_hip",
+      "entry": "strycast_qwen35moe_provider_register",
+      "serving": {
+        "draft_options": {
+          "dflash2": "--dflash-model",
+          "mtp": "--mtp-model"
+        }
+      }
+    }
+  ],
+  "options": [
+    {
+      "name": "--dflash-model",
+      "type": "path",
+      "commands": ["serve", "bench", "prompt"],
+      "providers": ["qwen35moe"],
+      "help": "DFlash2 draft model path for speculative decoding"
+    },
+    {
+      "name": "--mtp-model",
+      "type": "path",
+      "commands": ["serve", "bench", "prompt"],
+      "providers": ["qwen35moe"],
+      "help": "MTP draft model path for speculative decoding"
+    },
+    {
+      "name": "--kv-cache",
+      "type": "string",
+      "commands": ["serve", "bench", "prompt"],
+      "providers": ["qwen35moe"],
+      "help": "Attention KV cache format: f16 (default) or q8_0, 8-bit with about half the KV memory"
+    }
+  ],
+  "targets": {
+    "strycast_q35_family": {"requires": []},
+    "strycast_q35": {"requires": []},
+    "strycast_q35_kernels": {"requires": ["hip"]},
+    "strycast_q35_hip": {"requires": ["hip"]}
+  },
+  "licenses": [
+    "LICENSE"
+  ]
+}

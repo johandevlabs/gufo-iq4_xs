@@ -1,0 +1,87 @@
+From 33d52632cc6cff288a544268dbc347849c1b8ad6 Mon Sep 17 00:00:00 2001
+From: Sami Slimani <slimsamister@gmail.com>
+Date: Thu, 5 Nov 2026 22:24:16 +0100
+Subject: [PATCH 5/6] port: build fixes against Gufo main
+
+- snapshot_copy.hpp and transfer_pool.hpp moved out of gufo/ext/experimental;
+- the drivers' prefill validation uses a local logit comparison instead of
+  Gufo's private src/testing/compare library.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ q35/model/drivers.cpp | 52 ++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/q35/model/drivers.cpp b/q35/model/drivers.cpp
+index 50b2a6b..f7c6870 100644
+--- a/q35/model/drivers.cpp
++++ b/q35/model/drivers.cpp
+@@ -91,6 +91,56 @@ std::string MakeTestName(std::string_view prefix, std::size_t count,
+   return result;
+ }
+ 
++/// Summary of a logit comparison for the prefill validation printout. Gufo's
++/// comparator (src/testing/compare) is private to its own tests.
++struct LogitComparison {
++  bool finite{true};
++  bool top1_match{true};
++  float max_abs_diff{0.0F};
++  float mean_abs_diff{0.0F};
++  float root_mean_square_error{0.0F};
++  float cosine_similarity{1.0F};
++};
++
++LogitComparison CompareLogits(std::span<const float> reference,
++                              std::span<const float> candidate) {
++  LogitComparison result;
++  const std::size_t count = std::min(reference.size(), candidate.size());
++  if (count == 0 || reference.size() != candidate.size()) {
++    result.top1_match = false;
++    return result;
++  }
++  double abs_sum = 0.0, square_sum = 0.0, dot = 0.0, ref_norm = 0.0,
++         cand_norm = 0.0;
++  std::size_t ref_top = 0, cand_top = 0;
++  for (std::size_t i = 0; i < count; ++i) {
++    const float r = reference[i];
++    const float c = candidate[i];
++    if (!std::isfinite(r) || !std::isfinite(c))
++      result.finite = false;
++    const double diff = std::fabs(static_cast<double>(r) - c);
++    result.max_abs_diff =
++        std::max(result.max_abs_diff, static_cast<float>(diff));
++    abs_sum += diff;
++    square_sum += diff * diff;
++    dot += static_cast<double>(r) * c;
++    ref_norm += static_cast<double>(r) * r;
++    cand_norm += static_cast<double>(c) * c;
++    if (r > reference[ref_top])
++      ref_top = i;
++    if (c > candidate[cand_top])
++      cand_top = i;
++  }
++  result.top1_match = ref_top == cand_top;
++  result.mean_abs_diff = static_cast<float>(abs_sum / count);
++  result.root_mean_square_error =
++      static_cast<float>(std::sqrt(square_sum / count));
++  if (ref_norm > 0.0 && cand_norm > 0.0)
++    result.cosine_similarity =
++        static_cast<float>(dot / std::sqrt(ref_norm * cand_norm));
++  return result;
++}
++
+ bool ValidatePrefill(hip::QwenGpuExecutor& executor,
+                      std::size_t prompt_length) {
+   if (prompt_length == 0 || prompt_length > executor.GetMaxPromptBatch()) {
+@@ -116,7 +166,7 @@ bool ValidatePrefill(hip::QwenGpuExecutor& executor,
+   const auto batched_token = executor.ForwardPromptBatch(prompt_tokens);
+   const auto batched_logits = executor.CopyLastLogits();
+   const auto comparison =
+-      testing::CompareLogits(sequential_logits, batched_logits);
++      CompareLogits(sequential_logits, batched_logits);
+ 
+   std::cout << std::fixed << std::setprecision(8)
+             << "[Prefill Validation] tokens=" << prompt_length
+-- 
+2.43.0
+

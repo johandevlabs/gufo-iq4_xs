@@ -1,0 +1,48 @@
+From 26d6d9859450c16806957d9fb00670d368efea8c Mon Sep 17 00:00:00 2001
+From: Sami Slimani <slimsamister@gmail.com>
+Date: Thu, 5 Nov 2026 22:05:54 +0100
+Subject: [PATCH 2/6] port: fixed MTP prime chunk
+
+SpeculativeOptions::mtp_prime_chunk and TextSpeculativeConfig::mtp_prime_chunk
+(--mtp-prime-chunk) are Strycast core additions. Upstream takes no new CLI
+knobs, so the runner uses the default it already had, 1024 rows per batched
+MTP prime slice.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ q35/model/runner.cpp | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/q35/model/runner.cpp b/q35/model/runner.cpp
+index 99db204..3d9e3f2 100644
+--- a/q35/model/runner.cpp
++++ b/q35/model/runner.cpp
+@@ -712,7 +712,7 @@ public:
+             hip::QwenMtpGpuDraftConfig{
+                 .max_context = max_context_,
+                 .max_draft_tokens = speculative_options_.max_draft_tokens,
+-                .prime_chunk = speculative_options_.mtp_prime_chunk}),
++                .prime_chunk = hip::kMtpDefaultPrimeChunk}),
+         ledger, HipComponentCacheHooks());
+     // Qwen's 256-row chunks are small. Preserve a bounded group before
+     // waiting, instead of synchronizing every half-MiB range individually.
+@@ -807,7 +807,7 @@ public:
+                                                  hip::kSsmReplayCapacity);
+     } else if (mtp_model_ != nullptr) {
+       const auto draft = hip::QwenMtpGpuExecutor::EstimateMemoryUsage(
+-          *mtp_model_, max_context_, speculative_options_.mtp_prime_chunk);
++          *mtp_model_, max_context_, hip::kMtpDefaultPrimeChunk);
+       usage.request_state_bytes += draft.request_state_bytes;
+       usage.temporary_scratch_bytes += draft.temporary_scratch_bytes;
+       resident_weights += mtp_model_->GetPackedWeightBytes();
+@@ -1329,7 +1329,6 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
+   std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;
+   std::shared_ptr<const hip::QwenMtpGpuModel> mtp_model;
+   speculative::SpeculativeOptions speculative_options;
+-  speculative_options.mtp_prime_chunk = options.speculative.mtp_prime_chunk;
+   if (options.speculative.backend == ext::TextSpeculativeBackend::kDFlash) {
+     if (options.speculative.draft_model_path.empty()) {
+       if (error)
+-- 
+2.43.0
+
