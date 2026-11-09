@@ -695,7 +695,7 @@ bool Executor::QuantizeBatch(const float* x, std::uint32_t rows,
 
 bool Executor::DenseBatch(const DeviceTensor& w, const float* x, float* out,
                           std::uint32_t rows, std::string* error) const {
-  if (rows <= kDecodeRows)
+  if (rows <= kDecodeRows || w.type == core::GgmlType::kQ6_K)
     return Dense(w, x, out, rows, error);
   if (w.type != core::GgmlType::kQ8_0) {
     SmallGemm(w.data, EmbeddingType(w.type), x, out, rows, w.rows, w.cols,
@@ -780,19 +780,23 @@ bool Executor::MoeBatch(const DeviceLayer& l, const float* x, float* out,
                        error) ||
       !DenseBatch(l.shexp_down, base.shexp_up, base.shexp_out, rows, error))
     return false;
-  if (l.ffn_gate_exps.type == core::GgmlType::kQ4_K &&
-      l.ffn_up_exps.type == core::GgmlType::kQ4_K) {
+  const auto gate_type = l.ffn_gate_exps.type;
+  if ((gate_type == core::GgmlType::kQ4_K ||
+       gate_type == core::GgmlType::kIQ3_S ||
+       gate_type == core::GgmlType::kIQ4_XS) &&
+      l.ffn_up_exps.type == gate_type) {
     // Share expert weights across request boundaries while retaining the
     // scalar Q8 activation quantization and dot-product reduction.
-    if (qfn_mmq_moe_gated_vec(static_cast<int>(l.ffn_gate_exps.type),
-                              l.ffn_gate_exps.data, l.ffn_up_exps.data, x,
-                              base.ids, base.gate_e, c.expert_ff, c.hidden_size,
-                              rows, c.num_experts, c.num_experts_used,
-                              stream_) != 0 ||
-        qfn_mmq_moe_vec(
-            static_cast<int>(l.ffn_down_exps.type), l.ffn_down_exps.data,
-            base.gate_e, base.ids, base.down_e, c.hidden_size, c.expert_ff,
-            rows * c.num_experts_used, c.num_experts, 1, stream_) != 0)
+    const bool gated =
+        qfn_mmq_moe_gated_vec(static_cast<int>(gate_type), l.ffn_gate_exps.data,
+                              l.ffn_up_exps.data, x, base.ids, base.gate_e,
+                              c.expert_ff, c.hidden_size, rows, c.num_experts,
+                              c.num_experts_used, stream_) == 0;
+    if (!gated || qfn_mmq_moe_vec(static_cast<int>(l.ffn_down_exps.type),
+                                  l.ffn_down_exps.data, base.gate_e, base.ids,
+                                  base.down_e, c.hidden_size, c.expert_ff,
+                                  rows * c.num_experts_used, c.num_experts, 1,
+                                  stream_) != 0)
       return Fail(error, "batched routed vector projection failed");
     MoeEpilogue(base.down_e, base.weights, base.shexp_out,
                 base.router + c.num_experts, c.num_experts + 1, out, rows,
