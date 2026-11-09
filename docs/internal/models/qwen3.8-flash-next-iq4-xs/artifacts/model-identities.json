@@ -1,0 +1,35 @@
+{
+  "sha256": {
+    "Target UD-IQ4_XS shard 1 of 3": "5ce89370720f8bf90890f439361282104c1aa1482d4013bb9a50923e758e71a4",
+    "Target UD-IQ4_XS shard 2 of 3": "577a38a2392b40ca2193cea502e1d92f60b8cd370675d308e0ec21885d9daaa7",
+    "Target UD-IQ4_XS shard 3 of 3": "d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833",
+    "MTP shared Q8_0": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6",
+    "Vision projector BF16": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"
+  },
+  "sources": {
+    "target": "unsloth/Qwen3.8-Flash-Next-GGUF, revision 38bb39ee97821de2c9009abb7e93950eec396e66, UD-IQ4_XS (three shards); replaced on main by a different Dynamic 3.1 build on 2026-11-04",
+    "mtp": "unsloth/Qwen3.8-Flash-Next-GGUF, same revision, MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+    "mmproj": "unsloth/Qwen3.8-Flash-Next-GGUF, same revision, mmproj-BF16.gguf"
+  },
+  "benchmarks-2026-11-09": {
+    "machine": "GMKtec Evo-X2, Ryzen AI Max+ 395, 96 GB (about 92 GiB usable), Ubuntu 24.04, powersave governor",
+    "strycast": {
+      "revision": "274e0ba01265d9a67dcd4507a5e1a8bb31e00bba",
+      "build": "nix build",
+      "binarySha256": "49aa080a282975536aff0056621c3ab2e9c13007cb0ff43f6399fa43c1df47e0"
+    },
+    "referenceAr": {
+      "revision": "68d9053afd4f4d0752ced6187585f862355a40be",
+      "build": "llama.cpp b11069, pinned Nix ROCm gfx1151 recipe with rocmPackages passed to llama-cpp.override",
+      "binarySha256": "8ec2209690491bb315e55365bfd5da53b6fcc01c1b00baeeb58a17698af25388",
+      "measured": "2026-11-02"
+    },
+    "referenceMtp": {
+      "revision": "6fcaa16f4b360649933a54d1f91ad40ed35c0e11",
+      "build": "pinned Nix ROCm gfx1151 recipe with rocmPackages passed to llama-cpp.override",
+      "binarySha256": "0fcfd6ea4fc91891a0dad7ec7bba3520866c077a5cd7a9361e39d5d81f794bae",
+      "measured": "2026-11-02"
+    },
+    "measurement": "One measured sample per point. Reference cells were driven from Strycast a53ec202 with the same model-bench driver and bench.json; per-artifact source revisions and commands are authoritative."
+  }
+}
