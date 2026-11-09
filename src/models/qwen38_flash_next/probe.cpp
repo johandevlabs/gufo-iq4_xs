@@ -23,9 +23,10 @@ bool ProbeFlashNextGguf(const core::GgufReader& reader) {
   const auto trunk_layers = *block_count - nextn_layers;
   // Check only canonical weights bound by ModelWeights::Bind. Appended MTP
   // layers and unrelated tensors are not loaded as part of the trunk.
-  static constexpr std::array<core::GgmlType, 5> kExpertFormats = {
-      core::GgmlType::kQ4_K, core::GgmlType::kQ5_K, core::GgmlType::kQ6_K,
-      core::GgmlType::kQ5_1, core::GgmlType::kQ8_0};
+  static constexpr std::array<core::GgmlType, 8> kExpertFormats = {
+      core::GgmlType::kQ4_K,   core::GgmlType::kQ5_K,  core::GgmlType::kQ6_K,
+      core::GgmlType::kQ5_1,   core::GgmlType::kQ8_0,  core::GgmlType::kIQ3_S,
+      core::GgmlType::kIQ4_XS, core::GgmlType::kIQ4_NL};
   for (const auto& tensor : reader.GetTensors()) {
     auto name = tensor.name;
     if (!name.starts_with("blk.")) {

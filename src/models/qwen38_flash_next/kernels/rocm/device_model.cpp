@@ -107,7 +107,8 @@ struct Uploader {
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
-    if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
+    if ((t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ6_K) &&
+        t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
     return d;
@@ -455,8 +456,8 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but the production embedding, dense
-  // and routed kernels do not. Reject it before allocating device weights.
+  // The CPU reference also reads Q6_K, but of the production kernels only the
+  // logits head does. Reject it elsewhere before allocating device weights.
   const auto supported = [&](const TensorRef& t) {
     if (t.type != core::GgmlType::kQ6_K)
       return true;
@@ -465,12 +466,34 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     return false;
   };
   const auto layer_supported = [&](const LayerWeights& l) {
-    return supported(l.ffn_gate_exps) && supported(l.ffn_up_exps) &&
-           supported(l.ffn_down_exps);
+    if (!supported(l.ffn_gate_exps) || !supported(l.ffn_up_exps) ||
+        !supported(l.ffn_down_exps))
+      return false;
+    if (IqExpertLayoutSupported(w.config, l.ffn_gate_exps.type,
+                                l.ffn_up_exps.type, l.ffn_down_exps.type))
+      return true;
+    if (error_msg != nullptr)
+      *error_msg = "unsupported HIP expert layout for IQ formats: " +
+                   std::string(l.ffn_gate_exps.name);
+    return false;
   };
-  if (!supported(w.token_embd) || !supported(w.output) ||
+  // MTP catch-up runs 9-32 non-prefill rows, which take the tiled MMQ route,
+  // so the block cannot hold IQ formats.
+  const auto mtp_block_supported = [&](const LayerWeights& l) {
+    if (!layer_supported(l))
+      return false;
+    if (!IsIqExpert(l.ffn_gate_exps.type) && !IsIqExpert(l.ffn_up_exps.type) &&
+        !IsIqExpert(l.ffn_down_exps.type))
+      return true;
+    if (error_msg != nullptr)
+      *error_msg = "unsupported HIP MTP expert format: " +
+                   std::string(l.ffn_gate_exps.name);
+    return false;
+  };
+  // A tied head has the embedding's type, so the embedding check rejects it.
+  if (!supported(w.token_embd) ||
       !std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
-      (mtp != nullptr && !layer_supported(mtp->block))) {
+      (mtp != nullptr && !mtp_block_supported(mtp->block))) {
     return nullptr;
   }
   std::unique_ptr<DeviceModel> m(new DeviceModel());
