@@ -571,8 +571,9 @@ private:
                         std::uint32_t cols) const;
   /// Whether a wide dense Q8_0 projection takes the F16 WMMA GEMM.
   bool DenseF16Route(const DeviceTensor& w, std::uint32_t n_tokens) const;
-  /// DenseF16Route, or a stacked Q6_K SSM projection in prefill.
-  bool SsmF16Route(const DeviceTensor& w, std::uint32_t n_tokens) const;
+  /// DenseF16Route, or a stacked Q6_K SSM or attention projection in
+  /// prefill.
+  bool StackedF16Route(const DeviceTensor& w, std::uint32_t n_tokens) const;
   void RoutedHints(const DeviceTensor& w, std::uint32_t n_tokens) const;
   /// Reads the routing of the current batch back and derives the tile
   /// hints for its expert GEMMs (tiled batches only).

@@ -8312,7 +8312,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   static_assert(!(kBf16 && kHalfWeights));
-  static_assert(!kQ6 || !(kHalfWeights || kBf16 || kAttention || kHcMix));
+  static_assert(!kQ6 || !(kHalfWeights || kBf16 || kHcMix));
   // Q6_K: each thread owns one row and both K blocks of a stage, so a
   // half superblock (four K blocks) is loaded once for two stages.
   static_assert(!kQ6 || (BM == 256 && BK == 2));
@@ -8978,7 +8978,7 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
                       const qwen::vision::DeviceRope* rope,
-                      const YarnRope& yarn) {
+                      const YarnRope& yarn, bool q6) {
   if (n_tokens == 0 || weights == nullptr || input == nullptr ||
       q_gamma == nullptr || k_gamma == nullptr || query == nullptr ||
       gate == nullptr || keys == nullptr || values == nullptr ||
@@ -8992,6 +8992,23 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
   // (8.8 to 7.9 ms at 4,096 tokens). One K block per LDS stage halves the
   // stage to 24 KB, so three blocks share a WGP instead of two (7.8 to
   // 7.3 ms); the K order is unchanged.
+  if (q6) {
+    // Q6_K rows decode a half superblock over two stages: two K blocks per
+    // stage, the same tiles and K order.
+    const auto launch = [&]<bool kYarn>() {
+      hipLaunchKernelGGL(
+          (DenseF16GEMMKernel<256, 128, 2, 8, 1, 4, false, false, true, false,
+                              false, false, kYarn, true>),
+          dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
+          input, nullptr, n_tokens, 13312, 2560, nullptr, nullptr, nullptr,
+          nullptr, nullptr, output, PassCheckpoints{}, 0, 0);
+    };
+    if (yarn.enabled != 0)
+      launch.template operator()<true>();
+    else
+      launch.template operator()<false>();
+    return true;
+  }
   if (yarn.enabled != 0) {
     hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false,
                                            true, false, false, false, true>),

@@ -233,7 +233,8 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
 void CheckAttentionProjection(
     const void* weights, const __half* input, const float* projected,
     std::uint32_t batch,
-    const gufo::models::qwen38_flash_next::YarnRope& yarn = {}) {
+    const gufo::models::qwen38_flash_next::YarnRope& yarn = {},
+    bool q6 = false) {
   constexpr std::uint32_t start = 131069;
   const std::size_t query_bytes = (std::size_t(batch) * 6144 + 16) * 4;
   const std::size_t cache_bytes =
@@ -295,7 +296,7 @@ void CheckAttentionProjection(
                            static_cast<float*>(actual[1]) + 8,
                            static_cast<__half*>(actual[2]) + 8,
                            static_cast<__half*>(actual[3]) + 8, batch, position,
-                           1e7F, 1e-6F, stream, vision.rope(), yarn))
+                           1e7F, 1e-6F, stream, vision.rope(), yarn, q6))
     throw std::runtime_error("attention fusion rejected the model shape");
   CheckHip(hipStreamEndCapture(stream, &graph), "attention capture end");
   CheckHip(hipGraphInstantiate(&replay, graph, nullptr, nullptr, 0),
@@ -327,7 +328,7 @@ void CheckAttentionProjection(
                           static_cast<float*>(actual[1]) + 8,
                           static_cast<__half*>(actual[2]) + 8,
                           static_cast<__half*>(actual[3]) + 8, 0, position,
-                          1e7F, 1e-6F, nullptr, nullptr, yarn))
+                          1e7F, 1e-6F, nullptr, nullptr, yarn, q6))
     throw std::runtime_error("attention fusion accepted an empty batch");
   CheckHip(hipGraphExecDestroy(replay), "attention graph free");
   CheckHip(hipGraphDestroy(graph), "attention graph definition free");
@@ -1375,6 +1376,17 @@ void CheckQ6KF16(std::size_t m, std::size_t k, std::size_t wide,
   if (m == 16384 && k == 2560)
     CheckSsmProjection(d_w, d_half, d_wide, expected,
                        static_cast<std::uint32_t>(wide), true);
+  // The stacked attention projection: the fused route (norms, RoPE, cache
+  // writes) against these plain rows.
+  if (m == 13312 && k == 2560) {
+    CheckAttentionProjection(d_w, d_half, d_wide,
+                             static_cast<std::uint32_t>(wide), {}, true);
+    CheckAttentionProjection(
+        d_w, d_half, d_wide, static_cast<std::uint32_t>(wide),
+        gufo::models::qwen38_flash_next::MakeYarnRope(
+            {.factor = 2.5F, .original_context = 262144}, 64, 1e7F),
+        true);
+  }
   (void)hipFree(d_w);
   (void)hipFree(d_x);
   (void)hipFree(d_half);
@@ -1399,6 +1411,7 @@ int main() {
     CheckQ6KF16(640, 2560, 1619, 0x6C0640U);
     CheckQ6KF16(10240, 2560, 1549, 0x6CA240U);
     CheckQ6KF16(16384, 2560, 1549, 0x6C4000U);
+    CheckQ6KF16(13312, 2560, 1549, 0x6C3400U);
     CheckQ6KF16(2560, 6144, 1549, 0x6C6144U);
     CheckQ6KF16(201, 2560, 97, 0x6C0201U);
     if (qfn_mmq_init(0) != 0)
