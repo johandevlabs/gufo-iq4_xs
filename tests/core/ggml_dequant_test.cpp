@@ -452,17 +452,19 @@ void TestModelRows(const std::filesystem::path& model_path) {
 /// scales patched in; the expected FNV-1a hashes of the dequantized F32 bits
 /// come from gguf-py's independent NumPy dequantizers
 /// (gguf.quants.dequantize) over the same bytes, so this pins every format
-/// to ggml's reference values bit for bit.
+/// to ggml's reference values bit for bit. gguf-py has no Q2_0 dequantizer;
+/// its hash comes from ggml's own to_float (llama.cpp b11557).
 void TestDequantizeRowMatchesGgufPy() {
   struct Expected {
     gufo::core::GgmlType type;
     std::uint64_t hash;
   };
-  constexpr std::array<Expected, 18> kExpected = {{
+  constexpr std::array<Expected, 19> kExpected = {{
       {gufo::core::GgmlType::kQ4_0, 0xD281B0239A243459ULL},
       {gufo::core::GgmlType::kQ4_1, 0x6D7BD9EB30002C9FULL},
       {gufo::core::GgmlType::kQ5_0, 0x05A04BF224732323ULL},
       {gufo::core::GgmlType::kQ5_1, 0x4CA02E1925FA5604ULL},
+      {gufo::core::GgmlType::kQ2_0, 0xDF2CEA312816E6A2ULL},
       {gufo::core::GgmlType::kQ2_K, 0x4BA82C45B8873FA0ULL},
       {gufo::core::GgmlType::kQ3_K, 0xA428B48204D3D498ULL},
       {gufo::core::GgmlType::kQ4_K, 0xDF9F1270E319F0FDULL},
@@ -540,7 +542,7 @@ void TestDequantizeRowMatchesGgufPy() {
       }
     }
     if (hash != expected.hash) {
-      std::cerr << "dequantized " << name << " differs from gguf-py\n";
+      std::cerr << "dequantized " << name << " differs from ggml\n";
       std::exit(1);
     }
     if (gufo::quant::DequantizeRow(type, blocks.data(), values.data(),

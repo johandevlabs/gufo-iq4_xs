@@ -84,7 +84,11 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
       gufo::quant::DequantizeQ6_K(src, out, k);
       break;
     default:
-      std::memset(out, 0, k * sizeof(float));
+      // The remaining block formats (Q5_0, Q2_0, IQ2_S, IQ3_XXS) decode
+      // through core; a type core cannot decode was refused at bind.
+      if (!gufo::quant::DequantizeRow(t.type, src, out, k)) {
+        std::memset(out, 0, k * sizeof(float));
+      }
       break;
   }
 }

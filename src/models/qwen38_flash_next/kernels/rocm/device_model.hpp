@@ -19,20 +19,25 @@ namespace gufo::models::qwen38_flash_next::rocm {
                                            core::GgmlType down) {
   using core::GgmlType;
   return (gate == GgmlType::kQ4_K || gate == GgmlType::kQ5_K ||
-          gate == GgmlType::kIQ3_S || gate == GgmlType::kIQ4_XS) &&
+          gate == GgmlType::kIQ3_S || gate == GgmlType::kIQ4_XS ||
+          gate == GgmlType::kIQ2_S || gate == GgmlType::kIQ3_XXS) &&
          up == gate &&
          (down == GgmlType::kQ5_1 || down == GgmlType::kQ8_0 ||
-          down == GgmlType::kIQ4_NL) &&
+          down == GgmlType::kIQ4_NL || down == GgmlType::kQ2_0 ||
+          down == GgmlType::kQ5_0) &&
          c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
 }
 
+/// Expert formats with no tiled MMQ route: the IQ formats, Q2_0 and Q5_0.
 [[nodiscard]] inline bool IsIqExpert(core::GgmlType type) {
   return type == core::GgmlType::kIQ3_S || type == core::GgmlType::kIQ4_NL ||
-         type == core::GgmlType::kIQ4_XS;
+         type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ2_S ||
+         type == core::GgmlType::kIQ3_XXS || type == core::GgmlType::kQ2_0 ||
+         type == core::GgmlType::kQ5_0;
 }
 
-/// IQ experts have no tiled MMQ route, so prefill must reach them through
-/// WMMA. Decode reads the same layouts through the vector kernels.
+/// IQ (and Q2_0) experts have no tiled MMQ route, so prefill must reach them
+/// through WMMA. Decode reads the same layouts through the vector kernels.
 [[nodiscard]] inline bool IqExpertLayoutSupported(const Config& c,
                                                   core::GgmlType gate,
                                                   core::GgmlType up,

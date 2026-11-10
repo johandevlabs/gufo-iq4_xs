@@ -117,6 +117,8 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ8_0:
     case core::GgmlType::kIQ4_NL:
       return 32;
+    case core::GgmlType::kQ2_0:
+      return 64;
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
     case core::GgmlType::kIQ2_XS:
@@ -204,11 +206,12 @@ float DotProductIQ3_S(const void* row_data, std::span<const float> vec,
                       std::size_t k);
 
 // The remaining GGML block formats, element for element as ggml-quants.c's
-// dequantize_row_* (Q4_0, Q4_1, Q5_0: 32 elements; Q2_K and the IQ1/IQ2/IQ3
-// formats: 256).
+// dequantize_row_* (Q4_0, Q4_1, Q5_0: 32 elements; Q2_0: 64; Q2_K and the
+// IQ1/IQ2/IQ3 formats: 256).
 void DequantizeQ4_0(const void* src, float* dst, std::size_t k);
 void DequantizeQ4_1(const void* src, float* dst, std::size_t k);
 void DequantizeQ5_0(const void* src, float* dst, std::size_t k);
+void DequantizeQ2_0(const void* src, float* dst, std::size_t k);
 void DequantizeQ2_K(const void* src, float* dst, std::size_t k);
 void DequantizeIQ2_XXS(const void* src, float* dst, std::size_t k);
 void DequantizeIQ2_XS(const void* src, float* dst, std::size_t k);

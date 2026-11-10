@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/families/qwen/vision/device_input.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
@@ -1293,11 +1294,102 @@ void CheckW8A8PassWidths(std::size_t m, std::size_t k, std::size_t wide,
             << wide << " rows: exact\n";
 }
 
+/// The Q6_K W8A8 route (the UD-IQ3_XXS trunk): within tolerance of an F64
+/// product over the CPU decoder, and every short pass's rows bit for bit
+/// equal to the same rows of the wide pass.
+void CheckQ6KW8A8(std::size_t m, std::size_t k, std::size_t wide,
+                  std::uint32_t seed) {
+  constexpr std::size_t kBlockBytes = 210;
+  std::vector<std::uint8_t> blocks(m * (k / 256) * kBlockBytes);
+  std::uint32_t state = seed;
+  for (auto& b : blocks)
+    b = static_cast<std::uint8_t>(NextRandom(&state) >> 24);
+  for (std::size_t b = 0; b < blocks.size(); b += kBlockBytes) {
+    // The int8 sub-block scales multiply d: keep weights near 0.02.
+    const __half d = __float2half(1e-5F * (1.0F + Uniform(&state, 0.5F)));
+    std::memcpy(blocks.data() + b + 208, &d, 2);
+  }
+  std::vector<float> values(m * k);
+  for (std::size_t r = 0; r < m; ++r)
+    gufo::quant::DequantizeQ6_K(blocks.data() + r * (k / 256) * kBlockBytes,
+                                values.data() + r * k, k);
+  std::vector<float> x(wide * k);
+  for (float& v : x)
+    v = Uniform(&state, 2.0F);
+  void* d_w = nullptr;
+  float* d_x = nullptr;
+  void* d_tiled = nullptr;
+  float* d_wide = nullptr;
+  float* d_short = nullptr;
+  CheckHip(hipMalloc(&d_w, blocks.size() + 4096), "Q6_K weights");
+  CheckHip(hipMalloc(&d_x, x.size() * 4), "Q6_K input");
+  CheckHip(hipMalloc(&d_tiled, q::Q8TiledBytes(wide, k)), "Q6_K tiles");
+  CheckHip(hipMalloc(&d_wide, wide * m * 4), "Q6_K wide output");
+  CheckHip(hipMalloc(&d_short, wide * m * 4), "Q6_K short output");
+  CheckHip(hipMemcpy(d_w, blocks.data(), blocks.size(), hipMemcpyHostToDevice),
+           "Q6_K weight upload");
+  CheckHip(hipMemcpy(d_x, x.data(), x.size() * 4, hipMemcpyHostToDevice),
+           "Q6_K input upload");
+  q::QuantizeQ8Tiled(d_x, d_tiled, wide, k, nullptr);
+  q::Q6KW8A8Gemm(d_w, d_tiled, d_wide, wide, m, k, nullptr);
+  std::vector<float> expected(wide * m);
+  CheckHip(hipMemcpy(expected.data(), d_wide, expected.size() * 4,
+                     hipMemcpyDeviceToHost),
+           "Q6_K wide download");
+  double err_sq = 0.0;
+  double ref_sq = 0.0;
+  for (std::size_t t = 0; t < wide; t += 7) {
+    for (std::size_t r = 0; r < m; ++r) {
+      double ref = 0.0;
+      for (std::size_t i = 0; i < k; ++i)
+        ref += static_cast<double>(values[r * k + i]) * x[t * k + i];
+      const double diff = expected[t * m + r] - ref;
+      err_sq += diff * diff;
+      ref_sq += ref * ref;
+    }
+  }
+  const double rel = std::sqrt(err_sq / ref_sq);
+  std::size_t failures = 0;
+  for (const std::size_t rows : {1, 7, 9, 95, 96, 129, 1031}) {
+    if (rows > wide)
+      continue;
+    for (const std::size_t first :
+         {std::size_t{0}, (wide - rows) / 2, wide - rows}) {
+      q::QuantizeQ8Tiled(d_x + first * k, d_tiled, rows, k, nullptr);
+      q::Q6KW8A8Gemm(d_w, d_tiled, d_short, rows, m, k, nullptr);
+      std::vector<float> actual(rows * m);
+      CheckHip(hipMemcpy(actual.data(), d_short, actual.size() * 4,
+                         hipMemcpyDeviceToHost),
+               "Q6_K short download");
+      for (std::size_t r = 0; r < rows; ++r)
+        failures += std::memcmp(actual.data() + r * m,
+                                expected.data() + (first + r) * m, m * 4) != 0;
+    }
+  }
+  (void)hipFree(d_w);
+  (void)hipFree(d_x);
+  (void)hipFree(d_tiled);
+  (void)hipFree(d_wide);
+  (void)hipFree(d_short);
+  std::cout << "Q6_K W8A8 m=" << m << " k=" << k << " rows=" << wide
+            << ": rel err " << rel << ", " << failures
+            << " short-pass rows differ\n";
+  if (rel > 1e-2)
+    throw std::runtime_error("Q6_K W8A8 projection is inaccurate");
+  if (failures != 0)
+    throw std::runtime_error("Q6_K W8A8 rows depend on the pass width");
+}
+
 }  // namespace
 
 int main() {
   try {
     CheckHip(q::PrepareW8A8GemmWave64(), "prepare wide Q8 projection");
+    // UD-IQ3_XXS trunk shapes: attn_qkv/gate, attn_q (13312 rows), ssm_out
+    // and attn_output (K 6144), with ragged token counts.
+    CheckQ6KW8A8(640, 2560, 1619, 0x6C0640U);
+    CheckQ6KW8A8(2560, 6144, 1549, 0x6C6144U);
+    CheckQ6KW8A8(201, 2560, 97, 0x6C0201U);
     if (qfn_mmq_init(0) != 0)
       throw std::runtime_error("prepare quantized decode projections");
     CheckRoutedQ8Placement();
