@@ -338,9 +338,9 @@ struct Uploader {
     d.hc_attn = Mixer(l.hc_attn);
     d.hc_ffn = Mixer(l.hc_ffn);
     // Projections of one input are stacked into one Q8_0 GEMV where the
-    // quantization allows; otherwise they stay separate. Q6_K SSM inputs
-    // stack too, for the fused prefill projection (their rows keep the
-    // single-row GEMV arithmetic in decode).
+    // quantization allows; otherwise they stay separate. Q6_K SSM and
+    // attention inputs stack too, for the fused prefill projections (their
+    // rows keep the single-row GEMV arithmetic in decode).
     const auto stackable = [](std::initializer_list<const TensorRef*> parts,
                               bool q6 = false) {
       for (const TensorRef* t : parts) {
@@ -368,7 +368,7 @@ struct Uploader {
     d.ssm_a = Copy(l.ssm_a);
     d.ssm_norm = Copy(l.ssm_norm);
     d.ssm_out = Copy(l.ssm_out);
-    if (!l.linear && stackable({&l.attn_q, &l.attn_k, &l.attn_v})) {
+    if (!l.linear && stackable({&l.attn_q, &l.attn_k, &l.attn_v}, true)) {
       d.attn_qkv = Stack({&l.attn_q, &l.attn_k, &l.attn_v});
     } else {
       d.attn_q = Copy(l.attn_q);

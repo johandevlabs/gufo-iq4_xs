@@ -105,6 +105,17 @@ bool ExpertMatrixRows(std::uint32_t rows) {
 /// Prefill passes wider than a vector batch take the fused projections and
 /// the paired routed expert tiles: they win from 9 rows up to the full chunk.
 /// Decode and verification batches keep their single-token arithmetic.
+/// Shared experts whose kernels all take the executor stream and read the
+/// F16 (prefill) or Q8_1 (decode) rows of their input: Q8_0 or Q6_K gate/up
+/// pairs over a Q8_0 down projection.
+bool OverlappableSharedExpert(const DeviceLayer& l) {
+  const bool q8 = l.shexp_gate.type == GgmlType::kQ8_0 &&
+                  l.shexp_up.type == GgmlType::kQ8_0;
+  const bool q6 = l.shexp_gate.type == GgmlType::kQ6_K &&
+                  l.shexp_up.type == GgmlType::kQ6_K;
+  return (q8 || q6) && l.shexp_down.type == GgmlType::kQ8_0;
+}
+
 bool WidePrefill(std::uint32_t rows) {
   return prefill_phase && rows > kVecBatch;
 }
@@ -1331,12 +1342,8 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
 bool Executor::CalibrateDecodeOverlap(std::string* error_msg) {
   decode_overlap_ = false;
   const auto& layers = model_->layers();
-  // Only Q8_0 shared experts overlap (see Moe).
-  if (std::none_of(layers.begin(), layers.end(), [](const DeviceLayer& l) {
-        return l.shexp_gate.type == GgmlType::kQ8_0 &&
-               l.shexp_up.type == GgmlType::kQ8_0 &&
-               l.shexp_down.type == GgmlType::kQ8_0;
-      }))
+  // Only Q8_0 and Q6_K shared experts overlap (see Moe).
+  if (std::none_of(layers.begin(), layers.end(), OverlappableSharedExpert))
     return true;
   // One decode row through every layer: the weights stream from memory as
   // they do in decode instead of being reread from cache.
@@ -2017,10 +2024,11 @@ void Executor::PrepareHalfInput(const float* x, std::uint32_t rows,
   half_bf16_ = false;
 }
 
-bool Executor::SsmF16Route(const DeviceTensor& w,
-                           std::uint32_t n_tokens) const {
-  // A stacked Q6_K SSM projection takes the fused F16 prefill route as
-  // Q8_0 does; every other Q6_K projection runs DenseQ6F16Gemm in prefill.
+bool Executor::StackedF16Route(const DeviceTensor& w,
+                               std::uint32_t n_tokens) const {
+  // Stacked Q6_K SSM and attention projections take the fused F16 prefill
+  // routes as Q8_0 does; every other Q6_K projection runs DenseQ6F16Gemm in
+  // prefill.
   return DenseF16Route(w, n_tokens) ||
          (w.type == GgmlType::kQ6_K && prefill_phase &&
           w.cols <= model_->max_half_cols());
@@ -2843,7 +2851,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
     // Wide prefill convolves QKV in the projection's LDS tile. The raw
     // boundary rows remain available for the rolling history update.
     if (!projections_ready && !speculative && WidePrefill(n_tokens) &&
-        n_tokens <= options_.max_batch && SsmF16Route(l.ssm_in, n_tokens)) {
+        n_tokens <= options_.max_batch && StackedF16Route(l.ssm_in, n_tokens)) {
       PrepareHalfInput(x, n_tokens, l.ssm_in.cols);
       // The Z rows feed only the output norm: the side stream computes them
       // beside the convolution boundary, the alpha/beta GEMM and the
@@ -2971,17 +2979,17 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   if (!l.attn_qkv.empty()) {
     const bool fused_projection =
         !projections_ready && WidePrefill(n_tokens) &&
-        n_tokens <= options_.max_batch && DenseF16Route(l.attn_qkv, n_tokens) &&
-        l.attn_qkv.rows == 13312 && l.attn_qkv.cols == 2560 &&
-        c.num_heads == 24 && c.num_kv_heads == 2 && c.head_dim == 256 &&
-        c.rotary_dim == 64;
+        n_tokens <= options_.max_batch &&
+        StackedF16Route(l.attn_qkv, n_tokens) && l.attn_qkv.rows == 13312 &&
+        l.attn_qkv.cols == 2560 && c.num_heads == 24 && c.num_kv_heads == 2 &&
+        c.head_dim == 256 && c.rotary_dim == 64;
     if (fused_projection) {
       PrepareHalfInput(x, n_tokens, l.attn_qkv.cols);
       prepared = AttentionF16Gemm(
           l.attn_qkv.data, static_cast<const __half*>(s_.x_half),
           l.attn_q_norm.f32(), l.attn_k_norm.f32(), s_.q, s_.attn_gate,
           s.k_cache, s.v_cache, n_tokens, pos, c.rope_theta, c.rms_eps, stream_,
-          s.rope, yarn_);
+          s.rope, yarn_, l.attn_qkv.type == GgmlType::kQ6_K);
       if (!prepared) {
         AssignError(error_msg, "fused attention projection failed");
         return false;
@@ -3197,9 +3205,9 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // the workload: both paths read weights and can contend for DRAM. The shared
   // expert writes its own scratch and may quantize x into s_.x_q8t, so no
   // main-stream work may use s_.x_q8t before JoinSide.
-  // Only the Q8_0 shared expert overlaps: its kernels take stream_, while
-  // the BF16, F16 and F32 routes go through BLAS handles bound to the main
-  // stream.
+  // Only Q8_0 and Q6_K shared experts overlap: their kernels take stream_,
+  // while the BF16, F16 and F32 routes go through BLAS handles bound to the
+  // main stream.
   // A decode pass replays from a captured graph, so the fork and join below
   // must stay inside the capture region: side_stream_ joins the capture
   // through side_start_, and the main stream joins back through side_done_.
@@ -3209,9 +3217,7 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // is separately qualified. Rows are the total token rows, not sessions.
   const bool overlap = (ExpertMatrixRows(n_tokens) ||
                         (decode_overlap_ && n_tokens <= kVecBatch)) &&
-                       !last_only && l.shexp_gate.type == GgmlType::kQ8_0 &&
-                       l.shexp_up.type == GgmlType::kQ8_0 &&
-                       l.shexp_down.type == GgmlType::kQ8_0;
+                       !last_only && OverlappableSharedExpert(l);
   const hipStream_t main = stream_;
   if (overlap) {
     if (!Check(hipEventRecord(side_start_, main), "side stream fork",
@@ -3979,7 +3985,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     // Both stacked SSM projections consume the same F16 input. Avoid writing
     // unused F32/Q8 copies when the wide mixer can supply that input directly.
     const bool half_only = WidePrefill(n) && n <= options_.max_batch &&
-                           l.linear && SsmF16Route(l.ssm_in, n) &&
+                           l.linear && StackedF16Route(l.ssm_in, n) &&
                            l.ssm_alpha_beta.type == GgmlType::kF16 &&
                            l.ssm_alpha_beta.cols == l.ssm_in.cols;
     if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg,
@@ -4029,12 +4035,11 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     const auto finish = [&](std::uint32_t rows) {
       defer_residual_ = WmmaExperts(l, rows);
       // The wide FFN reads the mix only through its F16 rows (router, routed
-      // experts) and tiled Q8 rows (shared expert).
-      const bool no_f32 = prefill_phase && defer_residual_ &&
-                          rows <= options_.max_batch &&
-                          l.router.type == GgmlType::kF16 &&
-                          l.shexp_gate.type == GgmlType::kQ8_0 &&
-                          l.shexp_up.type == GgmlType::kQ8_0;
+      // experts, a Q6_K shared expert) and tiled Q8 rows (a Q8_0 shared
+      // expert).
+      const bool no_f32 =
+          prefill_phase && defer_residual_ && rows <= options_.max_batch &&
+          l.router.type == GgmlType::kF16 && OverlappableSharedExpert(l);
       Combine(s_.res, l.hc_ffn.norm.f32(), rows, InjectWeights(l.hc_ffn),
               &l.hc_ffn);
       if (!HcMix(l.hc_ffn, s_.res, true, s_.mixed, s_.inject, rows, error_msg,
