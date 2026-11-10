@@ -104,7 +104,9 @@ struct Uploader {
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
-    if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
+    // Q6_K dense projections read F16 activation rows in prefill too.
+    if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16 ||
+        (t.type == core::GgmlType::kQ6_K && t.experts == 1)) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
     if ((t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ6_K) &&

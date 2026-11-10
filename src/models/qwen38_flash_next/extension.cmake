@@ -71,10 +71,8 @@ if (ENGINE_ENABLE_HIP)
   # qwen35moe without depending on this model package.
   add_library(gufo_qwen38_flash_next_kernels STATIC
     ${QFN_ROCM_DIR}/kernels.hip.cpp
-    ${QFN_ROCM_DIR}/q6k_w8a8.hip
     ${QFN_ROCM_DIR}/w8a8_wave64.hip)
-  set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp
-    ${QFN_ROCM_DIR}/q6k_w8a8.hip PROPERTIES LANGUAGE HIP)
+  set_source_files_properties(${QFN_ROCM_DIR}/kernels.hip.cpp PROPERTIES LANGUAGE HIP)
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
     PROPERTIES LANGUAGE HIP COMPILE_OPTIONS "-mwavefrontsize64")
   # The shared Qwen kernel headers these sources include depend on
