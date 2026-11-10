@@ -492,3 +492,54 @@ against 48.17). Prefill at about 2K tokens falls to 64% (2071.2 against
 3243.22). A laptop's power limit shows up in prefill first. The files, builds
 and toolchains differ, so read these as what a Strix Halo laptop does, not as
 an exact desktop-to-laptop ratio.
+
+## A 64 GB machine: GMKtec EVO-X2
+
+Contributed by [@morrisfamily](https://github.com/morrisfamily) in
+[#45](https://github.com/slimsami/strycast/issues/45#issuecomment-6723481278):
+a GMKtec EVO-X2 with the Ryzen AI Max+ 395 and Radeon 8060S (`gfx1151`) and
+64 GB of unified memory, 61.4 GiB of it usable by the GPU. Three llama.cpp
+services (an embedder, a reranker and an 8B extractor) held about 6 GiB beside
+it throughout. The build is the OCI image
+`ghcr.io/slimsami/strycast:0.28.1-strycast.3`, queried over HTTP with streaming;
+decode is (tokens − 1) / (last token − first token). These rows did not come
+from `tools/bench/model-bench.py`, so they sit outside the rendered tables.
+
+| Setup | Weights | Speculative | KV | Sessions × context |
+| --- | ---: | --- | --- | --- |
+| A | UD-Q6_K_XL, 30.4 GiB | MTP, 3 draft tokens | f16 | 1 × 131K |
+| B | UD-Q6_K_XL | MTP, 3 draft tokens | q8_0 | 1 × 131K |
+| C | UD-Q4_K_XL, 21.3 GiB | MTP, 3 draft tokens | q8_0 | 3 × 131K |
+| D | UD-Q6_K_XL | DFlash2 Q8_0 | q8_0 | 1 × 131K |
+| E | Q4_K_M (lmstudio, no MTP head), 19.7 GiB | DFlash2, 7 draft tokens | q8_0 | 1 × 131K |
+| F | Q4_K_M | DFlash2, 7 draft tokens | q8_0 | 4 × 131K |
+
+Decode with one request in flight (tok/s):
+
+| Depth | A | B | C | D | E | F |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2K | 74.8 | 80.0 | 78.4 | 88.3 | 103.1 | 110.4 |
+| 8K | 80.3 | 78.9 | 84.3 | 92.1 | 109.0 | 97.5 |
+| 32K | 69.6 | 73.9 | 79.3 | 82.7 | 107.2 | 99.9 |
+| 65K | 58.2 | 61.8 | 68.5 | 77.0 | 93.8 | 94.2 |
+| 98K | 52.1 | 55.3 | 60.4 | 74.4 | 87.4 | 88.1 |
+| 120K | 49.8 | 52.3 | 55.1 | 69.6 | 83.5 | 87.1 |
+
+- **8-bit KV cache:** `q8_0` decoded 5-7% faster than `f16` at depth (A against
+  B), and every setup found 4 of 4 needles in a ~115K-token prompt.
+- **Prefill** was about 2,700-3,370 tok/s at 2-8K tokens and 1,610-1,650 tok/s
+  at 120K, whatever the KV format or draft. Four cold prompts at once shared
+  that rate, about 1,480-1,551 tok/s in total.
+- **Concurrency (F):** four 116K-context requests decoding 2,048 tokens each ran
+  at 21.2 tok/s per request, within 0.5 of each other. Four long code
+  generations from short prompts ran at 38-40 tok/s each, and eight at
+  36-38 tok/s each, with no errors.
+- **Device memory after loading:** 43.8 GiB for A, about 42 GiB for B, 30.9 GiB
+  for E and 42.0 GiB for F, so each extra 131K `q8_0` session cost about
+  1.3 GiB. With the other services running, host memory was the tighter limit:
+  3.7-4.3 GiB stayed available during four-way decode.
+
+Their pick for this machine is F: the smallest weights that still give four
+full-context sessions, with the DFlash2 draft (570 MB) more than making up for
+the missing MTP head. The same post has their tool-calling (BFCL) and lm-eval
+results.

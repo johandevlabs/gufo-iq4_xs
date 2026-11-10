@@ -152,6 +152,9 @@ session holds its own KV/SSM state: at context 262144, one session used
 decodes much faster than MTP on repetitive text, the two are close on mixed
 text, and MTP prefills slightly faster; see
 [Benchmarks](BENCHMARKS.md#multiple-users-dflash2).
+On a 64 GB machine, four 131K sessions of Q4_K_M with DFlash2 and the
+8-bit KV cache fit in 42 GiB; see
+[Benchmarks](BENCHMARKS.md#a-64-gb-machine-gmktec-evo-x2).
 
 ### 8-bit KV cache
 
@@ -190,6 +193,25 @@ q8_0):
 
 Thinking/template controls and HTTP sampling defaults are described in
 [the server guide](../../SERVER.md#reasoning-controls).
+
+### Keeping sessions across restarts
+
+`gufo serve llm --cache-disk DIR` adds Gufo's disk tier to the prompt cache:
+checkpoints written there survive a restart, so a conversation resumes from the
+nearest one and re-prefills at most about 2,048 tokens plus its new turn,
+instead of its whole context. The server finishes pending writes on `SIGINT`
+and `SIGTERM`, so stopping it to free memory for another model and starting it
+again later brings the sessions back. The directory keeps 8 GiB by default;
+`--cache-disk-bytes` changes that, and one server owns a directory at a time.
+Entries record the KV format, so a server restarted with a different
+`--kv-cache` re-prefills. See [the KV cache guide](../../KV-CACHE.md#the-disk-tier)
+for how checkpoints are spaced and evicted.
+
+[@morrisfamily](https://github.com/morrisfamily) uses it this way on a 64 GB
+machine shared with an image model: Strycast stops for the occasional image
+request, and the bots' sessions come back within about half a second of the
+restart instead of after an 80 s prefill each
+([#45](https://github.com/slimsami/strycast/issues/45#issuecomment-6726995144)).
 
 ## Scope
 
