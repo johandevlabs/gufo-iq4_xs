@@ -245,8 +245,9 @@ struct Uploader {
     const core::GgmlType type = (*parts.begin())->type;
     for (const TensorRef* t : parts) {
       if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0)) {
-        Fail("stacked upload needs F32 or Q8_0 tensors of one shape");
+          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0 &&
+           type != core::GgmlType::kQ6_K)) {
+        Fail("stacked upload needs F32, Q8_0 or Q6_K tensors of one shape");
         return d;
       }
       rows += t->rows;
@@ -270,7 +271,8 @@ struct Uploader {
         offset += t->SizeBytes();
       }
     }
-    if (type == core::GgmlType::kQ8_0 && !expand_q8) {
+    if ((type == core::GgmlType::kQ8_0 && !expand_q8) ||
+        type == core::GgmlType::kQ6_K) {
       if (Measuring()) {
         return d;
       }
@@ -281,6 +283,9 @@ struct Uploader {
       d.cols = static_cast<std::uint32_t>((*parts.begin())->cols);
       d.rows = static_cast<std::uint32_t>(rows);
       max_q8_cols = std::max<std::size_t>(max_q8_cols, d.cols);
+      // Q6_K projections read F16 activation rows in prefill.
+      if (type == core::GgmlType::kQ6_K)
+        max_half_cols = std::max<std::size_t>(max_half_cols, d.cols);
       return d;
     }
     void* f32 = ptr;
@@ -333,17 +338,23 @@ struct Uploader {
     d.hc_attn = Mixer(l.hc_attn);
     d.hc_ffn = Mixer(l.hc_ffn);
     // Projections of one input are stacked into one Q8_0 GEMV where the
-    // quantization allows; otherwise they stay separate.
-    const auto stackable = [](std::initializer_list<const TensorRef*> parts) {
+    // quantization allows; otherwise they stay separate. Q6_K SSM inputs
+    // stack too, for the fused prefill projection (their rows keep the
+    // single-row GEMV arithmetic in decode).
+    const auto stackable = [](std::initializer_list<const TensorRef*> parts,
+                              bool q6 = false) {
       for (const TensorRef* t : parts) {
-        if (t->empty() || t->type != core::GgmlType::kQ8_0 ||
+        if (t->empty() ||
+            (t->type != core::GgmlType::kQ8_0 &&
+             !(q6 && t->type == core::GgmlType::kQ6_K)) ||
+            t->type != (*parts.begin())->type ||
             t->cols != (*parts.begin())->cols) {
           return false;
         }
       }
       return true;
     };
-    if (l.linear && stackable({&l.ssm_qkv, &l.ssm_gate})) {
+    if (l.linear && stackable({&l.ssm_qkv, &l.ssm_gate}, true)) {
       d.ssm_in = Stack({&l.ssm_qkv, &l.ssm_gate});
     } else {
       d.ssm_qkv = Copy(l.ssm_qkv);

@@ -2017,6 +2017,15 @@ void Executor::PrepareHalfInput(const float* x, std::uint32_t rows,
   half_bf16_ = false;
 }
 
+bool Executor::SsmF16Route(const DeviceTensor& w,
+                           std::uint32_t n_tokens) const {
+  // A stacked Q6_K SSM projection takes the fused F16 prefill route as
+  // Q8_0 does; every other Q6_K projection runs DenseQ6F16Gemm in prefill.
+  return DenseF16Route(w, n_tokens) ||
+         (w.type == GgmlType::kQ6_K && prefill_phase &&
+          w.cols <= model_->max_half_cols());
+}
+
 bool Executor::DenseF16Route(const DeviceTensor& w,
                              std::uint32_t n_tokens) const {
   return w.type == GgmlType::kQ8_0 && MatrixRows(n_tokens) &&
@@ -2834,7 +2843,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
     // Wide prefill convolves QKV in the projection's LDS tile. The raw
     // boundary rows remain available for the rolling history update.
     if (!projections_ready && !speculative && WidePrefill(n_tokens) &&
-        n_tokens <= options_.max_batch && DenseF16Route(l.ssm_in, n_tokens)) {
+        n_tokens <= options_.max_batch && SsmF16Route(l.ssm_in, n_tokens)) {
       PrepareHalfInput(x, n_tokens, l.ssm_in.cols);
       // The Z rows feed only the output norm: the side stream computes them
       // beside the convolution boundary, the alpha/beta GEMM and the
@@ -2852,7 +2861,7 @@ bool Executor::LinearAttention(const DeviceLayer& l, Session::LinearState& s,
               rows.tokens[i] = checkpoint.tokens[i];
             return rows;
           }(),
-          side_stream_, side_start_);
+          side_stream_, side_start_, l.ssm_in.type == GgmlType::kQ6_K);
       if (convolved) {
         if (!Check(hipEventRecord(side_done_, side_stream_), "side stream join",
                    error_msg)) {
@@ -3970,7 +3979,7 @@ bool Executor::ForwardBody(Session& session, std::uint32_t n,
     // Both stacked SSM projections consume the same F16 input. Avoid writing
     // unused F32/Q8 copies when the wide mixer can supply that input directly.
     const bool half_only = WidePrefill(n) && n <= options_.max_batch &&
-                           l.linear && DenseF16Route(l.ssm_in, n) &&
+                           l.linear && SsmF16Route(l.ssm_in, n) &&
                            l.ssm_alpha_beta.type == GgmlType::kF16 &&
                            l.ssm_alpha_beta.cols == l.ssm_in.cols;
     if (!HcMix(l.hc_attn, s_.res, normed, s_.mixed, s_.inject, n, error_msg,
