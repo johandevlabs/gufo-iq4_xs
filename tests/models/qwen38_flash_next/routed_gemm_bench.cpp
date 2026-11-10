@@ -7,11 +7,13 @@
 // experts and FNV-1a hashes of both outputs, then the totals over all layers.
 //
 // routed_gemm_bench [reps] [tokens | counts-file] [gate type] [down type]
-//   gate type: q4_k (default) | q5_k; down type: q5_1 (default) | q8_0
+//   gate type: q4_k (default) | q5_k | iq3_s | iq4_xs | iq2_s | iq3_xxs;
+//   down type: q5_1 (default) | q8_0 | iq4_nl | q2_0 | q5_0
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -39,14 +41,44 @@ q::WeightType down_type = q::WeightType::kQ5_1;
 
 /// Bytes per quantized block and elements per block.
 std::size_t BlockBytes(q::WeightType type) {
-  return type == q::WeightType::kQ4_K   ? 144
-         : type == q::WeightType::kQ5_K ? 176
-         : type == q::WeightType::kQ5_1 ? 24
-                                        : 34;
+  switch (type) {
+    case q::WeightType::kQ4_K:
+      return 144;
+    case q::WeightType::kQ5_K:
+      return 176;
+    case q::WeightType::kQ5_1:
+      return 24;
+    case q::WeightType::kIQ3_S:
+      return 110;
+    case q::WeightType::kIQ4_XS:
+      return 136;
+    case q::WeightType::kIQ2_S:
+      return 82;
+    case q::WeightType::kIQ3_XXS:
+      return 98;
+    case q::WeightType::kIQ4_NL:
+    case q::WeightType::kQ2_0:
+      return 18;
+    case q::WeightType::kQ5_0:
+      return 22;
+    default:
+      return 34;
+  }
 }
 std::size_t BlockElems(q::WeightType type) {
-  return type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ? 256
-                                                                      : 32;
+  switch (type) {
+    case q::WeightType::kQ4_K:
+    case q::WeightType::kQ5_K:
+    case q::WeightType::kIQ3_S:
+    case q::WeightType::kIQ4_XS:
+    case q::WeightType::kIQ2_S:
+    case q::WeightType::kIQ3_XXS:
+      return 256;
+    case q::WeightType::kQ2_0:
+      return 64;
+    default:
+      return 32;
+  }
 }
 q::WeightType ParseType(const std::string& name) {
   if (name == "q4_k")
@@ -57,6 +89,20 @@ q::WeightType ParseType(const std::string& name) {
     return q::WeightType::kQ5_1;
   if (name == "q8_0")
     return q::WeightType::kQ8_0;
+  if (name == "iq3_s")
+    return q::WeightType::kIQ3_S;
+  if (name == "iq4_xs")
+    return q::WeightType::kIQ4_XS;
+  if (name == "iq2_s")
+    return q::WeightType::kIQ2_S;
+  if (name == "iq3_xxs")
+    return q::WeightType::kIQ3_XXS;
+  if (name == "iq4_nl")
+    return q::WeightType::kIQ4_NL;
+  if (name == "q2_0")
+    return q::WeightType::kQ2_0;
+  if (name == "q5_0")
+    return q::WeightType::kQ5_0;
   throw std::runtime_error("unknown weight type " + name);
 }
 
@@ -144,12 +190,20 @@ float Median(int reps, F&& run) {
   CheckHip(hipEventCreate(&b), "event");
   std::vector<float> ms;
   for (int r = 0; r < reps; ++r) {
+    CheckHip(hipDeviceSynchronize(), "sync");
+    const auto host_start = std::chrono::steady_clock::now();
     CheckHip(hipEventRecord(a), "record");
     run();
     CheckHip(hipEventRecord(b), "record");
     CheckHip(hipEventSynchronize(b), "sync");
     float t = 0.0F;
     CheckHip(hipEventElapsedTime(&t, a, b), "elapsed");
+    // Some driver states report zero for every event pair; time the
+    // synchronized launch on the host clock then.
+    if (t <= 0.0F)
+      t = std::chrono::duration<float, std::milli>(
+              std::chrono::steady_clock::now() - host_start)
+              .count();
     ms.push_back(t);
   }
   std::sort(ms.begin(), ms.end());

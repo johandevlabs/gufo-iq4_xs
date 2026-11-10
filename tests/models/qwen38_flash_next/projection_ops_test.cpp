@@ -1294,11 +1294,11 @@ void CheckW8A8PassWidths(std::size_t m, std::size_t k, std::size_t wide,
             << wide << " rows: exact\n";
 }
 
-/// The Q6_K W8A8 route (the UD-IQ3_XXS trunk): within tolerance of an F64
-/// product over the CPU decoder, and every short pass's rows bit for bit
-/// equal to the same rows of the wide pass.
-void CheckQ6KW8A8(std::size_t m, std::size_t k, std::size_t wide,
-                  std::uint32_t seed) {
+/// The Q6_K F16 route (the Dynamic 3.1 trunk in prefill): within tolerance
+/// of an F64 product over the CPU decoder, and every short pass's rows bit
+/// for bit equal to the same rows of the wide pass.
+void CheckQ6KF16(std::size_t m, std::size_t k, std::size_t wide,
+                 std::uint32_t seed) {
   constexpr std::size_t kBlockBytes = 210;
   std::vector<std::uint8_t> blocks(m * (k / 256) * kBlockBytes);
   std::uint32_t state = seed;
@@ -1318,20 +1318,24 @@ void CheckQ6KW8A8(std::size_t m, std::size_t k, std::size_t wide,
     v = Uniform(&state, 2.0F);
   void* d_w = nullptr;
   float* d_x = nullptr;
-  void* d_tiled = nullptr;
   float* d_wide = nullptr;
   float* d_short = nullptr;
   CheckHip(hipMalloc(&d_w, blocks.size() + 4096), "Q6_K weights");
   CheckHip(hipMalloc(&d_x, x.size() * 4), "Q6_K input");
-  CheckHip(hipMalloc(&d_tiled, q::Q8TiledBytes(wide, k)), "Q6_K tiles");
   CheckHip(hipMalloc(&d_wide, wide * m * 4), "Q6_K wide output");
   CheckHip(hipMalloc(&d_short, wide * m * 4), "Q6_K short output");
   CheckHip(hipMemcpy(d_w, blocks.data(), blocks.size(), hipMemcpyHostToDevice),
            "Q6_K weight upload");
   CheckHip(hipMemcpy(d_x, x.data(), x.size() * 4, hipMemcpyHostToDevice),
            "Q6_K input upload");
-  q::QuantizeQ8Tiled(d_x, d_tiled, wide, k, nullptr);
-  q::Q6KW8A8Gemm(d_w, d_tiled, d_wide, wide, m, k, nullptr);
+  __half* d_half = nullptr;
+  CheckHip(hipMalloc(&d_half, wide * k * sizeof(__half)), "Q6_K F16 input");
+  q::NarrowActivations(d_x, d_half, false, wide * k, nullptr);
+  const auto project = [&](std::size_t first, std::size_t rows, float* out) {
+    if (!q::DenseQ6F16Gemm(d_w, d_half + first * k, out, rows, m, k, nullptr))
+      throw std::runtime_error("Q6_K F16 pass rejected");
+  };
+  project(0, wide, d_wide);
   std::vector<float> expected(wide * m);
   CheckHip(hipMemcpy(expected.data(), d_wide, expected.size() * 4,
                      hipMemcpyDeviceToHost),
@@ -1355,8 +1359,7 @@ void CheckQ6KW8A8(std::size_t m, std::size_t k, std::size_t wide,
       continue;
     for (const std::size_t first :
          {std::size_t{0}, (wide - rows) / 2, wide - rows}) {
-      q::QuantizeQ8Tiled(d_x + first * k, d_tiled, rows, k, nullptr);
-      q::Q6KW8A8Gemm(d_w, d_tiled, d_short, rows, m, k, nullptr);
+      project(first, rows, d_short);
       std::vector<float> actual(rows * m);
       CheckHip(hipMemcpy(actual.data(), d_short, actual.size() * 4,
                          hipMemcpyDeviceToHost),
@@ -1368,16 +1371,16 @@ void CheckQ6KW8A8(std::size_t m, std::size_t k, std::size_t wide,
   }
   (void)hipFree(d_w);
   (void)hipFree(d_x);
-  (void)hipFree(d_tiled);
+  (void)hipFree(d_half);
   (void)hipFree(d_wide);
   (void)hipFree(d_short);
-  std::cout << "Q6_K W8A8 m=" << m << " k=" << k << " rows=" << wide
+  std::cout << "Q6_K F16" << " m=" << m << " k=" << k << " rows=" << wide
             << ": rel err " << rel << ", " << failures
             << " short-pass rows differ\n";
   if (rel > 1e-2)
-    throw std::runtime_error("Q6_K W8A8 projection is inaccurate");
+    throw std::runtime_error("Q6_K projection is inaccurate");
   if (failures != 0)
-    throw std::runtime_error("Q6_K W8A8 rows depend on the pass width");
+    throw std::runtime_error("Q6_K projection rows depend on the pass width");
 }
 
 }  // namespace
@@ -1385,11 +1388,12 @@ void CheckQ6KW8A8(std::size_t m, std::size_t k, std::size_t wide,
 int main() {
   try {
     CheckHip(q::PrepareW8A8GemmWave64(), "prepare wide Q8 projection");
-    // UD-IQ3_XXS trunk shapes: attn_qkv/gate, attn_q (13312 rows), ssm_out
+    // Dynamic 3.1 Q6_K trunk shapes: the shared expert, attn_qkv, ssm_out
     // and attn_output (K 6144), with ragged token counts.
-    CheckQ6KW8A8(640, 2560, 1619, 0x6C0640U);
-    CheckQ6KW8A8(2560, 6144, 1549, 0x6C6144U);
-    CheckQ6KW8A8(201, 2560, 97, 0x6C0201U);
+    CheckQ6KF16(640, 2560, 1619, 0x6C0640U);
+    CheckQ6KF16(10240, 2560, 1549, 0x6CA240U);
+    CheckQ6KF16(2560, 6144, 1549, 0x6C6144U);
+    CheckQ6KF16(201, 2560, 97, 0x6C0201U);
     if (qfn_mmq_init(0) != 0)
       throw std::runtime_error("prepare quantized decode projections");
     CheckRoutedQ8Placement();

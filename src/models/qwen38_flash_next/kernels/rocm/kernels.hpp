@@ -240,11 +240,7 @@ void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
                      std::size_t k, hipStream_t stream);
 bool W8A8Gemm(const void* w, const void* x_tiled, float* out, std::size_t batch,
               std::size_t m, std::size_t k, hipStream_t stream);
-/// The W8A8 route over Q6_K weights (k a multiple of 256), on the same tiled
-/// activations, with Q6_K's per-K16 scales.
-void Q6KW8A8Gemm(const void* w, const void* x_tiled, float* out,
-                 std::size_t batch, std::size_t m, std::size_t k,
-                 hipStream_t stream);
+
 /// Native wave64 launch, selected by W8A8Gemm for wide output projections.
 /// Resolve the kernel before serving, without executing a projection.
 hipError_t PrepareW8A8GemmWave64();
@@ -285,6 +281,11 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
                         hipStream_t stream);
 /// input_stride is in half elements; zero means k. Padded rows are supported
+/// DenseF16Gemm over Q6_K weights (k a multiple of 256): each K block's codes
+/// decoded to F16 with its two K16 scales, F16 activations, F32 output.
+bool DenseQ6F16Gemm(const void* w, const __half* x, float* out,
+                    std::size_t batch, std::size_t m, std::size_t k,
+                    hipStream_t stream);
 /// by the wide SSM output projection (batch >= 1024, m=2560, k=6144).
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream,

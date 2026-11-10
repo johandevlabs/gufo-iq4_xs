@@ -2027,23 +2027,23 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
   if (w.type == GgmlType::kQ6_K && prefill_phase &&
-      w.data != model_->output().data && w.cols % 256 == 0) {
-    // Prefill over the Q6_K trunk: activations quantized per 32-wide block
-    // into the tiled layout, then the int8 WMMA GEMM, in pieces of at most
-    // max_batch rows as for Q8_0. Decode, verification and batched decode
-    // keep the GEMV below, so their rows match single-token decoding.
+      w.data != model_->output().data && w.cols % 256 == 0 &&
+      w.cols <= model_->max_half_cols()) {
+    // Prefill over the Q6_K trunk: F16 rows and the dense F16 GEMM with Q6_K
+    // decoding, in pieces of at most max_batch rows as for Q8_0. Decode,
+    // verification and batched decode keep the GEMV below, so their rows
+    // match single-token decoding.
     const std::uint32_t piece = static_cast<std::uint32_t>(options_.max_batch);
     for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
       const std::uint32_t rows = std::min(piece, n_tokens - r0);
       const float* src = x + static_cast<std::size_t>(r0) * w.cols;
-      if (!(q8t_src_ == src && q8t_rows_ == rows && q8t_cols_ == w.cols)) {
-        QuantizeQ8Tiled(src, s_.x_q8t, rows, w.cols, stream_);
-        q8t_src_ = src;
-        q8t_rows_ = rows;
-        q8t_cols_ = w.cols;
+      PrepareHalfInput(src, rows, w.cols);
+      if (!DenseQ6F16Gemm(w.data, static_cast<const __half*>(s_.x_half),
+                          out + static_cast<std::size_t>(r0) * w.rows, rows,
+                          w.rows, w.cols, stream_)) {
+        AssignError(error_msg, "Q6_K F16 GEMM failed");
+        return false;
       }
-      Q6KW8A8Gemm(w.data, s_.x_q8t, out + static_cast<std::size_t>(r0) * w.rows,
-                  rows, w.rows, w.cols, stream_);
     }
     return true;
   }

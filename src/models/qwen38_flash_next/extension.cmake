@@ -96,7 +96,6 @@ if(TARGET gufo_qwen38_flash_next_hip)
   gufo_extension_hip_sources(gufo_qwen38_flash_next_hip
     SOURCES
       kernels/rocm/kernels.hip.cpp
-      kernels/rocm/q6k_w8a8.hip
       kernels/rocm/w8a8_wave64.hip
   )
   set_source_files_properties(${QFN_ROCM_DIR}/w8a8_wave64.hip
