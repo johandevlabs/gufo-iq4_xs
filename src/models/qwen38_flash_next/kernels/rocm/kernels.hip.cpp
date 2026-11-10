@@ -8498,35 +8498,50 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
         if constexpr (kQ6) {
           // Segment g of the half superblock: low nibbles g / 2 of ql bytes
           // 32 (g % 2) + l, high bits 2g of qh byte l, scales 2g and 2g + 1.
-          // q + 96 = (q - 32) + 128 is the signed value with its sign bit
-          // flipped. Elements 0-15 take the first K16 scale, 16-31 the
-          // second: F16 (d * scale).
-          const int g = q6_g0 + kk;
-          const uint4 ql0 = q6_ql[2 * (g & 1)];
-          const uint4 ql1 = q6_ql[(2 * (g & 1)) + 1];
+          // The code q enters the F16 magic 1024 + q directly; a 1056 magic
+          // takes 32 back out. Elements 0-15 take the first K16 scale, 16-31
+          // the second: F16 (d * scale). The segment pair is uniform across
+          // the block, so each pair's shifts are constants.
+          const uint4 ql0 = q6_ql[2 * (kk & 1)];
+          const uint4 ql1 = q6_ql[(2 * (kk & 1)) + 1];
           const std::uint32_t lw[8] = {ql0.x, ql0.y, ql0.z, ql0.w,
                                        ql1.x, ql1.y, ql1.z, ql1.w};
           const std::uint32_t hw[8] = {q6_qh[0].x, q6_qh[0].y, q6_qh[0].z,
                                        q6_qh[0].w, q6_qh[1].x, q6_qh[1].y,
                                        q6_qh[1].z, q6_qh[1].w};
-          const std::uint32_t sc_word = g < 2 ? q6_sc.x : q6_sc.y;
-          const std::uint32_t sc = sc_word >> (16 * (g & 1));
           const float d = __half2float(
               __builtin_bit_cast(__half, static_cast<std::uint16_t>(a_d[0])));
-          const __half2 sc_lo = __float2half2_rn(
-              d * static_cast<float>(static_cast<std::int8_t>(sc & 0xFFU)));
-          const __half2 sc_hi = __float2half2_rn(
-              d *
-              static_cast<float>(static_cast<std::int8_t>((sc >> 8U) & 0xFFU)));
+          const __half2 magic6 = __floats2half2_rn(-1056.0F, -1056.0F);
+          const auto decode = [&]<int g>() {
+            const std::uint32_t sc =
+                (g < 2 ? q6_sc.x : q6_sc.y) >> (16 * (g & 1));
+            const __half2 sc_lo = __float2half2_rn(
+                d * static_cast<float>(static_cast<std::int8_t>(sc & 0xFFU)));
+            const __half2 sc_hi = __float2half2_rn(
+                d * static_cast<float>(
+                        static_cast<std::int8_t>((sc >> 8U) & 0xFFU)));
 #pragma unroll
-          for (int i = 0; i < 8; ++i) {
-            const std::uint32_t q =
-                ((lw[i] >> (4U * static_cast<unsigned>(g >> 1))) &
-                 0x0F0F0F0FU) |
-                (((hw[i] >> (2U * static_cast<unsigned>(g))) & 0x03030303U)
-                 << 4U);
-            CodesToHalves(q + 0x60606060U, magic, i < 4 ? sc_lo : sc_hi, zero2,
-                          h[2 * i], h[2 * i + 1]);
+            for (int i = 0; i < 8; ++i) {
+              const std::uint32_t lo = (lw[i] >> (4 * (g >> 1))) & 0x0F0F0F0FU;
+              const std::uint32_t hi =
+                  g < 2 ? (hw[i] << (4 - 2 * g)) & 0x30303030U
+                        : (hw[i] >> (2 * g - 4)) & 0x30303030U;
+              CodesToHalves(lo | hi, magic6, i < 4 ? sc_lo : sc_hi, zero2,
+                            h[2 * i], h[2 * i + 1]);
+            }
+          };
+          // Stage K blocks kk = 0, 1 are segments q6_g0 + kk (q6_g0 is 0 or
+          // 2).
+          if (q6_g0 == 0) {
+            if (kk == 0)
+              decode.template operator()<0>();
+            else
+              decode.template operator()<1>();
+          } else {
+            if (kk == 0)
+              decode.template operator()<2>();
+            else
+              decode.template operator()<3>();
           }
         } else {
 #pragma unroll
