@@ -21,18 +21,23 @@ namespace gufo::models::qwen38_flash_next {
                                             core::GgmlType down) {
   using core::GgmlType;
   return (gate == GgmlType::kQ4_K || gate == GgmlType::kQ5_K ||
-          gate == GgmlType::kIQ3_S || gate == GgmlType::kIQ4_XS) &&
+          gate == GgmlType::kIQ3_S || gate == GgmlType::kIQ4_XS ||
+          gate == GgmlType::kIQ2_S || gate == GgmlType::kIQ3_XXS) &&
          up == gate &&
          (down == GgmlType::kQ5_1 || down == GgmlType::kQ8_0 ||
-          down == GgmlType::kIQ4_NL);
+          down == GgmlType::kIQ4_NL || down == GgmlType::kQ2_0 ||
+          down == GgmlType::kQ5_0);
 }
 
+/// Expert formats with no tiled MMQ route: the IQ formats, Q2_0 and Q5_0.
 [[nodiscard]] inline bool IsIqExpert(core::GgmlType type) {
   return type == core::GgmlType::kIQ3_S || type == core::GgmlType::kIQ4_NL ||
-         type == core::GgmlType::kIQ4_XS;
+         type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ2_S ||
+         type == core::GgmlType::kIQ3_XXS || type == core::GgmlType::kQ2_0 ||
+         type == core::GgmlType::kQ5_0;
 }
 
-/// IQ experts have no tiled MMQ route, so a layer with any IQ expert must use
+/// These experts have no tiled MMQ route, so a layer with any of them must use
 /// WMMA formats. The probe and the executor share this rule.
 [[nodiscard]] inline bool IqExpertFormatsSupported(core::GgmlType gate,
                                                    core::GgmlType up,

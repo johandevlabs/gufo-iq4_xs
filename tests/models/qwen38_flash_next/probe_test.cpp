@@ -72,18 +72,20 @@ bool Probe(const std::vector<Tensor>& tensors,
 void CheckExpertFormats() {
   for (const auto* role : {"gate", "up", "down"}) {
     const auto name = std::string("blk.47.ffn_") + role + "_exps.weight";
-    for (const auto type : {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
-                            GgmlType::kQ5_1, GgmlType::kQ8_0, GgmlType::kIQ3_S,
-                            GgmlType::kIQ4_XS, GgmlType::kIQ4_NL}) {
+    for (const auto type :
+         {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K, GgmlType::kQ5_1,
+          GgmlType::kQ5_0, GgmlType::kQ8_0, GgmlType::kQ2_0, GgmlType::kIQ2_S,
+          GgmlType::kIQ3_XXS, GgmlType::kIQ3_S, GgmlType::kIQ4_XS,
+          GgmlType::kIQ4_NL}) {
       Require(Probe({{name, type}}), "supported expert format declined");
     }
-    for (const auto type : {GgmlType::kIQ2_S, GgmlType::kIQ3_XXS,
-                            GgmlType::kF16, GgmlType::kQ2_K}) {
+    for (const auto type : {GgmlType::kIQ2_XXS, GgmlType::kQ4_0, GgmlType::kF16,
+                            GgmlType::kQ2_K}) {
       Require(!Probe({{name, type}}), "unsupported trunk expert claimed");
     }
   }
   Require(!Probe({{"blk.0.ffn_gate_exps.weight", GgmlType::kQ4_K},
-                  {"blk.47.ffn_down_exps.weight", GgmlType::kIQ2_S}}),
+                  {"blk.47.ffn_down_exps.weight", GgmlType::kIQ2_XXS}}),
           "unsupported later expert missed after a supported expert");
 }
 
@@ -138,9 +140,9 @@ void CheckIgnoredTensors() {
     tensors.emplace_back(name, GgmlType::kIQ4_NL);
     Require(Probe(tensors), "unused tensor incorrectly declined the trunk");
   }
-  Require(Probe({{"blk.47.ffn_up_exps.weight", GgmlType::kIQ2_S}}, 48, 1),
+  Require(Probe({{"blk.47.ffn_up_exps.weight", GgmlType::kIQ2_XXS}}, 48, 1),
           "appended layer was not excluded from block_count");
-  Require(!Probe({{"blk.47.ffn_up_exps.weight", GgmlType::kIQ2_S}}, 48,
+  Require(!Probe({{"blk.47.ffn_up_exps.weight", GgmlType::kIQ2_XXS}}, 48,
                  std::nullopt),
           "absent nextn metadata incorrectly excluded the final trunk layer");
 }

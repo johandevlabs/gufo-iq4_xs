@@ -40,17 +40,23 @@ void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
 enum class WeightType : std::uint32_t {
   kF32 = 0,
   kF16 = 1,
+  kQ5_0 = 6,
   kQ5_1 = 7,
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kQ6_K = 14,
+  kIQ3_XXS = 18,
   kIQ4_NL = 20,
   kIQ3_S = 21,
+  kIQ2_S = 22,
   kIQ4_XS = 23,
   kBF16 = 30,
+  kQ2_0 = 42,
 };
 
-/// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0 rows).
+/// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0, Q6_K,
+/// IQ4_XS, F16, BF16 or F32 rows).
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream);
@@ -234,6 +240,11 @@ void QuantizeQ8Tiled(const float* x, void* out, std::size_t batch,
                      std::size_t k, hipStream_t stream);
 bool W8A8Gemm(const void* w, const void* x_tiled, float* out, std::size_t batch,
               std::size_t m, std::size_t k, hipStream_t stream);
+/// The W8A8 route over Q6_K weights (k a multiple of 256), on the same tiled
+/// activations, with Q6_K's per-K16 scales.
+void Q6KW8A8Gemm(const void* w, const void* x_tiled, float* out,
+                 std::size_t batch, std::size_t m, std::size_t k,
+                 hipStream_t stream);
 /// Native wave64 launch, selected by W8A8Gemm for wide output projections.
 /// Resolve the kernel before serving, without executing a projection.
 hipError_t PrepareW8A8GemmWave64();

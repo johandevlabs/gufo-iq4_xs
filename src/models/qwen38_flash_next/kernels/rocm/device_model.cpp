@@ -456,13 +456,14 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
     std::string* error_msg) {
-  // The CPU reference also reads Q6_K, but of the production kernels only the
-  // logits head does. Reject it elsewhere before allocating device weights.
+  // Dense Q6_K runs through the vector GEMV and the embedding lookup; the
+  // routed expert kernels have no Q6_K route. Reject that before allocating
+  // device weights.
   const auto supported = [&](const TensorRef& t) {
     if (t.type != core::GgmlType::kQ6_K)
       return true;
     if (error_msg != nullptr)
-      *error_msg = "unsupported HIP tensor format Q6_K: " + std::string(t.name);
+      *error_msg = "unsupported HIP expert format Q6_K: " + std::string(t.name);
     return false;
   };
   const auto layer_supported = [&](const LayerWeights& l) {
@@ -490,9 +491,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
                    std::string(l.ffn_gate_exps.name);
     return false;
   };
-  // A tied head has the embedding's type, so the embedding check rejects it.
-  if (!supported(w.token_embd) ||
-      !std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
+  if (!std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
       (mtp != nullptr && !mtp_block_supported(mtp->block))) {
     return nullptr;
   }

@@ -112,23 +112,70 @@ Experts MakeQ4K(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+/// Formats without an MMQ tier: the IQ formats, Q2_0 and Q5_0.
 bool IsIq(q::WeightType type) {
   return type == q::WeightType::kIQ3_S || type == q::WeightType::kIQ4_XS ||
-         type == q::WeightType::kIQ4_NL;
+         type == q::WeightType::kIQ4_NL || type == q::WeightType::kIQ2_S ||
+         type == q::WeightType::kIQ3_XXS || type == q::WeightType::kQ2_0 ||
+         type == q::WeightType::kQ5_0;
 }
 
-/// Random IQ3_S/IQ4_XS/IQ4_NL blocks: every code byte random, a moderate F16
-/// scale first, values from the independent CPU decoders.
+/// Elements and bytes per block of the formats the routed GEMMs read.
+std::size_t BlockElements(q::WeightType type) {
+  switch (type) {
+    case q::WeightType::kQ4_K:
+    case q::WeightType::kQ5_K:
+    case q::WeightType::kIQ3_S:
+    case q::WeightType::kIQ4_XS:
+    case q::WeightType::kIQ2_S:
+    case q::WeightType::kIQ3_XXS:
+      return 256;
+    case q::WeightType::kQ2_0:
+      return 64;
+    default:
+      return 32;
+  }
+}
+std::size_t BlockBytes(q::WeightType type) {
+  switch (type) {
+    case q::WeightType::kQ4_K:
+      return 144;
+    case q::WeightType::kQ5_K:
+      return 176;
+    case q::WeightType::kQ5_1:
+      return 24;
+    case q::WeightType::kIQ3_S:
+      return 110;
+    case q::WeightType::kIQ4_XS:
+      return 136;
+    case q::WeightType::kIQ2_S:
+      return 82;
+    case q::WeightType::kIQ3_XXS:
+      return 98;
+    case q::WeightType::kIQ4_NL:
+    case q::WeightType::kQ2_0:
+      return 18;
+    case q::WeightType::kQ5_0:
+      return 22;
+    default:
+      return 34;
+  }
+}
+
+/// Random IQ/Q2_0 blocks: every code byte random, a moderate F16 scale
+/// first, values from the independent CPU decoders.
 Experts MakeIq(q::WeightType type, std::size_t e, std::size_t m, std::size_t k,
                std::uint32_t seed) {
-  const std::size_t block = type == q::WeightType::kIQ4_NL ? 32 : 256;
-  const std::size_t bytes = type == q::WeightType::kIQ3_S    ? 110
-                            : type == q::WeightType::kIQ4_XS ? 136
-                                                             : 18;
+  const std::size_t block = BlockElements(type);
+  const std::size_t bytes = BlockBytes(type);
   const auto decode =
-      type == q::WeightType::kIQ3_S    ? gufo::quant::DequantizeIQ3_S
-      : type == q::WeightType::kIQ4_XS ? gufo::quant::DequantizeIQ4_XS
-                                       : gufo::quant::DequantizeIQ4_NL;
+      type == q::WeightType::kIQ3_S     ? gufo::quant::DequantizeIQ3_S
+      : type == q::WeightType::kIQ4_XS  ? gufo::quant::DequantizeIQ4_XS
+      : type == q::WeightType::kIQ2_S   ? gufo::quant::DequantizeIQ2_S
+      : type == q::WeightType::kIQ3_XXS ? gufo::quant::DequantizeIQ3_XXS
+      : type == q::WeightType::kQ2_0    ? gufo::quant::DequantizeQ2_0
+      : type == q::WeightType::kQ5_0    ? gufo::quant::DequantizeQ5_0
+                                        : gufo::quant::DequantizeIQ4_NL;
   Experts w;
   const std::size_t blocks = e * m * (k / block);
   w.packed.resize(blocks * bytes);
@@ -305,13 +352,17 @@ struct Result {
 };
 
 const char* TypeName(q::WeightType type) {
-  return type == q::WeightType::kQ4_K     ? "Q4_K"
-         : type == q::WeightType::kQ5_K   ? "Q5_K"
-         : type == q::WeightType::kQ5_1   ? "Q5_1"
-         : type == q::WeightType::kIQ3_S  ? "IQ3_S"
-         : type == q::WeightType::kIQ4_XS ? "IQ4_XS"
-         : type == q::WeightType::kIQ4_NL ? "IQ4_NL"
-                                          : "Q8_0";
+  return type == q::WeightType::kQ4_K      ? "Q4_K"
+         : type == q::WeightType::kQ5_K    ? "Q5_K"
+         : type == q::WeightType::kQ5_1    ? "Q5_1"
+         : type == q::WeightType::kIQ3_S   ? "IQ3_S"
+         : type == q::WeightType::kIQ4_XS  ? "IQ4_XS"
+         : type == q::WeightType::kIQ4_NL  ? "IQ4_NL"
+         : type == q::WeightType::kIQ2_S   ? "IQ2_S"
+         : type == q::WeightType::kIQ3_XXS ? "IQ3_XXS"
+         : type == q::WeightType::kQ2_0    ? "Q2_0"
+         : type == q::WeightType::kQ5_0    ? "Q5_0"
+                                           : "Q8_0";
 }
 
 /// Runs the MMQ tier and the F16 route over the same routing and reports
@@ -476,15 +527,13 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   // Prefill pairs gate/up for buckets the separate 16- and 48-row tiles take.
   if ((tile_rows == 16 || tile_rows == 48) &&
       (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ||
-       type == q::WeightType::kIQ3_S || type == q::WeightType::kIQ4_XS)) {
+       type == q::WeightType::kIQ3_S || type == q::WeightType::kIQ4_XS ||
+       type == q::WeightType::kIQ2_S || type == q::WeightType::kIQ3_XXS)) {
     // Different gate/up weights, with the up scale small enough that these
     // deliberately large synthetic weights do not overflow the F16 output.
     // K-quant headers carry two F16 scales, IQ blocks one.
     auto up = w.packed;
-    const std::size_t block_bytes = type == q::WeightType::kQ4_K    ? 144
-                                    : type == q::WeightType::kQ5_K  ? 176
-                                    : type == q::WeightType::kIQ3_S ? 110
-                                                                    : 136;
+    const std::size_t block_bytes = BlockBytes(type);
     const std::vector<std::size_t> scales =
         IsIq(type) ? std::vector<std::size_t>{0}
                    : std::vector<std::size_t>{0, 2};
@@ -1141,30 +1190,32 @@ std::vector<std::uint8_t> MakePacked(q::WeightType type, std::size_t e,
                                      std::uint32_t seed) {
   const bool k_quant =
       type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K;
-  const std::size_t block =
-      k_quant || type == q::WeightType::kIQ3_S || type == q::WeightType::kIQ4_XS
-          ? 256
-          : 32;
-  const std::size_t bytes = type == q::WeightType::kQ4_K     ? 144
-                            : type == q::WeightType::kQ5_K   ? 176
-                            : type == q::WeightType::kQ5_1   ? 24
-                            : type == q::WeightType::kIQ3_S  ? 110
-                            : type == q::WeightType::kIQ4_XS ? 136
-                            : type == q::WeightType::kIQ4_NL ? 18
-                                                             : 34;
+  const std::size_t block = BlockElements(type);
+  const std::size_t bytes = BlockBytes(type);
   std::vector<std::uint8_t> packed(e * m * (k / block) * bytes);
   for (auto& b : packed)
     b = static_cast<std::uint8_t>(NextRandom(&seed) >> 24);
   for (std::size_t b = 0; b < packed.size(); b += bytes) {
     // Model-like magnitudes: weights near 0.02 against unit activations
-    // (IQ codes reach 127 for IQ4_NL, times up to 32 for IQ4_XS and up to
-    // 15 times 31 for IQ3_S).
-    const float base = k_quant                          ? 4e-4F
-                       : type == q::WeightType::kIQ4_NL ? 2e-4F
-                       : type == q::WeightType::kIQ4_XS ? 1e-5F
-                       : type == q::WeightType::kIQ3_S  ? 5e-5F
-                                                        : 1.5e-3F;
-    const float d = base * (1.0F + Uniform(&seed, 0.5F));
+    // (IQ codes reach 127 for IQ4_NL, times up to 32 for IQ4_XS, up to 15
+    // times 31 for IQ3_S, 43 times 31/8 for IQ2_S and 62 times 31/4 for
+    // IQ3_XXS; Q2_0 codes are -1 to 2).
+    const float base = k_quant                           ? 4e-4F
+                       : type == q::WeightType::kIQ4_NL  ? 2e-4F
+                       : type == q::WeightType::kIQ4_XS  ? 1e-5F
+                       : type == q::WeightType::kIQ3_S   ? 5e-5F
+                       : type == q::WeightType::kIQ2_S   ? 1.5e-4F
+                       : type == q::WeightType::kIQ3_XXS ? 5e-5F
+                       : type == q::WeightType::kQ2_0    ? 1e-2F
+                       : type == q::WeightType::kQ5_0    ? 1e-3F
+                                                         : 1.5e-3F;
+    // Real Q2_0, Q5_0 and IQ4_NL blocks carry negative scales as often as
+    // positive ones; the byte-code down formats get both signs.
+    const bool any_sign =
+        type == q::WeightType::kQ2_0 || type == q::WeightType::kQ5_0 ||
+        type == q::WeightType::kIQ4_NL || type == q::WeightType::kQ8_0;
+    const float sign = any_sign && (NextRandom(&seed) & 1U) ? -1.0F : 1.0F;
+    const float d = sign * base * (1.0F + Uniform(&seed, 0.5F));
     const __half dh = __float2half(d);
     std::memcpy(packed.data() + b, &dh, 2);
     if (k_quant || type == q::WeightType::kQ5_1) {
@@ -1308,6 +1359,14 @@ int main() {
     for (const auto gate : {q::WeightType::kIQ3_S, q::WeightType::kIQ4_XS})
       for (const auto down : {q::WeightType::kIQ4_NL, q::WeightType::kQ8_0})
         routes = CheckPassRoutes(gate, down) && routes;
+    // UD-IQ3_XXS (Dynamic 3.1): IQ2_S and IQ3_XXS gate/up with IQ4_NL down,
+    // IQ2_S with Q2_0 down on three layers.
+    for (const auto gate : {q::WeightType::kIQ2_S, q::WeightType::kIQ3_XXS})
+      for (const auto down : {q::WeightType::kIQ4_NL, q::WeightType::kQ2_0})
+        routes = CheckPassRoutes(gate, down) && routes;
+    // UD-IQ4_XS (Dynamic 3.1): IQ3_XXS and IQ4_XS gate/up over Q5_0 down.
+    for (const auto gate : {q::WeightType::kIQ3_XXS, q::WeightType::kIQ4_XS})
+      routes = CheckPassRoutes(gate, q::WeightType::kQ5_0) && routes;
     if (!routes)
       throw std::runtime_error("routed expert rows depend on the pass route");
     ReportVectorAccuracy();
@@ -1371,6 +1430,30 @@ int main() {
            ok;
     }
     ok = Ok(Run(q::WeightType::kIQ3_S, 40, 4, 8, 201, 512, 0x1A3ADEADU)) && ok;
+    // UD-IQ3_XXS: IQ2_S and IQ3_XXS gate/up, Q2_0 down.
+    for (const std::uint32_t tile_rows : {48U, 16U}) {
+      ok = Ok(Run(q::WeightType::kIQ2_S, 300, 10, 64, 640, 2560,
+                  0x1A2A0000U + tile_rows, tile_rows)) &&
+           ok;
+      ok = Ok(Run(q::WeightType::kIQ3_XXS, 300, 10, 64, 640, 2560,
+                  0x1A3C0000U + tile_rows, tile_rows)) &&
+           ok;
+    }
+    for (const std::uint32_t tile_rows : {128U, 48U, 16U}) {
+      ok = Ok(Run(q::WeightType::kQ2_0, 3000, 1, 64, 2560, 640,
+                  0x1A200000U + tile_rows, tile_rows)) &&
+           ok;
+    }
+    ok = Ok(Run(q::WeightType::kIQ2_S, 40, 4, 8, 201, 512, 0x1A2ADEADU)) && ok;
+    ok =
+        Ok(Run(q::WeightType::kIQ3_XXS, 40, 4, 8, 201, 512, 0x1A3CDEADU)) && ok;
+    ok = Ok(Run(q::WeightType::kQ2_0, 97, 1, 8, 129, 640, 0x1A20BEEFU, 128)) &&
+         ok;
+    for (const std::uint32_t tile_rows : {128U, 48U, 16U}) {
+      ok = Ok(Run(q::WeightType::kQ5_0, 3000, 1, 64, 2560, 640,
+                  0x1A500000U + tile_rows, tile_rows)) &&
+           ok;
+    }
     ok =
         Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x1A4BBEEFU, 128)) &&
         ok;

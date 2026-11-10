@@ -72,6 +72,10 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kF16;
     case GgmlType::kQ8_0:
       return WeightType::kQ8_0;
+    case GgmlType::kQ6_K:
+      return WeightType::kQ6_K;
+    case GgmlType::kIQ4_XS:
+      return WeightType::kIQ4_XS;
     case GgmlType::kF32:
       return WeightType::kF32;
     default:
@@ -2022,10 +2026,31 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
 
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
+  if (w.type == GgmlType::kQ6_K && prefill_phase &&
+      w.data != model_->output().data && w.cols % 256 == 0) {
+    // Prefill over the Q6_K trunk: activations quantized per 32-wide block
+    // into the tiled layout, then the int8 WMMA GEMM, in pieces of at most
+    // max_batch rows as for Q8_0. Decode, verification and batched decode
+    // keep the GEMV below, so their rows match single-token decoding.
+    const std::uint32_t piece = static_cast<std::uint32_t>(options_.max_batch);
+    for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
+      const std::uint32_t rows = std::min(piece, n_tokens - r0);
+      const float* src = x + static_cast<std::size_t>(r0) * w.cols;
+      if (!(q8t_src_ == src && q8t_rows_ == rows && q8t_cols_ == w.cols)) {
+        QuantizeQ8Tiled(src, s_.x_q8t, rows, w.cols, stream_);
+        q8t_src_ = src;
+        q8t_rows_ = rows;
+        q8t_cols_ = w.cols;
+      }
+      Q6KW8A8Gemm(w.data, s_.x_q8t, out + static_cast<std::size_t>(r0) * w.rows,
+                  rows, w.rows, w.cols, stream_);
+    }
+    return true;
+  }
   if (w.type == GgmlType::kQ6_K) {
-    // Only the logits head uses Q6_K. Every row keeps the single-row GEMV
-    // arithmetic, so decode, verification and batched heads agree; wider
-    // calls run eight rows per launch.
+    // The logits head, and the trunk outside prefill: every row keeps the
+    // single-row GEMV arithmetic, so decode, verification and batched heads
+    // agree; wider calls run eight rows per launch.
     for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += kVecBatch) {
       const std::uint32_t rows = std::min(kVecBatch, n_tokens - r0);
       const float* src = x + static_cast<std::size_t>(r0) * w.cols;
@@ -2251,7 +2276,8 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
   if (!MatrixRows(n_tokens) && n_used <= 32 && same_shape &&
       (a.type == GgmlType::kQ4_K || a.type == GgmlType::kQ5_K ||
        a.type == GgmlType::kQ8_0 || a.type == GgmlType::kIQ3_S ||
-       a.type == GgmlType::kIQ4_NL || a.type == GgmlType::kIQ4_XS)) {
+       a.type == GgmlType::kIQ4_NL || a.type == GgmlType::kIQ4_XS ||
+       a.type == GgmlType::kIQ2_S || a.type == GgmlType::kIQ3_XXS)) {
     // The shared expert quantized the same rows (or their producer did).
     const void* ready = ReadyQ8(x, n_tokens, a.cols);
     if ((ready != nullptr

@@ -177,6 +177,9 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kQ5_0:
       block_bytes = 22;
       break;
+    case core::GgmlType::kQ2_0:
+      block_bytes = 18;
+      break;
     case core::GgmlType::kQ5_1:
       block_bytes = 24;
       break;
@@ -797,6 +800,21 @@ void DequantizeQ5_0(const void* src, float* dst, std::size_t k) {
   }
 }
 
+void DequantizeQ2_0(const void* src, float* dst, std::size_t k) {
+  // d (F16), then 16 bytes of 2-bit codes per 64 elements, four per byte from
+  // the low bits up; code q is the value (q - 1) * d.
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  for (std::size_t b = 0; b < k / 64; ++b) {
+    const std::uint8_t* blk = bytes + b * 18;
+    const float d = Fp16ToFloat(LoadU16(blk));
+    float* y = dst + b * 64;
+    for (int j = 0; j < 64; ++j) {
+      const int q = (blk[2 + j / 4] >> (2 * (j % 4))) & 0x03;
+      y[j] = static_cast<float>(q - 1) * d;
+    }
+  }
+}
+
 void DequantizeQ2_K(const void* src, float* dst, std::size_t k) {
   // scales[16] (low nibble scale, high nibble minimum), qs[64], d, dmin.
   const auto* bytes = static_cast<const std::uint8_t*>(src);
@@ -1041,6 +1059,9 @@ bool DequantizeRow(core::GgmlType type, const void* src, float* dst,
       return true;
     case core::GgmlType::kQ5_0:
       DequantizeQ5_0(src, dst, k);
+      return true;
+    case core::GgmlType::kQ2_0:
+      DequantizeQ2_0(src, dst, k);
       return true;
     case core::GgmlType::kQ5_1:
       DequantizeQ5_1(src, dst, k);

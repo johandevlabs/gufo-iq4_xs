@@ -21,8 +21,8 @@ namespace gufo::models::qwen38_flash_next::rocm {
          c.expert_ff % 64 == 0;
 }
 
-/// IQ experts have no tiled MMQ route, so prefill must reach them through
-/// WMMA. Decode reads the same layouts through the vector kernels.
+/// IQ, Q2_0 and Q5_0 experts have no tiled MMQ route, so prefill must reach
+/// them through WMMA. Decode reads the same layouts through the vector kernels.
 [[nodiscard]] inline bool IqExpertLayoutSupported(const Config& c,
                                                   core::GgmlType gate,
                                                   core::GgmlType up,
