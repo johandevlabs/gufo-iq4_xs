@@ -8312,8 +8312,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   static_assert(WM * WN == 8, "256 threads is 8 waves");
   static_assert(BM % (16 * WM) == 0 && BN % (16 * WN) == 0);
   static_assert(!(kBf16 && kHalfWeights));
-  static_assert(!kQ6 ||
-                !(kHalfWeights || kBf16 || kSsmConv || kAttention || kHcMix));
+  static_assert(!kQ6 || !(kHalfWeights || kBf16 || kAttention || kHcMix));
   // Q6_K: each thread owns one row and both K blocks of a stage, so a
   // half superblock (four K blocks) is loaded once for two stages.
   static_assert(!kQ6 || (BM == 256 && BK == 2));
@@ -9171,7 +9170,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
                      hipStream_t stream, PassCheckpoints checkpoints,
-                     hipStream_t z_stream, hipEvent_t z_start) {
+                     hipStream_t z_stream, hipEvent_t z_start, bool q6) {
   if (n_tokens == 0 || m != 16384 || k != 2560 || channels != 10240 ||
       kernel != kSsmConvTaps) {
     return false;
@@ -9179,10 +9178,24 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
   // Row-tile pairs per token tile in launch order (-0.9 %).
   const unsigned token_tiles = (n_tokens + 127) / 128;
   const unsigned qkv_tiles = z_stream != nullptr ? channels / 256 : m / 256;
-  hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
-                     dim3(token_tiles, qkv_tiles), dim3(kThreads), 0, stream, w,
-                     x, qkvz, n_tokens, m, k, nullptr, nullptr, nullptr, conv_w,
-                     convolved, AttentionProjectionOutput{}, checkpoints);
+  // Q8_0 or Q6_K weights: the same tiles, each row decoded by its format.
+  const auto launch = [&]<bool kQ6>(hipStream_t s, unsigned row_tiles,
+                                    unsigned first_row_tile) {
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true, false, false,
+                            false, false, false, kQ6>),
+        dim3(token_tiles, row_tiles), dim3(kThreads), 0, s, w, x, qkvz,
+        n_tokens, m, k, nullptr, nullptr, nullptr, conv_w, convolved,
+        AttentionProjectionOutput{}, checkpoints, 0, first_row_tile);
+  };
+  const auto launch_any = [&](hipStream_t s, unsigned row_tiles,
+                              unsigned first_row_tile) {
+    if (q6)
+      launch.template operator()<true>(s, row_tiles, first_row_tile);
+    else
+      launch.template operator()<false>(s, row_tiles, first_row_tile);
+  };
+  launch_any(stream, qkv_tiles, 0);
   if (z_stream != nullptr) {
     // Start after the QKV tiles: both GEMMs are compute bound, the
     // recurrence that follows them is not. If the fork cannot be ordered,
@@ -9190,11 +9203,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
     if (hipEventRecord(z_start, stream) != hipSuccess ||
         hipStreamWaitEvent(z_stream, z_start, 0) != hipSuccess)
       z_stream = stream;
-    hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 2, 8, 1, 2, false, true>),
-                       dim3(token_tiles, m / 256 - qkv_tiles), dim3(kThreads),
-                       0, z_stream, w, x, qkvz, n_tokens, m, k, nullptr,
-                       nullptr, nullptr, conv_w, convolved,
-                       AttentionProjectionOutput{}, checkpoints, 0, qkv_tiles);
+    launch_any(z_stream, m / 256 - qkv_tiles, qkv_tiles);
   }
   hipLaunchKernelGGL(
       SsmConvBoundaryKernel,

@@ -82,7 +82,7 @@ Q8Weights MakeWeights(std::size_t m, std::size_t k, std::uint32_t seed,
 // its actual consumer, including the state carried into the next chunk.
 void CheckSsmProjection(const void* w, const __half* x, float* projected,
                         const std::vector<float>& reference,
-                        std::uint32_t batch) {
+                        std::uint32_t batch, bool q6 = false) {
   constexpr std::uint32_t m = 16384, k = 2560, channels = 10240;
   constexpr std::uint32_t kh = 16, vh = 48, d = 128, value_dim = vh * d;
   const std::size_t conv_count = std::size_t(batch) * channels;
@@ -192,7 +192,8 @@ void CheckSsmProjection(const void* w, const __half* x, float* projected,
     CheckHip(hipDeviceSynchronize(), "SSM inputs");
     if (!q::DenseF16SsmGemm(w, x, conv_w, conv_state, fused, scratch, batch, m,
                             k, channels, 4, replay == 2 ? main_stream : nullptr,
-                            {}, replay == 2 ? z_stream : nullptr, z_start)) {
+                            {}, replay == 2 ? z_stream : nullptr, z_start,
+                            q6)) {
       throw std::runtime_error("SSM projection rejected the shape");
     }
     CheckHip(hipDeviceSynchronize(), "SSM projection");
@@ -1369,6 +1370,11 @@ void CheckQ6KF16(std::size_t m, std::size_t k, std::size_t wide,
                                 expected.data() + (first + r) * m, m * 4) != 0;
     }
   }
+  // The stacked SSM input projection: the fused prefill route against these
+  // plain rows.
+  if (m == 16384 && k == 2560)
+    CheckSsmProjection(d_w, d_half, d_wide, expected,
+                       static_cast<std::uint32_t>(wide), true);
   (void)hipFree(d_w);
   (void)hipFree(d_x);
   (void)hipFree(d_half);
@@ -1392,6 +1398,7 @@ int main() {
     // and attn_output (K 6144), with ragged token counts.
     CheckQ6KF16(640, 2560, 1619, 0x6C0640U);
     CheckQ6KF16(10240, 2560, 1549, 0x6CA240U);
+    CheckQ6KF16(16384, 2560, 1549, 0x6C4000U);
     CheckQ6KF16(2560, 6144, 1549, 0x6C6144U);
     CheckQ6KF16(201, 2560, 97, 0x6C0201U);
     if (qfn_mmq_init(0) != 0)

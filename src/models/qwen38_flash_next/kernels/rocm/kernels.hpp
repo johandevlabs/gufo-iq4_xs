@@ -323,7 +323,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      std::uint32_t channels, std::uint32_t kernel,
                      hipStream_t stream, PassCheckpoints checkpoints = {},
                      hipStream_t z_stream = nullptr,
-                     hipEvent_t z_start = nullptr);
+                     hipEvent_t z_start = nullptr, bool q6 = false);
 
 /// Routed expert GEMMs. RoutedCompact sorts the (token, slot) assignments
 /// by expert into `rows_token`/`rows_slot` (RoutedCompactRows(slots,
