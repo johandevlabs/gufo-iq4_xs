@@ -12,6 +12,9 @@ multi-token prediction (MTP) head.
 | `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` | MTP |
 | `mmproj-BF16.gguf` | Images |
 
+For 96 GB machines, use the smaller
+[UD-IQ4_XS or UD-IQ3_XXS](qwen3.8-flash-next-ud-iq.md) instead of UD-Q4_K_XL.
+
 ```sh
 hf download unsloth/Qwen3.8-Flash-Next-GGUF \
   --revision d96201194f103c906994f283f504209dc8d2a10c \

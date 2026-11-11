@@ -1,5 +1,11 @@
 # Gufo: The ***Open Source*** Strix Halo AI engine
 
+> [!NOTE]
+> This fork adds Qwen3.8 Flash-Next in Unsloth's smaller
+> [UD-IQ4_XS and UD-IQ3_XXS](docs/models/qwen3.8-flash-next-ud-iq.md)
+> quantizations, for 96 GB Strix Halo machines. Everything
+> else is Gufo 0.33.0.
+
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>

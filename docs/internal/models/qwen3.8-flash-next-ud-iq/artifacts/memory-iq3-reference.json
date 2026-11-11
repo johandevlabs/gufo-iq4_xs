@@ -1,0 +1,85 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-38-generic",
+      "memoryTotalBytes": 99804033024,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "3d580d978590391537282e83b2332a50d8709cfc10a61084145bd357ec4bf872",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-11-11",
+  "mode": null,
+  "model": {
+    "id": "Qwen3.8-Flash-Next",
+    "variant": "iq3"
+  },
+  "notes": [
+    "llama.cpp: llama-server version: 0.4.1 (build 11429, commit 68d9053a)",
+    "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
+    "server mode: ar"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "16K prefix, pp4096 + tg128": {
+      "command": "llama-server -m Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf -c 133121 -np 1 --port 57307 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 62.85,
+      "idle_gib": 6.01
+    },
+    "pp2048 + tg128": {
+      "command": "llama-server -m Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf -c 133121 -np 1 --port 57307 --host 127.0.0.1 --alias bench -ngl 999 -fa on --cache-reuse 0 --jinja --reasoning off --cache-ram 0",
+      "gib": 62.52,
+      "idle_gib": 6.01
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "llama-server",
+      "-m",
+      "Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf",
+      "-c",
+      "133121",
+      "-np",
+      "1",
+      "--port",
+      "57307",
+      "--host",
+      "127.0.0.1",
+      "--alias",
+      "bench",
+      "-ngl",
+      "999",
+      "-fa",
+      "on",
+      "--cache-reuse",
+      "0",
+      "--jinja",
+      "--reasoning",
+      "off",
+      "--cache-ram",
+      "0"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "e9d4e5cd1a28db988aa2fa6a911cdf07c27ebd27"
+  },
+  "table": "memory-iq3",
+  "target": "reference"
+}
