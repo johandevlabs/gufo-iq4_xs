@@ -57,6 +57,11 @@ const std::map<std::string_view, std::string_view> kKnownDeviations{
     {"stray-idat-after-text", kStrayIdat},
 };
 
+// Rows whose libpng behaviour depends on the libpng build: Ubuntu 24.04's
+// 1.6.43 checks the IEND CRC and so agrees with the png crate, while other
+// builds ignore it. Either outcome passes.
+const std::set<std::string_view> kLibpngDependent{"iend-bad-crc"};
+
 struct Outcome {
   enum class Kind {
     kPixels,
@@ -1055,7 +1060,7 @@ void CheckCase(const std::string& name, const Bytes& png, bool valid,
   if (deviates && !listed) {
     failures.Add(name + ": DecodeImage differs from the reference\n" +
                  Difference(expected, actual));
-  } else if (!deviates && listed) {
+  } else if (!deviates && listed && !kLibpngDependent.contains(name)) {
     failures.Add(
         name +
         " is in kKnownDeviations but matches the reference; remove the row");
