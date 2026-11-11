@@ -822,8 +822,6 @@ public:
                 .max_layer_groups = kMaxPrefillLayerGroups,
                 .max_yield_decode_width = MaximumDecodeBatchWidth(),
             },
-        .prefill_step_tokens = std::min<std::size_t>(
-            max_context_, hip::QwenGpuArena::kMaxPromptBatch),
     };
   }
 

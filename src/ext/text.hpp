@@ -577,6 +577,15 @@ public:
   virtual void PrepareBatchExecution(TextRunnerState& state) const {
     (void)state;
   }
+  /// The next position at which the state will be decoded from, snapshotted
+  /// or shared. A runner whose draft reads a bounded window of target context
+  /// may omit that context for prompt positions the window will have left by
+  /// then. Applies to the next Prefill only.
+  virtual void SetDraftContextHorizon(TextRunnerState& state,
+                                      std::size_t position) const {
+    (void)state;
+    (void)position;
+  }
   [[nodiscard]] virtual TextPrefillStep Prefill(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t max_input_tokens) const = 0;
