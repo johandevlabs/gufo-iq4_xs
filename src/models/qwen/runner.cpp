@@ -1379,9 +1379,8 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
       *error = "--kv-cache must be f16 or q8_0";
     return nullptr;
   }
-  const auto kv_storage = kv_cache == "q8_0"
-                              ? hip::QwenKvCacheStorage::kQ8
-                              : hip::QwenKvCacheStorage::kFp16;
+  const auto kv_storage = kv_cache == "q8_0" ? hip::QwenKvCacheStorage::kQ8
+                                             : hip::QwenKvCacheStorage::kFp16;
   std::shared_ptr<models::qwen::vision::Encoder> vision;
   try {
     // The Qwen3.8-27B and Ornith-1.5-122B (qwen35moe) trunks take the shared

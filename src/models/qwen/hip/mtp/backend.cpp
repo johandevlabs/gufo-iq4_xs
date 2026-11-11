@@ -517,9 +517,9 @@ std::vector<speculative::DraftProposal> QwenMtpGpuDraftBackend::ProposeBatch(
   for (std::size_t index = 0; index < requests.size(); ++index) {
     const auto& request = requests[index];
     const auto& backend = *backends[index];
-    const auto count = std::min({request.max_tokens,
-                                 backend.config_.max_draft_tokens,
-                                 backend.step_draft_cap_});
+    const auto count =
+        std::min({request.max_tokens, backend.config_.max_draft_tokens,
+                  backend.step_draft_cap_});
     if (backend.executor_->GetNextPosition() + count >
         backend.executor_->GetMaxContext()) {
       throw std::invalid_argument(
