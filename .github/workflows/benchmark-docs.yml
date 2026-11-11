@@ -34,7 +34,7 @@ jobs:
         run: |
           set -euo pipefail
           status=0
-          for config in docs/models/*/artifacts/bench*.json; do
+          for config in docs/internal/models/*/artifacts/bench*.json; do
             model=$(basename "$(dirname "$(dirname "$config")")")
             echo "::group::$model $(basename "$config")"
             python3 tools/bench/model-bench.py --model "$model" --config "$config" \
