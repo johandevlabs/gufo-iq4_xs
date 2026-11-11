@@ -97,6 +97,11 @@ gpu_tests() {
       [ -d "$d/include" ] && incs="$incs -isystem $d/include"
     done
   done
+  # Gufo's Rust components need the toolchain rust-toolchain.toml pins; the
+  # distribution's cargo is too old. rustup's proxies select the pinned one.
+  local rust=()
+  [ -x "$HOME/.cargo/bin/cargo" ] &&
+    rust=(-DCARGO_EXECUTABLE="$HOME/.cargo/bin/cargo" -DRUSTC_EXECUTABLE="$HOME/.cargo/bin/rustc")
   if [ $venv_rc != 0 ]; then
     fail "test Python setup"
     return
@@ -104,7 +109,7 @@ gpu_tests() {
   if ! BUILD_TESTING=ON GUFO_BUILD_TOOLS=ON bash "$TOOLCHAIN/configure-rocm10.sh" "$src" nightly-gpu \
        > "$out/logs/configure.log" 2>&1 ||
      ! cmake -S "$src" -B "$tree" -DCMAKE_EXE_LINKER_FLAGS="$flags" -DCMAKE_SHARED_LINKER_FLAGS="$flags" \
-         -DPython3_EXECUTABLE="$venv/bin/python" -DCMAKE_CXX_FLAGS="$incs" \
+         -DPython3_EXECUTABLE="$venv/bin/python" -DCMAKE_CXX_FLAGS="$incs" "${rust[@]}" \
        >> "$out/logs/configure.log" 2>&1 ||
      ! cmake --build "$tree" -j"$(nproc)" --target all qwen38_flash_next_model_tests \
          > "$out/logs/build.log" 2>&1; then
