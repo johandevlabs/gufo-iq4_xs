@@ -137,8 +137,8 @@ void Expect(bool ok, const std::string& what) {
     throw std::runtime_error(what);
 }
 
-/// Routed vector, paired, fused gate/up and tiled MMQ projections of one
-/// format: all against F64, the vector paths against single-row decode.
+/// Routed vector, paired and fused gate/up projections of one format: all
+/// against F64, the vector paths against single-row decode.
 void CheckRouted(const Format& f, int rows, int cols, int tokens, int used) {
   constexpr int experts = 8;
   const std::string tag = std::string(f.name) + " m=" + std::to_string(rows) +

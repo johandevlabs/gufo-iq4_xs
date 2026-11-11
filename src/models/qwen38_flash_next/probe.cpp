@@ -3,8 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <vector>
+
+#include "src/models/qwen38_flash_next/weights.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 
@@ -27,6 +32,9 @@ bool ProbeFlashNextGguf(const core::GgufReader& reader) {
       core::GgmlType::kQ4_K,   core::GgmlType::kQ5_K,  core::GgmlType::kQ6_K,
       core::GgmlType::kQ5_1,   core::GgmlType::kQ8_0,  core::GgmlType::kIQ3_S,
       core::GgmlType::kIQ4_XS, core::GgmlType::kIQ4_NL};
+  // Gate, up and down formats per trunk layer, for the IQ layout rule.
+  std::vector<std::array<std::optional<core::GgmlType>, 3>> layer_formats(
+      trunk_layers);
   for (const auto& tensor : reader.GetTensors()) {
     auto name = tensor.name;
     if (!name.starts_with("blk.")) {
@@ -41,16 +49,25 @@ bool ProbeFlashNextGguf(const core::GgufReader& reader) {
       continue;
     }
     name.remove_prefix(end - name.data());
-    if (name != ".ffn_gate_exps.weight" && name != ".ffn_up_exps.weight" &&
-        name != ".ffn_down_exps.weight") {
+    const std::size_t role = name == ".ffn_gate_exps.weight"   ? 0
+                             : name == ".ffn_up_exps.weight"   ? 1
+                             : name == ".ffn_down_exps.weight" ? 2
+                                                               : 3;
+    if (role == 3) {
       continue;
     }
     if (std::find(kExpertFormats.begin(), kExpertFormats.end(), tensor.type) ==
         kExpertFormats.end()) {
       return false;
     }
+    layer_formats[layer][role] = tensor.type;
   }
-  return true;
+  // The loader diagnoses missing experts; only complete layers are checked.
+  return std::all_of(
+      layer_formats.begin(), layer_formats.end(), [](const auto& formats) {
+        return !formats[0] || !formats[1] || !formats[2] ||
+               IqExpertFormatsSupported(*formats[0], *formats[1], *formats[2]);
+      });
 }
 
 std::optional<sampling::TextSamplingDefaults> FlashNextSamplingDefaults() {

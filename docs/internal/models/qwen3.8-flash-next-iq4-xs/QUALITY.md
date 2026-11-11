@@ -50,11 +50,16 @@ reference at all 24 positions; mean KL 0.019, maximum 0.101.
 | --- | --- |
 | `qwen38_flash_next_iq_ops_test` | IQ3_S/IQ4_XS/IQ4_NL vector kernels (single and grouped rows, gated pairs, wave64 batches) and the Q6_K head GEMV against the CPU decoders; the load-time layout rules. |
 | `qwen38_flash_next_routed_wmma_ops_test` | F16 WMMA expert GEMMs for IQ3_S/IQ4_XS gate/up and IQ4_NL down against an F64 reference; the paired 128-token gate/up and the 128-token down projection against the separate 16- and 48-row tiles, bit for bit, over model shapes (`CheckPassRoutes`: IQ3_S and IQ4_XS gate/up with IQ4_NL and Q8_0 down), including short and ragged passes. |
-| `qwen38_flash_next_probe_test` | The probe claims IQ3_S/IQ4_XS/IQ4_NL experts and still declines other formats. |
+| `qwen38_flash_next_probe_test` | The probe claims IQ3_S/IQ4_XS/IQ4_NL experts only in layouts the executor runs, and still declines other formats. |
 
 IQ blocks are decoded to signed bytes and take Q8_0's F16 arithmetic in every
 routed GEMM, so a prompt row's expert outputs do not depend on the pass that
-computes it.
+computes it. For IQ3_S and IQ4_XS these kernels round the combined scale
+(`d` times the sub-block scale) to F16, as for Q4_K, while the decode vector
+kernels keep it in F32, so prefill and decode do not compute exactly the same
+products; IQ4_NL's scale is `d` itself and stays exact. The CPU F32 reference comparison above,
+whose prompt is prefilled through these kernels, shows the effect is small:
+the same top-1 at all 24 positions, mean KL 0.019.
 
 ## Model tests
 

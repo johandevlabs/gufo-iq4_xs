@@ -14,6 +14,33 @@
 
 namespace gufo::models::qwen38_flash_next {
 
+/// Expert formats the routed F16 GEMMs (WMMA) read: one gate/up format and a
+/// down format. The executor also requires WMMA-compatible shapes.
+[[nodiscard]] inline bool WmmaExpertFormats(core::GgmlType gate,
+                                            core::GgmlType up,
+                                            core::GgmlType down) {
+  using core::GgmlType;
+  return (gate == GgmlType::kQ4_K || gate == GgmlType::kQ5_K ||
+          gate == GgmlType::kIQ3_S || gate == GgmlType::kIQ4_XS) &&
+         up == gate &&
+         (down == GgmlType::kQ5_1 || down == GgmlType::kQ8_0 ||
+          down == GgmlType::kIQ4_NL);
+}
+
+[[nodiscard]] inline bool IsIqExpert(core::GgmlType type) {
+  return type == core::GgmlType::kIQ3_S || type == core::GgmlType::kIQ4_NL ||
+         type == core::GgmlType::kIQ4_XS;
+}
+
+/// IQ experts have no tiled MMQ route, so a layer with any IQ expert must use
+/// WMMA formats. The probe and the executor share this rule.
+[[nodiscard]] inline bool IqExpertFormatsSupported(core::GgmlType gate,
+                                                   core::GgmlType up,
+                                                   core::GgmlType down) {
+  return !(IsIqExpert(gate) || IsIqExpert(up) || IsIqExpert(down)) ||
+         WmmaExpertFormats(gate, up, down);
+}
+
 /// Optional host destinations for independent predictor qualification.
 /// Every populated span contains the final complete row of its stage.
 struct MtpTrace {
