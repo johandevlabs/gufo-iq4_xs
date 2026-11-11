@@ -1,19 +1,42 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
 #include <chrono>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
 #include <thread>
 
-#include "src/core/hip/hip_utils.hpp"
 #include "src/models/qwen/hip/executor.hpp"
 
 namespace gufo::hip {
 void QwenGpuExecutor::CheckPrefillCancellation() const {
   if (cancellation_check_ && cancellation_check_())
-    throw std::runtime_error("Qwen prefill cancelled");
+    throw QwenPrefillCancelled();
+}
+
+void QwenGpuExecutor::SetPrefillYield(std::size_t groups,
+                                      std::function<void()> yield) {
+  yield_layers_.clear();
+  yield_ = {};
+  if (groups < 2 || !yield)
+    return;
+  const std::uint32_t layers = weights_.config.num_layers;
+  for (std::size_t k = 1; k < groups; ++k) {
+    const auto layer = static_cast<std::uint32_t>(k * layers / groups);
+    if (layer != 0 && layer < layers &&
+        (yield_layers_.empty() || yield_layers_.back() != layer))
+      yield_layers_.push_back(layer);
+  }
+  yield_ = std::move(yield);
 }
 
 void QwenGpuExecutor::PrefillLayerCheckpoint(std::uint32_t layer) {
+  // Every buffer this pass carries across layers is in this executor's
+  // arena, which no other session's decode touches. Draining the queued
+  // layers first keeps them from sharing the GPU with the decode round.
+  if (yield_ && std::ranges::binary_search(yield_layers_, layer)) {
+    HIP_CHECK(hipStreamSynchronize(arena_.stream));
+    yield_();
+  }
   CheckPrefillCancellation();
   // Keep one four-layer group ahead of the GPU. Without backpressure, AR
   // can enqueue the whole prompt before the client disconnects; checking
@@ -48,11 +71,14 @@ tokenization::TokenId QwenGpuExecutor::ForwardPromptBatch(
   replaying_ssm_state_ = false;
   arena_.DisableSsmReplayCapture();
   if (capture_prompt_hidden_) {
-    h_prompt_hidden_.clear();
+    h_prompt_hidden_.Clear();
     const std::size_t captured_layers =
         std::max<std::size_t>(arena_.GetTargetLayerCapture().size(), 1U);
-    h_prompt_hidden_.reserve(prompt_tokens.size() * captured_layers *
-                             weights_.config.hidden_size);
+    const std::size_t row = captured_layers * weights_.config.hidden_size;
+    // Pinned up to one prompt batch (the serve path's largest call); a longer
+    // prompt from a non-serve caller captures into pageable memory instead.
+    h_prompt_hidden_.Reserve(prompt_tokens.size() * row,
+                             std::size_t{GetMaxPromptBatch()} * row);
   }
 
   const std::size_t end_pos =

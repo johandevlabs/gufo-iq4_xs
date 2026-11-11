@@ -1,8 +1,11 @@
 #ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_DATA_INTERNAL_H_
 #define GUFO_MODELS_DEEPSEEK_V4_FLASH_RUNTIME_MODEL_DATA_INTERNAL_H_
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+
+#include <gufo/ext/platform/mapped_file.hpp>
 
 #include "model.h"
 #include "tensor_types.h"
@@ -47,6 +50,10 @@ inline constexpr float DS4_ROPE_YARN_BETA_SLOW = 1.0F;
 inline constexpr float DS4_COMPRESS_ROPE_FREQ_BASE = 160000.0F;
 inline constexpr uint64_t DS4_ROPE_ORIG_CTX = 65536;
 
+inline bool ds4_config_f32_matches(float got, float expected) {
+    return std::fabs(got - expected) <= std::fabs(expected) * 1.0e-6F;
+}
+
 struct ds4_str {
     const char *ptr;
     uint64_t len;
@@ -70,7 +77,8 @@ struct ds4_tensor {
 };
 
 struct ds4_model {
-    int fd;
+    gufo::platform::PlatformFile fd;
+    gufo::platform::RawMappedFile mapping;
     const uint8_t *map;
     uint64_t size;
     uint32_t version;

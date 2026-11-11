@@ -1,7 +1,8 @@
-// IQ3_S/IQ4_NL/IQ4_XS routed experts and the Q6_K logits head (UD-IQ4_XS
-// target): accuracy against an F64 dot product over the CPU dequantizers, and
-// the exactness contracts of the vector paths (batched rows, paired and fused
-// gate/up all match single-row decode bit for bit).
+// IQ3_S/IQ4_NL/IQ4_XS (UD-IQ4_XS) and IQ2_S/IQ3_XXS/Q2_0 (UD-IQ3_XXS) routed
+// experts and the Q6_K logits head: accuracy against an F64 dot product over
+// the CPU dequantizers, and the exactness contracts of the vector paths
+// (batched rows, paired and fused gate/up all match single-row decode bit for
+// bit).
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -17,6 +18,7 @@
 
 #include "src/core/gguf_reader.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
+#include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -80,6 +82,14 @@ const Format kIQ4_NL{
     GgmlType::kIQ4_NL, "IQ4_NL", 32, 18, 0, gufo::quant::DequantizeIQ4_NL};
 const Format kIQ4_XS{
     GgmlType::kIQ4_XS, "IQ4_XS", 256, 136, 0, gufo::quant::DequantizeIQ4_XS};
+const Format kIQ2_S{
+    GgmlType::kIQ2_S, "IQ2_S", 256, 82, 0, gufo::quant::DequantizeIQ2_S};
+const Format kIQ3_XXS{
+    GgmlType::kIQ3_XXS, "IQ3_XXS", 256, 98, 0, gufo::quant::DequantizeIQ3_XXS};
+const Format kQ2_0{
+    GgmlType::kQ2_0, "Q2_0", 64, 18, 0, gufo::quant::DequantizeQ2_0};
+const Format kQ5_0{
+    GgmlType::kQ5_0, "Q5_0", 32, 22, 0, gufo::quant::DequantizeQ5_0};
 const Format kQ6_K{
     GgmlType::kQ6_K, "Q6_K", 256, 210, 208, gufo::quant::DequantizeQ6_K};
 
@@ -220,9 +230,11 @@ void CheckRouted(const Format& f, int rows, int cols, int tokens, int used) {
   q::Swiglu(single_a, single_b, count, nullptr);
   const auto swiglu = Download(single_a, count);
   // IQ3_S/IQ4_XS gate/up also group up to 64 rows of a request batch by
-  // expert (the wave64 path).
+  // expert (the wave64 path). Q2_0 and Q5_0 are only down projection formats.
   std::vector<int> gated_widths{1, 2, 3, 4, 5, 6, 7, 8};
-  if (f.type != GgmlType::kIQ4_NL)
+  if (f.type == GgmlType::kQ2_0 || f.type == GgmlType::kQ5_0)
+    gated_widths.clear();
+  if (f.type == GgmlType::kIQ3_S || f.type == GgmlType::kIQ4_XS)
     gated_widths.insert(gated_widths.end(), {9, 16, 31, 32, 33});
   for (int n : gated_widths) {
     if (n > tokens)
@@ -236,26 +248,71 @@ void CheckRouted(const Format& f, int rows, int cols, int tokens, int used) {
                " changed SwiGLU bits");
   }
 
-  // Tiled MMQ (prefill fallback).
-  using Raw = int (*)(const void*, const float*, const std::int32_t*, float*,
-                      int, int, int, int, int, hipStream_t);
-  const Raw raw = f.type == GgmlType::kIQ3_S    ? qfn_mmq_iq3_s_moe_raw
-                  : f.type == GgmlType::kIQ4_NL ? qfn_mmq_iq4_nl_moe_raw
-                                                : qfn_mmq_iq4_xs_moe_raw;
-  CheckHip(hipMemset(out, 0, count * sizeof(float)), "clear MMQ output");
-  Expect(!raw(wa, dx, di, out, rows, cols, tokens, experts, used, nullptr),
-         tag + ": tiled MMQ launch failed");
-  CheckHip(hipDeviceSynchronize(), "tiled MMQ");
-  const double mmq_error = RelativeError(Download(out, count), ref_a);
-  Expect(mmq_error < 1e-2, tag + ": MMQ error " + std::to_string(mmq_error));
-
   std::cout << tag << " tokens=" << tokens << " used=" << used
-            << ": vector rel err " << vec_error << ", MMQ rel err " << mmq_error
-            << '\n';
+            << ": vector rel err " << vec_error << '\n';
   for (void* p : {static_cast<void*>(wa), static_cast<void*>(wb),
                   static_cast<void*>(dx), static_cast<void*>(di),
                   static_cast<void*>(single_a), static_cast<void*>(single_b),
                   static_cast<void*>(out), static_cast<void*>(out_b)})
+    CheckHip(hipFree(p), "free");
+}
+
+/// Layouts the expert kernels can run: IQ formats must take the routed F16 path
+/// at prefill, because they have no tiled MMQ route.
+void CheckIqExpertLayouts() {
+  gufo::models::qwen38_flash_next::Config c;
+  c.hidden_size = 2560;
+  c.expert_ff = 640;
+  const auto ok = [&](GgmlType gate, GgmlType up, GgmlType down) {
+    return q::IqExpertLayoutSupported(c, gate, up, down);
+  };
+  using enum GgmlType;
+  Expect(ok(kIQ3_S, kIQ3_S, kIQ4_NL), "IQ3_S gate/up with IQ4_NL down");
+  Expect(ok(kIQ3_S, kIQ3_S, kQ8_0), "IQ3_S gate/up with Q8_0 down");
+  Expect(ok(kIQ4_XS, kIQ4_XS, kIQ4_NL), "IQ4_XS gate/up with IQ4_NL down");
+  Expect(ok(kIQ2_S, kIQ2_S, kIQ4_NL), "IQ2_S gate/up with IQ4_NL down");
+  Expect(ok(kIQ2_S, kIQ2_S, kQ2_0), "IQ2_S gate/up with Q2_0 down");
+  Expect(ok(kIQ3_XXS, kIQ3_XXS, kIQ4_NL), "IQ3_XXS gate/up with IQ4_NL down");
+  Expect(ok(kQ4_K, kQ4_K, kIQ4_NL), "Q4_K gate/up with IQ4_NL down");
+  Expect(ok(kQ8_0, kQ8_0, kQ8_0), "layouts without IQ formats stay allowed");
+  Expect(ok(kQ4_K, kQ8_0, kQ5_1), "mixed layouts without IQ stay allowed");
+  Expect(!ok(kIQ3_S, kIQ4_XS, kIQ4_NL), "mismatched IQ gate/up");
+  Expect(!ok(kIQ3_S, kQ4_K, kIQ4_NL), "IQ gate with another up format");
+  Expect(!ok(kIQ4_NL, kIQ4_NL, kIQ4_NL), "IQ4_NL gate/up");
+  Expect(!ok(kIQ3_S, kIQ3_S, kIQ4_XS), "IQ4_XS down");
+  Expect(!ok(kQ4_K, kQ4_K, kIQ3_S), "IQ3_S down");
+  Expect(!ok(kQ2_0, kQ2_0, kIQ4_NL), "Q2_0 gate/up");
+  Expect(ok(kIQ3_XXS, kIQ3_XXS, kQ5_0), "IQ3_XXS gate/up with Q5_0 down");
+  Expect(ok(kIQ4_XS, kIQ4_XS, kQ5_0), "IQ4_XS gate/up with Q5_0 down");
+  Expect(!ok(kIQ2_S, kIQ2_S, kIQ3_XXS), "IQ3_XXS down");
+  c.expert_ff = 641;
+  Expect(!ok(kIQ3_S, kIQ3_S, kIQ4_NL), "IQ experts outside the WMMA shape");
+}
+
+/// Embedding lookup over IQ4_XS (UD-IQ4_XS) and Q6_K (UD-IQ3_XXS) tables:
+/// every element equal to the CPU decoder's value, copied to each stream.
+void CheckEmbedding(const Format& f) {
+  constexpr std::size_t kHidden = 2560, kVocab = 97, kStreams = 2;
+  const Weights w = Make(f, 1, kVocab, kHidden, 0xE3BEDU);
+  const std::vector<std::int32_t> tokens{0, 96, 5, 5, 40};
+  auto* table = Upload(w.packed);
+  auto* ids = Upload(tokens);
+  auto* res = Upload(std::vector<float>(tokens.size() * kStreams * kHidden));
+  q::EmbedTokens(table, static_cast<q::WeightType>(f.type), ids, res,
+                 static_cast<std::uint32_t>(tokens.size()), kHidden, kStreams,
+                 nullptr);
+  const auto out = Download(res, tokens.size() * kStreams * kHidden);
+  for (std::size_t t = 0; t < tokens.size(); ++t)
+    for (std::size_t s = 0; s < kStreams; ++s)
+      for (std::size_t i = 0; i < kHidden; ++i) {
+        const float want = w.values[tokens[t] * kHidden + i];
+        const float got = out[(t * kStreams + s) * kHidden + i];
+        Expect(std::fabs(got - want) <= 1e-6F * std::fabs(want),
+               std::string(f.name) + " embedding differs from the decoder");
+      }
+  std::cout << f.name << " embedding: exact against the CPU decoder\n";
+  for (void* p : {static_cast<void*>(table), static_cast<void*>(ids),
+                  static_cast<void*>(res)})
     CheckHip(hipFree(p), "free");
 }
 
@@ -315,15 +372,24 @@ int main() {
   try {
     if (qfn_mmq_init(0) != 0)
       throw std::runtime_error("qfn_mmq_init failed");
+    CheckIqExpertLayouts();
     // Gate/up view (top-k slots), with a ragged row count.
     for (int rows : {64, 65}) {
       CheckRouted(kIQ3_S, rows, 2560, 33, 3);
       CheckRouted(kIQ4_XS, rows, 2560, 33, 3);
       CheckRouted(kIQ4_NL, rows, 2560, 33, 3);
+      CheckRouted(kIQ2_S, rows, 2560, 33, 3);
+      CheckRouted(kIQ3_XXS, rows, 2560, 33, 3);
     }
     // Down view: one slot per row, K 640.
     CheckRouted(kIQ4_NL, 2560, 640, 40, 1);
     CheckRouted(kIQ4_NL, 2561, 640, 9, 1);
+    CheckRouted(kQ2_0, 2560, 640, 40, 1);
+    CheckRouted(kQ2_0, 2561, 640, 9, 1);
+    CheckRouted(kQ5_0, 2560, 640, 40, 1);
+    CheckRouted(kQ5_0, 2561, 640, 9, 1);
+    CheckEmbedding(kIQ4_XS);
+    CheckEmbedding(kQ6_K);
     CheckQ6KHead(300, 2560);
     CheckQ6KHead(301, 2560);
   } catch (const std::exception& e) {

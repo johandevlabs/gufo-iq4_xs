@@ -1,5 +1,3 @@
-#include <unistd.h>
-
 #include <array>
 #include <cctype>
 #include <cmath>
@@ -12,8 +10,13 @@
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/core/gguf_identity.hpp"
 #include "src/core/image.hpp"
+#include "src/core/speculative/speculative_verifier.hpp"
+#include "src/models/qwen/hip/dflash.hpp"
 #include "src/models/qwen/hip/executor.hpp"
+#include "src/models/qwen/runner.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/runner.hpp"
+#include "tests/support/temporary_directory.hpp"
 
 namespace {
 using namespace gufo;
@@ -153,15 +156,21 @@ void CheckQwenIncrementalOracle(
   hip::QwenGpuExecutor incremental(model, 1024);
   incremental.ConfigureVision(prompt, model->VisionEncoder());
   const auto tokens = std::span(prompt->tokens);
-  // Replay the same execution history: the retained reply used decode
-  // arithmetic, not matrix prefill. The separate cold comparison below
-  // deliberately continues to check that stronger guarantee.
+  // Replay all published tokens with decode arithmetic. DFlash can retain
+  // one fewer computed row than it published; serving consumes that pending
+  // token through ResumeGeneratedToken before prefilling the new suffix.
+  const auto published_end = previous.prompt_tokens + previous.tokens.size();
+  Require(published_end <= tokens.size() &&
+              cached.cached_prompt_tokens >= previous.prompt_tokens &&
+              cached.cached_prompt_tokens <= published_end &&
+              std::equal(previous.tokens.begin(), previous.tokens.end(),
+                         tokens.begin() + previous.prompt_tokens),
+          "continued image fixture must retain the published token history");
   (void)incremental.ForwardPromptBatch(tokens.first(previous.prompt_tokens));
-  for (std::size_t i = previous.prompt_tokens; i < cached.cached_prompt_tokens;
-       ++i)
+  for (std::size_t i = previous.prompt_tokens; i < published_end; ++i)
     (void)incremental.ForwardToken(tokens[i], i);
-  auto next = incremental.ForwardPromptBatch(
-      tokens.subspan(cached.cached_prompt_tokens), cached.cached_prompt_tokens);
+  auto next = incremental.ForwardPromptBatch(tokens.subspan(published_end),
+                                             published_end);
   std::vector<tokenization::TokenId> generated;
   for (std::size_t i = 0; i < cached.tokens.size(); ++i) {
     generated.push_back(next);
@@ -360,6 +369,9 @@ int main(int argc, char** argv) {
                           : flash ? server::TextSpeculativeBackend::kMtp
                                   : server::TextSpeculativeBackend::kDFlash;
     speculative.draft_model_path = draft;
+    // Exact C1/C4 proposal accounting needs a fixed width. The adaptive
+    // greedy controller is allowed to choose a different width for each batch.
+    speculative.dflash_policy = ext::TextDFlashDraftPolicy::kFixed;
     std::shared_ptr<const hip::QwenGpuModel> qwen;
     std::shared_ptr<models::qwen38_flash_next::Model> qfn;
     if (flash) {
@@ -386,10 +398,35 @@ int main(int argc, char** argv) {
       auto mode_cache = cache;
       if (!use_spec)
         mode_cache.draft_model_artifact_fingerprint.clear();
-      const bool loaded = flash ? backend->load(qfn, &error, context, 4, {}, {},
-                                                mode, mode_cache)
-                                : backend->load(qwen, &error, context, 4, {},
-                                                {}, mode, mode_cache);
+      std::shared_ptr<ext::TextModelRunner> runner;
+      if (flash) {
+        runner = models::qwen38_flash_next::CreateQwenFlashNextTextRunner(
+            qfn, context, mode, mode_cache.model_artifact_fingerprint,
+            mode_cache.draft_model_artifact_fingerprint);
+      } else {
+        std::shared_ptr<const hip::QwenDFlashGpuModel> dflash_model;
+        speculative::SpeculativeOptions spec_opts;
+        if (mode.backend == server::TextSpeculativeBackend::kDFlash) {
+          std::string err;
+          auto draft_reader = std::shared_ptr<const core::GgufReader>(
+              core::GgufReader::OpenFile(mode.draft_model_path, &err));
+          Require(draft_reader != nullptr, err);
+          dflash_model = hip::QwenDFlashGpuModel::Create(
+              std::move(draft_reader), qwen, &err);
+          Require(dflash_model != nullptr, err);
+          spec_opts.max_draft_tokens = mode.max_draft_tokens;
+          spec_opts.min_draft_tokens = mode.min_draft_tokens;
+        }
+        runner = models::qwen::CreateQwenTextRunner(
+            qwen, context, dflash_model, spec_opts,
+            mode.dflash_policy == ext::TextDFlashDraftPolicy::kFixed
+                ? speculative::DFlashDraftPolicy::kFixed
+                : speculative::DFlashDraftPolicy::kAdaptive,
+            mode_cache.model_artifact_fingerprint,
+            mode_cache.draft_model_artifact_fingerprint);
+      }
+      Require(runner != nullptr, "failed to create runner");
+      const bool loaded = backend->load(runner, &error, 4, {}, {}, mode_cache);
       Require(loaded, error);
       return backend;
     };
@@ -537,19 +574,9 @@ int main(int argc, char** argv) {
     if (flash)
       CheckFlashIncrementalOracle(qfn, continuation, continued);
 
-    std::array<char, 64> pattern{};
-    const std::string temporary = "/tmp/gufo-vision-cache-XXXXXX";
-    std::copy(temporary.begin(), temporary.end(), pattern.begin());
-    Require(::mkdtemp(pattern.data()) != nullptr, "cannot create test cache");
-    struct Cleanup {
-      std::filesystem::path path;
-      ~Cleanup() {
-        std::error_code ignored;
-        std::filesystem::remove_all(path, ignored);
-      }
-    } cleanup{pattern.data()};
+    TemporaryDirectory cache_root("gufo-vision-cache");
     server::TextDiskCacheConfig cache{
-        .directory = cleanup.path,
+        .directory = cache_root.path(),
         .capacity_bytes = std::size_t{2} << 30,
         .staging_capacity_bytes = std::size_t{512} << 20,
         .model_artifact_fingerprint = core::GgufIdentityHex(*reader)};
@@ -587,7 +614,7 @@ int main(int argc, char** argv) {
     for (const bool use_spec : {false, true}) {
       if (use_spec && draft.empty())
         continue;
-      cache.directory = cleanup.path / (use_spec ? "spec" : "ar");
+      cache.directory = cache_root.path() / (use_spec ? "spec" : "ar");
       auto first = load(use_spec, cache);
       const auto red = first->chat(requests[0], 16, greedy);
       const auto sampled_red = first->chat(requests[0], 16, sampled);

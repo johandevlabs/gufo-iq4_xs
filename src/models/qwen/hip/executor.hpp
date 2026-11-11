@@ -6,32 +6,41 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <gufo/ext/model_config.hpp>
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
 
-#include "src/core/model_config.hpp"
+#include "src/families/qwen/hip_common/continuation_hooks.hpp"
+#include "src/families/qwen/text/tokenizer.hpp"
 #include "src/models/qwen/forward.hpp"
 #include "src/models/qwen/generator.hpp"
 #include "src/models/qwen/state.hpp"
-#include "src/models/qwen/tokenizer.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 
-#include "src/core/hip/detail/hip_graph_decode_executor.hpp"
-#include "src/models/qwen/hip/execution_policy.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
-#include "src/models/qwen/hip/ops/ssm.hpp"
-#include "src/models/qwen/hip/ops/token.hpp"
-#include "src/models/qwen/vision/device_input.hpp"
+#include <gufo/ext/experimental/hip_graph_decode_executor.hpp>
+
+#include "src/families/qwen/hip_common/execution_policy.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
+#include "src/families/qwen/kernels/ops/ssm.hpp"
+#include "src/families/qwen/kernels/ops/token.hpp"
+#include "src/families/qwen/vision/device_input.hpp"
+#include "src/models/qwen/hip/prompt_hidden_buffer.hpp"
 
 namespace gufo::hip {
+
+class QwenPrefillCancelled final : public std::runtime_error {
+public:
+  QwenPrefillCancelled() : std::runtime_error("Qwen prefill cancelled") {}
+};
 
 class HipblasLtGemm;
 class QwenGpuExecutor;
@@ -61,6 +70,10 @@ struct QwenGpuWeightRegion {
   void* device_data{nullptr};
   void* host_copy{nullptr};
   std::size_t size{0};
+  // Device placement, used whenever the heap has room: device_data is a
+  // hipMalloc allocation uploaded from the shard, and host_copy stays null.
+  // Mapped registration is the fallback when the heap is too small.
+  bool owns_device_allocation{false};
 };
 
 struct QwenGpuMemoryUsage {
@@ -243,6 +256,9 @@ template<typename T>
 /// Preallocated, zero-allocation GPU execution arena on gfx1151.
 class QwenGpuArena {
 public:
+  /// Rows of one prompt pass, or the context when it is shorter.
+  static constexpr std::uint32_t kMaxPromptBatch = 4096;
+
   explicit QwenGpuArena(
       const core::ModelConfig& config, std::uint32_t max_context = 4096,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
@@ -254,8 +270,18 @@ public:
   QwenGpuArena& operator=(QwenGpuArena&&) noexcept;
 
   void Reset();
+  /// Pins the live recurrent state for rollback. Neither save nor restore
+  /// copies anything: the state lives in one of two buffers, and the first
+  /// pass after either call reads the pinned buffer and writes the other one.
   void SaveState(std::uint32_t valid_context);
   void RestoreState();
+  /// Names the buffers one recurrent-state pass reads and writes. Call exactly
+  /// once per forward, replay or prefill pass, before its first launch; every
+  /// launch of the pass then writes `*_out`, so the pinned buffer survives
+  /// until the next SaveState.
+  [[nodiscard]] QwenRecurrentStateIo BeginRecurrentWrite();
+  /// Buffer indices of the most recent BeginRecurrentWrite, for graph keys.
+  [[nodiscard]] std::uint64_t RecurrentIoIdentity() const noexcept;
   [[nodiscard]] bool BeginSsmReplayCapture();
   void DisableSsmReplayCapture();
   void MarkSsmReplayPosition(std::uint32_t position) noexcept;
@@ -271,6 +297,11 @@ public:
                                             std::uint32_t position) const;
   [[nodiscard]] const float* GetReplayBeta(std::uint32_t layer,
                                            std::uint32_t position) const;
+  /// Grows the replay ring to hold `rows` rows of one pass (a power of two
+  /// slots). Call before the pass captures; returns true when buffers moved.
+  [[nodiscard]] bool EnsureSsmReplayCapacity(std::size_t rows);
+  [[nodiscard]] static std::size_t SsmReplayLogBytes(
+      const core::ModelConfig& config, std::size_t capacity);
 
   float* d_hidden{nullptr};
   float* d_normed{nullptr};
@@ -296,6 +327,9 @@ public:
   float* d_logits{nullptr};
   void* d_attention_kv_f16{nullptr};
   float* d_kv_cache{nullptr};
+  // Mirrors of the live recurrent buffers (see BeginRecurrentWrite); reassigned
+  // whenever the live buffer changes, so snapshots and resets read and write
+  // the current state without knowing about the rollback pair.
   float* d_ssm_conv_state{nullptr};
   void* d_ssm_deltanet_state{nullptr};
   std::uint32_t* d_prompt_tokens{nullptr};
@@ -327,6 +361,8 @@ public:
   [[nodiscard]] static QwenGpuMemoryUsage EstimateMemoryUsage(
       const core::ModelConfig& config, std::uint32_t max_context,
       QwenExecutionPolicy policy = QwenExecutionPolicy::Production());
+  [[nodiscard]] static std::size_t RecurrentStateBytes(
+      const core::ModelConfig& config, QwenExecutionPolicy policy);
   [[nodiscard]] QwenGpuMemoryUsage GetMemoryUsage() const;
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
@@ -348,7 +384,10 @@ public:
 
 private:
   void FreeAll() noexcept;
+  friend class models::qwen::ContinuationAdapter;
+  friend class QwenGpuExecutor;
   void AllocateRecurrentSnapshot();
+  void SyncLivePointers() noexcept;
   [[nodiscard]] bool AllocateSsmReplayLog();
 
   core::ModelConfig config_;
@@ -356,12 +395,20 @@ private:
   std::uint32_t max_batch_;
   QwenExecutionPolicy policy_;
   std::vector<std::uint32_t> target_layer_ids_;
-  float* d_saved_ssm_conv_state_{nullptr};
-  void* d_saved_ssm_deltanet_state_{nullptr};
+  // Buffer 0 comes from the constructor; buffer 1 is allocated by the first
+  // SaveState. `live_recurrent_` holds the current state, `saved_recurrent_`
+  // the pinned one (meaningful while has_saved_state_), `source_recurrent_`
+  // the buffer the most recent pass read.
+  std::array<float*, 2> d_ssm_conv_buffers_{};
+  std::array<void*, 2> d_ssm_deltanet_buffers_{};
+  std::uint8_t live_recurrent_{0};
+  std::uint8_t saved_recurrent_{0};
+  std::uint8_t source_recurrent_{0};
   float* d_ssm_replay_qkv_{nullptr};
   float* d_ssm_replay_alpha_{nullptr};
   float* d_ssm_replay_beta_{nullptr};
   std::uint32_t* d_ssm_replay_enabled_{nullptr};
+  std::size_t replay_capacity_{kSsmReplayCapacity};
   std::uint32_t saved_context_{0};
   std::uint32_t replay_last_position_{0};
   std::size_t replay_captured_positions_{0};
@@ -445,6 +492,12 @@ public:
       std::span<const tokenization::TokenId> prompt_tokens,
       std::uint32_t start_pos = 0, bool compute_logits = true);
 
+  /// Rows one session may verify in a single pass. A chain longer than eight
+  /// rows (a prompt-lookup copy) shares every projection across its rows and
+  /// runs attention in eight-row segments, so each row has the arithmetic of
+  /// consecutive ordinary verifications; the replay ring grows to hold it.
+  static constexpr std::size_t kMaxWideVerificationRows = 64;
+
   /// Verifies a chunk of speculative draft candidate tokens in a single
   /// parallel prefill forward pass on the GPU.
   [[nodiscard]] std::vector<tokenization::TokenId> ForwardVerificationChunk(
@@ -491,6 +544,15 @@ public:
       std::span<const float> draft_candidate_probabilities,
       double draft_token_probability, sampling::SamplerState& sampler);
 
+  /// Pins the prompt-capture bound for `layer_count` captured layers up front,
+  /// so no request pays for the pinned allocation. A ledger is charged for
+  /// the pinned bytes while the executor holds them.
+  void ReservePromptHiddenCapture(std::size_t layer_count,
+                                  cache::ResourceLedger* ledger = nullptr);
+  [[nodiscard]] std::size_t PromptHiddenChargedBytes() const noexcept {
+    return h_prompt_hidden_.ChargedBytes();
+  }
+
   /// Enables host capture of every final-layer prompt hidden state. Disabled
   /// by default so ordinary prefill does not incur device-to-host copies.
   void SetPromptHiddenCapture(
@@ -499,7 +561,7 @@ public:
   /// Returns the flattened [prompt_tokens, hidden_size] capture from the most
   /// recent ForwardPromptBatch call.
   [[nodiscard]] std::span<const float> GetPromptHiddenStates() const noexcept {
-    return h_prompt_hidden_;
+    return h_prompt_hidden_.View();
   }
 
   /// Copies the final-layer hidden state from the most recent forward pass.
@@ -519,6 +581,11 @@ public:
     cancellation_check_ = std::move(check);
     vision_input_.SetCancellationCheck(cancellation_check_);
   }
+  /// Splits the following prompt passes into at most `groups` layer groups
+  /// of about equal depth and calls `yield` between them, once the queued
+  /// layers have finished; other sessions may decode there on their own
+  /// executors. One group, or an empty `yield`, restores unsplit passes.
+  void SetPrefillYield(std::size_t groups, std::function<void()> yield);
   [[nodiscard]] std::size_t SnapshotPayloadBytes(
       std::uint32_t valid_context) const;
   void ConfigureVision(
@@ -546,13 +613,19 @@ public:
   void FinishVerification();
 
 private:
+  friend class models::qwen::ContinuationAdapter;
+  models::qwen::ContinuationHooks* continuation_hooks_{nullptr};
   void CheckPrefillCancellation() const;
   void PrefillLayerCheckpoint(std::uint32_t layer);
   std::function<bool()> cancellation_check_;
   std::array<hipEvent_t, 2> prefill_events_{};
+  std::vector<std::uint32_t> yield_layers_;  ///< yield before these, ascending
+  std::function<void()> yield_;
   void CheckReset() const {
     if (reset_failure_)
       std::rethrow_exception(reset_failure_);
+    if (continuation_hooks_)
+      continuation_hooks_->BeforeExecution();
   }
   std::exception_ptr reset_failure_;
   void ReplaySsmState(std::uint32_t position, std::uint32_t count = 1);
@@ -577,7 +650,7 @@ private:
   detail::HipGraphDecodeExecutor graph_executor_;
   models::qwen::vision::DeviceInput vision_input_;
   std::vector<float> h_logits_;
-  std::vector<float> h_prompt_hidden_;
+  PromptHiddenBuffer h_prompt_hidden_;
   std::vector<float> h_verification_hidden_;
   std::vector<float> h_verification_logits_;
   std::vector<float> h_last_hidden_;

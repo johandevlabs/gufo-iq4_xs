@@ -3,15 +3,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
 
-#include "src/core/hip/hip_utils.hpp"
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include "src/families/qwen/hip_common/attention_policy.hpp"
+#include "src/families/qwen/kernels/ops.hpp"
+#include "src/families/qwen/kernels/verify_gemm_27b.hpp"
 #include "src/models/qwen/hip/detail/decode_step.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/ops.hpp"
 
 namespace gufo::hip {
 namespace {
@@ -29,6 +30,9 @@ void LaunchProjection(const models::QwenTensorRef& weight, const float* input,
                       float* output, std::size_t batch_size,
                       std::size_t output_size, std::size_t input_size,
                       hipStream_t stream) {
+  if (TryLaunchVerifyGemm27(weight.type, weight.data, input, output, batch_size,
+                            output_size, input_size, stream))
+    return;
   if (SupportsExactSharedProjection(weight.type)) {
     LaunchBatchedQuantGEMMFp32(weight.type, weight.data, input, output,
                                batch_size, output_size, input_size, stream);
@@ -177,6 +181,12 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
   }
 
   bool capture_replay = false;
+  std::array<models::qwen::ContinuationWrite, kMaxDecodeBatch> writes;
+  for (std::size_t i = 0; i < items.size(); ++i)
+    if (auto* hooks = items[i].executor->continuation_hooks_)
+      hooks->BeforeWrite(items[i].position, items[i].position + 1);
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Arm(items[i].executor->continuation_hooks_);
   for (const auto& item : items) {
     auto& executor = *item.executor;
     if (executor.replaying_ssm_state_) {
@@ -218,8 +228,7 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
     auto& state_arena = items[row].executor->arena_;
     auto replay = state_arena.GetSsmReplayCapture();
     replay.position = scratch.decode.prompt_tokens.data() + row;
-    ssm_sequences[row] = {state_arena.d_ssm_conv_state,
-                          state_arena.d_ssm_deltanet_state, replay,
+    ssm_sequences[row] = {state_arena.BeginRecurrentWrite(), replay,
                           static_cast<std::uint32_t>(row), 1};
   }
   HIP_CHECK(hipMemcpyAsync(
@@ -409,6 +418,8 @@ std::vector<tokenization::TokenId> QwenGpuExecutor::ForwardTokenBatch(
 
   for (std::size_t row = 0; row < batch_size; ++row)
     (void)CheckedSampleToken(host_frontiers[row], vocab_size);
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Commit(items[i].position + 1, true);
   return {host_frontiers.begin(),
           host_frontiers.begin() + static_cast<std::ptrdiff_t>(batch_size)};
 }
@@ -447,6 +458,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
   const bool capture_prompt_hidden_ = coordinator.capture_prompt_hidden_;
   const auto policy = coordinator.policy_.Fingerprint();
   constexpr std::size_t kMaxRows = kMaxDecodeBatch * kMaxDecodeBatch;
+  static_assert(kMaxWideVerificationRows <= kMaxRows);
+  // One session may verify a wide chain; batched sessions keep eight rows.
+  const std::size_t max_tokens =
+      items.size() == 1 ? kMaxWideVerificationRows : kMaxDecodeBatch;
   std::array<std::size_t, kMaxDecodeBatch> offsets{};
   std::size_t batch_size = 0;
   for (std::size_t index = 0; index < items.size(); ++index) {
@@ -457,7 +472,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
         executor->capture_prompt_hidden_ != capture_prompt_hidden_ ||
         !std::ranges::equal(executor->arena_.GetTargetLayerCapture(),
                             arena_.GetTargetLayerCapture()) ||
-        item.tokens.empty() || item.tokens.size() > kMaxDecodeBatch) {
+        item.tokens.empty() || item.tokens.size() > max_tokens) {
       throw std::invalid_argument(
           "Qwen verification has incompatible sessions or token counts");
     }
@@ -476,6 +491,18 @@ QwenGpuExecutor::ForwardVerificationBatch(
     throw std::length_error(
         "Qwen verification exceeds coordinator scratch capacity");
   }
+  // Rollback replays every committed row of a chain from the pinned state.
+  for (const auto& item : items)
+    if (item.executor->arena_.EnsureSsmReplayCapacity(item.tokens.size()))
+      item.executor->graph_executor_.Reset();
+  std::array<models::qwen::ContinuationWrite, kMaxDecodeBatch> writes;
+  for (std::size_t i = 0; i < items.size(); ++i)
+    if (auto* hooks = items[i].executor->continuation_hooks_)
+      hooks->BeforeWrite(items[i].position,
+                         items[i].position + static_cast<std::uint32_t>(
+                                                 items[i].tokens.size()));
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Arm(items[i].executor->continuation_hooks_);
   for (const auto& item : items) {
     auto& executor = *item.executor;
     if (&executor != &coordinator)
@@ -528,8 +555,7 @@ QwenGpuExecutor::ForwardVerificationBatch(
     auto& state_arena = item.executor->arena_;
     auto replay = state_arena.GetSsmReplayCapture();
     replay.position = scratch.decode.prompt_tokens.data() + offsets[index];
-    ssm_sequences[index] = {state_arena.d_ssm_conv_state,
-                            state_arena.d_ssm_deltanet_state, replay,
+    ssm_sequences[index] = {state_arena.BeginRecurrentWrite(), replay,
                             static_cast<std::uint32_t>(offsets[index]),
                             static_cast<std::uint32_t>(item.tokens.size())};
     for (std::size_t row = 0; row < item.tokens.size(); ++row) {
@@ -609,12 +635,22 @@ QwenGpuExecutor::ForwardVerificationBatch(
         }
       }
 
-      for (std::size_t index = 0; index < items.size(); ++index) {
+      // Attention runs in segments of at most eight rows, each with the start
+      // position (split-K count, online route) of an ordinary verification of
+      // those rows. Only a wide single-session chain has more than one.
+      for (std::size_t index = 0, item_row = 0; index < items.size();) {
         const auto& item = items[index];
         auto& state_arena = item.executor->arena_;
-        const std::size_t offset = offsets[index];
-        const std::size_t sequence_size = item.tokens.size();
-        const std::uint32_t start_pos = item.position;
+        const std::size_t offset = offsets[index] + item_row;
+        const std::size_t sequence_size =
+            std::min(kMaxDecodeBatch, item.tokens.size() - item_row);
+        const std::uint32_t start_pos =
+            item.position + static_cast<std::uint32_t>(item_row);
+        item_row += sequence_size;
+        if (item_row == item.tokens.size()) {
+          ++index;
+          item_row = 0;
+        }
         const std::size_t total_k = state_arena.GetAttentionKvPlaneElements();
         if (fused_qknorm_rope_kv) {
           LaunchBatchedFusedQKNormRoPEKvWrite(
@@ -827,6 +863,10 @@ QwenGpuExecutor::ForwardVerificationBatch(
         host_predictions.begin() + offsets[index],
         host_predictions.begin() + offsets[index] + item.tokens.size());
   }
+  for (std::size_t i = 0; i < items.size(); ++i)
+    writes[i].Commit(
+        items[i].position + static_cast<std::uint32_t>(items[i].tokens.size()),
+        false);
   return predictions;
 }
 

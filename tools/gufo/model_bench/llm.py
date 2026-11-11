@@ -170,7 +170,7 @@ class Session:
             if shutil.which(command[0]) is None:
                 raise RuntimeError(
                     f"{command[0]} not on PATH; select its optional Nix reference package "
-                    "(see docs/BENCHMARKS.md)"
+                    "(see docs/internal/benchmarks.md)"
                 )
             self.reference_version(mode)
         placeholder.command = command
@@ -340,7 +340,7 @@ def run_loading(session: Session, table: TableSpec) -> None:
                 print(f"{table.id}: skipped; {reason}")
                 return
             # Load with the speculative support files on both sides when the reference has the mode.
-            mode = cfg.speculative["mode"] if (session.target == "gufo" or cfg.reference_speculative) else None
+            mode = cfg.speculative.get("mode", "ar") if (session.target == "gufo" or cfg.reference_speculative) else None
             if session.modes and mode not in session.modes:
                 mode = "ar"
             sessions = int(spec.get("sessions", 1))
@@ -750,7 +750,8 @@ def run_memory(session: Session, table: TableSpec) -> None:
         return
     hip = HipMemory.for_binary(session.gufo_binary)
     if hip is None:
-        raise SystemExit("memory table needs libamdhip64 (resolved through `ldd` of the Gufo binary)")
+        raise SystemExit("memory table needs a device-global hipMemGetInfo: libamdhip64 resolved through "
+                         "`ldd` of the Gufo binary on Linux (on Windows it only counts the calling process)")
     idle = hip.used_gib()
     mode = spec.get("mode", "ar")
     server = session.server(table, mode=mode, context=int(spec["context"]), sessions=1, tag="memory")

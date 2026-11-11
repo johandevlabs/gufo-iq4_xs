@@ -81,13 +81,11 @@ void WriteScoreJson(const json::Value& value, std::ostream& output) {
     output << value.dump();
   }
 }
-}  // namespace
 
 // Uses external continuations from the matching hosted checkpoint. This is
 // deliberately separate from comparing two routes through our own decoder.
-void ScoreOfficialReference(
-    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
-    const std::string& output_path) {
+json::Value ScoreOfficialContinuations(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model) {
   Require(!model->HasDspark(), "official scoring requires ordinary decoding");
   std::ifstream input(GUFO_DS4_OFFICIAL_FIXTURE, std::ios::binary);
   Require(input.good(), "cannot open official continuation fixture");
@@ -206,18 +204,41 @@ void ScoreOfficialReference(
     summary["greedy_matches"] = total.matches;
     report["summary"][name] = std::move(summary);
   }
+  WriteScoreJson(Field(report, "summary"), std::cout);
+  std::cout << '\n';
+  return report;
+}
+}  // namespace
+
+void ScoreOfficialReference(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
+    const std::string& output_path) {
+  const auto report = ScoreOfficialContinuations(model);
   std::ofstream output(output_path);
   Require(output.good(), "cannot open official score output");
   WriteScoreJson(report, output);
   output << '\n';
   Require(output.good(), "cannot write official score output");
-  WriteScoreJson(Field(report, "summary"), std::cout);
-  std::cout << '\n';
+}
+
+void CheckOfficialContinuations(
+    const std::shared_ptr<models::deepseek_v4_flash::Model>& model) {
+  constexpr double kMaxNll = 0.407;
+  constexpr std::size_t kMinFirstMatches = 53;
+  const auto report = ScoreOfficialContinuations(model);
+  const auto& summary = Field(Field(report, "summary"), "continuation-100");
+  const double nll = Field(summary, "nll").as_double();
+  const std::size_t first_matches = Field(summary, "first_matches").as_size();
+  Require(nll <= kMaxNll, "official continuation NLL " + std::to_string(nll) +
+                              " exceeds " + std::to_string(kMaxNll));
+  Require(first_matches >= kMinFirstMatches,
+          "official first-token matches " + std::to_string(first_matches) +
+              "/100 are below " + std::to_string(kMinFirstMatches));
 }
 
 void DumpReferenceFrontiers(
     const std::shared_ptr<models::deepseek_v4_flash::Model>& model,
-    const std::string& output_directory, bool prefill_only) {
+    const std::string& output_directory, bool prefill_only, bool narrow) {
   namespace fs = std::filesystem;
   using models::deepseek_v4_flash::ChatMessage;
   using models::deepseek_v4_flash::RenderChat;
@@ -254,7 +275,9 @@ void DumpReferenceFrontiers(
   json::Value report = json::Value::object();
   report["vocab"] = model->VocabSize();
   report["dtype"] = "float32-le";
-  report["prefill_policy"] = "explicit 2048/4096-token calls";
+  report["prefill_policy"] =
+      narrow ? "explicit 32-token calls" : "explicit 2048/4096-token calls";
+  report["narrow"] = narrow;
   report["context_capacity"] = 20480;
   report["prefix"] =
       "repeated x words inside the native no-thinking chat template";
@@ -262,7 +285,15 @@ void DumpReferenceFrontiers(
   report["decode_tokens"] = decode_tokens;
   report["points"] = json::Value::array();
   std::ofstream manifest(directory / "manifest.tsv");
-  for (const std::size_t depth : {0u, 4096u, 8192u, 12288u, 16384u}) {
+  // Narrow MMQ tiles were invisible to the original 2K/4K call grid. Keep
+  // the two known regression points available without a full model sweep.
+  const std::vector<std::size_t> depths =
+      narrow ? std::vector<std::size_t>{4096, 12288}
+             : std::vector<std::size_t>{0, 4096, 8192, 12288, 16384};
+  const std::vector<std::size_t> prefill_steps =
+      narrow ? std::vector<std::size_t>{32}
+             : std::vector<std::size_t>{2048, 4096};
+  for (const std::size_t depth : depths) {
     const std::size_t prefix = depth == 0 ? 16 : depth;
     Require(prefix > overhead, "frontier prefix is shorter than chat framing");
     std::string body = "x";
@@ -282,7 +313,7 @@ void DumpReferenceFrontiers(
     prompt_file << RenderChat(chat);
     Require(prompt_file.good(), "cannot write frontier prompt");
     prompt_file.close();
-    for (const std::size_t prefill_step : {2048u, 4096u}) {
+    for (const std::size_t prefill_step : prefill_steps) {
       std::string error;
       auto session = model->CreateSession(
           model->HasDspark() ? gufo::core::SessionMode::kSpeculative

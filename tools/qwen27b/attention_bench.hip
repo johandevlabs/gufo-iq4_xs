@@ -1,5 +1,5 @@
 // Exact scalar/batched verification attention ablation.
-// Build/run commands: docs/PERFORMANCE.md.
+// Build/run commands: docs/internal/performance.md.
 // Timings are component costs; use release model A/B for throughput decisions.
 #define ENGINE_ENABLE_HIP 1
 #include <cstdio>
@@ -8,9 +8,9 @@
 #include <string_view>
 #include <vector>
 
-#include "src/models/qwen/hip/kernels/attention_decode.hip"
-#include "src/models/qwen/hip/kernels/prefill_norm.hip"
-#include "src/models/qwen/hip/kernels/prefill_rope.hip"
+#include "src/families/qwen/kernels/attention_decode.hip"
+#include "src/families/qwen/kernels/prefill_norm.hip"
+#include "src/families/qwen/kernels/prefill_rope.hip"
 #include "tests/models/qwen/hip/support/device_buffer.hpp"
 
 namespace {

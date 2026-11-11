@@ -2,10 +2,11 @@
 #define GUFO_MODELS_QWEN38_FLASH_NEXT_CONTINUATION_LAYOUT_HPP_
 
 #include <cstdint>
+#include <gufo/ext/adapter.hpp>
+#include <gufo/ext/types.hpp>
 #include <span>
 #include <vector>
 
-#include "src/cache/types.hpp"
 #include "src/models/qwen38_flash_next/config.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -43,6 +44,10 @@ struct ContinuationComponent {
 // restoration.
 inline constexpr std::size_t kContinuationMetadataBytes = 160;
 
+// Backing classes are the cache's neutral contract (RFC step 6); the layout
+// owns the arithmetic that fills them.
+using ContinuationBackingClass = cache::BackingClass;
+
 class ContinuationLayout {
 public:
   ContinuationLayout(const Config&, bool mtp, std::uint32_t context,
@@ -54,6 +59,11 @@ public:
       std::uint32_t target, std::uint32_t draft, std::uint32_t blocks,
       std::uint32_t draft_blocks) const;
   [[nodiscard]] std::size_t PrivateBytes() const noexcept;
+  // Precommitted classes include allocator headroom. Preserve row capacity
+  // for independent execution slots and budget checkpoint tails explicitly;
+  // remaining capacity extends private-state retention.
+  [[nodiscard]] std::vector<ContinuationBackingClass> BackingPlan(
+      std::size_t ram_bytes, std::uint32_t concurrency) const;
   // Completed pools contribute indexer_head_dim * sizeof(f16) per block,
   // rather than per token. Returns the exact total at the supplied frontiers.
   [[nodiscard]] std::size_t RowBytes(std::uint32_t target, std::uint32_t draft,

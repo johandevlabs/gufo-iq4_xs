@@ -2,9 +2,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <vector>
-
-#include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models::qwen38_flash_next::cpu {
 namespace {
@@ -85,7 +84,11 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
       gufo::quant::DequantizeQ6_K(src, out, k);
       break;
     default:
-      std::memset(out, 0, k * sizeof(float));
+      // The remaining block formats (Q5_0, Q2_0, IQ2_S, IQ3_XXS) decode
+      // through core; a type core cannot decode was refused at bind.
+      if (!gufo::quant::DequantizeRow(t.type, src, out, k)) {
+        std::memset(out, 0, k * sizeof(float));
+      }
       break;
   }
 }
@@ -154,16 +157,23 @@ float Softplus(float x) noexcept {
 }
 
 void Rope(float* x, std::uint32_t heads, std::uint32_t head_dim,
-          std::uint32_t rotary_dim, std::uint32_t pos, float theta) {
+          std::uint32_t rotary_dim, std::uint32_t pos, float theta,
+          const YarnRope& yarn) {
   const std::uint32_t half = rotary_dim / 2;
   for (std::uint32_t h = 0; h < heads; ++h) {
     float* v = x + static_cast<std::size_t>(h) * head_dim;
     for (std::uint32_t i = 0; i < half; ++i) {
-      const float freq = std::pow(theta, -2.0F * static_cast<float>(i) /
-                                             static_cast<float>(rotary_dim));
+      float freq = std::pow(theta, -2.0F * static_cast<float>(i) /
+                                       static_cast<float>(rotary_dim));
+      if (yarn.enabled != 0)
+        freq *= YarnPairMultiplier(yarn, i);
       const float angle = static_cast<float>(pos) * freq;
-      const float c = std::cos(angle);
-      const float s = std::sin(angle);
+      float c = std::cos(angle);
+      float s = std::sin(angle);
+      if (yarn.enabled != 0) {
+        c *= yarn.mscale;
+        s *= yarn.mscale;
+      }
       const float a = v[i];
       const float b = v[i + half];
       v[i] = a * c - b * s;

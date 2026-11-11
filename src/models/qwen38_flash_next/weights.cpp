@@ -29,6 +29,14 @@ struct Format {
       return {32, 24};
     case GgmlType::kIQ4_NL:
       return {32, 18};
+    case GgmlType::kQ5_0:
+      return {32, 22};
+    case GgmlType::kQ2_0:
+      return {64, 18};
+    case GgmlType::kIQ2_S:
+      return {256, 82};
+    case GgmlType::kIQ3_XXS:
+      return {256, 98};
     case GgmlType::kIQ3_S:
       return {256, 110};
     case GgmlType::kIQ4_XS:
@@ -142,11 +150,13 @@ struct Binder {
     const std::string p = "blk." + std::to_string(il) + ".";
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
-    const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                        GgmlType::kF32};
-    const auto experts = {GgmlType::kQ4_K,   GgmlType::kQ5_K,  GgmlType::kQ6_K,
-                          GgmlType::kQ5_1,   GgmlType::kQ8_0,  GgmlType::kIQ3_S,
-                          GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
+    const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
+                        GgmlType::kF16, GgmlType::kF32};
+    const auto experts = {
+        GgmlType::kQ4_K,    GgmlType::kQ5_K,   GgmlType::kQ6_K,
+        GgmlType::kQ5_1,    GgmlType::kQ5_0,   GgmlType::kQ8_0,
+        GgmlType::kQ2_0,    GgmlType::kIQ2_S,  GgmlType::kIQ3_S,
+        GgmlType::kIQ3_XXS, GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -265,8 +275,10 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     }
     w.config.vocab_size = static_cast<std::uint32_t>(info->dimensions[1]);
   }
-  w.token_embd =
-      b.Get("token_embd.weight", c.hidden_size, c.vocab_size, 1, dense);
+  // UD-IQ4_XS (Dynamic 3.1) stores the embedding as IQ4_XS: a lookup only.
+  w.token_embd = b.Get("token_embd.weight", c.hidden_size, c.vocab_size, 1,
+                       {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kIQ4_XS,
+                        GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32});
   w.output =
       b.Get("output.weight", c.hidden_size, c.vocab_size, 1, dense, false);
   if (w.output.empty()) {
@@ -283,8 +295,9 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     if (rows < c.ple_rows) {
       b.Fail("per_layer_token_embd.weight is missing or too short");
     } else {
-      w.ple_table = b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows,
-                          1, {GgmlType::kIQ4_NL, GgmlType::kBF16});
+      w.ple_table =
+          b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows, 1,
+                {GgmlType::kIQ4_NL, GgmlType::kQ8_0, GgmlType::kBF16});
     }
   }
   w.layers.reserve(c.num_layers);
@@ -321,6 +334,15 @@ std::optional<MtpWeights> MtpWeights::Bind(const core::GgufReader& reader,
     return std::nullopt;
   }
   return m;
+}
+
+std::size_t ExpandedQ8_0Tensors(const LayerWeights& layer) noexcept {
+  std::size_t count = 0;
+  for (const TensorRef* t : {&layer.hc_attn.inject, &layer.hc_ffn.inject,
+                             &layer.ssm_alpha, &layer.ssm_beta}) {
+    count += !t->empty() && t->type == GgmlType::kQ8_0;
+  }
+  return count;
 }
 
 }  // namespace gufo::models::qwen38_flash_next

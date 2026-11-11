@@ -46,6 +46,16 @@ public:
   Slot(Slot&&) = delete;
   Slot& operator=(Slot&&) = delete;
   [[nodiscard]] virtual bool IsValid() const noexcept = 0;
+  // Nonblocking hint for cold slot selection. A cancelled request may have
+  // restored its logical frontier while already-submitted device work drains.
+  [[nodiscard]] virtual bool ExecutionComplete() const noexcept { return true; }
+};
+
+// One pinned-host backing class: block size, block count and per-block host
+// metadata. Models own the arithmetic that fills it; the backing provider
+// commits what the plan asks for.
+struct BackingClass {
+  std::size_t block_bytes{}, blocks{}, metadata_bytes{};
 };
 
 class Adapter {
@@ -56,8 +66,22 @@ public:
   Adapter& operator=(const Adapter&) = delete;
   Adapter(Adapter&&) = delete;
   Adapter& operator=(Adapter&&) = delete;
+  // Host backing classes this adapter needs for `ram_bytes`. Adapters with
+  // pinned backing override it; the default reports none, so a resource
+  // provider rejects the adapter instead of downcasting it to a model type.
+  [[nodiscard]] virtual std::vector<BackingClass> BackingPlan(
+      std::size_t) const {
+    return {};
+  }
   [[nodiscard]] virtual Capabilities GetCapabilities() const = 0;
   // Descriptors are stable for the adapter lifetime; each ID is unique.
+  //
+  // A kWindowRows component may keep its rows in a ring. Row numbers stay
+  // absolute: positions and transfers count every row since the start, never a
+  // ring offset. The ring holds at least window_rows + rows_per_chunk - 1 rows,
+  // the most a checkpoint retains. Call MutationGuard::BeforeOverwrite before
+  // evicting a row, as for any overwrite, because checkpoints may borrow it.
+  // BorrowRowsView returns empty for a range that wraps the ring.
   [[nodiscard]] virtual std::span<const ComponentDescriptor> Components()
       const = 0;
   [[nodiscard]] virtual Identity CompatibilityIdentity() const = 0;
@@ -69,6 +93,12 @@ public:
   // may insert exact required captures; optional captures can reuse this plan.
   [[nodiscard]] virtual std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                                       Rows end) const = 0;
+  // Optional pure host prediction for a supported in-pass checkpoint. The
+  // actual capture must expose these exact coherent component positions.
+  [[nodiscard]] virtual std::vector<ComponentPosition>
+  PrefillCheckpointPositions(const Slot&, Rows) const {
+    return {};
+  }
 
   // Prepare one complete restore, including an exact shorter frontier. On the
   // host, allocate/check capacity and guard every range that will be replaced
@@ -93,6 +123,17 @@ public:
                                                Rows first, Rows end,
                                                std::span<std::byte>,
                                                Stream&) = 0;
+  // Optional immutable view of a completed append range. Obtain it only
+  // during exclusive execution; retain a RowPin for every later transfer.
+  // The address must remain stable until the mutation/release guard drains
+  // its readers. CopyRowsIn must accept these backend-native source bytes as
+  // well as host buffers. Empty means this component cannot be borrowed.
+  [[nodiscard]] virtual std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                                  ComponentId,
+                                                                  Rows,
+                                                                  Rows) const {
+    return {};
+  }
   [[nodiscard]] virtual Completion CopyRowsIn(Slot&, ComponentId, Rows first,
                                               Rows end,
                                               std::span<const std::byte>,

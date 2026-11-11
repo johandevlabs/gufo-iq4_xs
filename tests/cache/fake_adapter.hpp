@@ -1,6 +1,8 @@
 #ifndef GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 #define GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -14,7 +16,7 @@ namespace gufo::cache::testing {
 struct FakeTransfer;
 struct FakeStreamState;
 
-inline constexpr ComponentId kTarget{1}, kDraft{2}, kRecurrent{3};
+inline constexpr ComponentId kTarget{1}, kDraft{2}, kRecurrent{3}, kWindow{4};
 
 // Deterministic single-threaded FIFO stream. A delayed stream advances only
 // through Advance, Wait, Synchronize or completion destruction; no wall clock.
@@ -40,8 +42,18 @@ private:
   bool fail_submission_{false};
 };
 
-class FakeAdapter final : public Adapter {
+class FakeAdapter : public Adapter {
 public:
+  // Wider chunks need less capture metadata for the same row bytes.
+  explicit FakeAdapter(Rows rows_per_chunk = 4);
+  // Opt in to a fourth, windowed component (kWindow) that mirrors the target
+  // tokens in a ring of ring_rows slots, like sliding-window attention: a
+  // continuation reads the last window_rows, and appending past the ring
+  // evicts the oldest rows. Requires ring_rows % 4 == 0 and room for a whole
+  // window plus a partial leading chunk. Without private state the recurrent
+  // component is dropped, the shape of a model that has only attention, and
+  // the hash chains are rebuilt from the restored rows.
+  FakeAdapter(Rows window_rows, Rows ring_rows, bool private_state = true);
   [[nodiscard]] Capabilities GetCapabilities() const override;
   [[nodiscard]] std::span<const ComponentDescriptor> Components()
       const override;
@@ -52,12 +64,18 @@ public:
   [[nodiscard]] std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                               Rows end) const override;
   void SetPrefillPassRows(Rows rows);
+  void SetExecutionComplete(Slot&, bool);
+  [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
+      const Slot&, Rows boundary) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
                                           Stream&) override;
   [[nodiscard]] Completion CopyRowsOut(const Slot&, ComponentId, Rows, Rows,
                                        std::span<std::byte>, Stream&) override;
+  [[nodiscard]] std::span<const std::byte> BorrowRowsView(const Slot&,
+                                                          ComponentId, Rows,
+                                                          Rows) const override;
   [[nodiscard]] Completion CopyRowsIn(Slot&, ComponentId, Rows, Rows,
                                       std::span<const std::byte>,
                                       Stream&) override;
@@ -85,14 +103,24 @@ public:
   void GuardRows(Slot&, ComponentId, Rows first, Rows end);
   void FailNextAllocation() noexcept;
   void FailNextTransfer() noexcept;
+  // Window rows a continuation reads, from the ring; throws if any of them
+  // were evicted or never loaded.
+  [[nodiscard]] std::vector<Token> WindowTokens(const Slot&) const;
+  [[nodiscard]] std::size_t Invalidations() const noexcept {
+    return invalidations_.load(std::memory_order_relaxed);
+  }
 
 private:
   [[nodiscard]] Completion SubmitRead(const Slot&, Stream&,
                                       std::function<TransferResult()>);
   [[nodiscard]] Completion SubmitLoad(Slot&, Stream&,
                                       std::function<TransferResult()>);
+  std::vector<ComponentDescriptor> components_;
+  Rows ring_rows_{0};
+  bool private_state_{true};
   bool fail_allocation_{false};
   bool fail_transfer_{false};
+  std::atomic<std::size_t> invalidations_{};
   Rows prefill_pass_rows_{2048};
 };
 

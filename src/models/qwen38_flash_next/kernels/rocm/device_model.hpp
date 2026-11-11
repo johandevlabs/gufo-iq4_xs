@@ -3,14 +3,48 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <gufo/ext/gguf_reader.hpp>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
-#include "src/core/gguf_reader.hpp"
 #include "src/models/qwen38_flash_next/weights.hpp"
 
 namespace gufo::models::qwen38_flash_next::rocm {
+
+/// The expert formats and shape the routed F16 GEMMs (WMMA) read.
+[[nodiscard]] inline bool WmmaExpertLayout(const Config& c, core::GgmlType gate,
+                                           core::GgmlType up,
+                                           core::GgmlType down) {
+  using core::GgmlType;
+  return (gate == GgmlType::kQ4_K || gate == GgmlType::kQ5_K ||
+          gate == GgmlType::kIQ3_S || gate == GgmlType::kIQ4_XS ||
+          gate == GgmlType::kIQ2_S || gate == GgmlType::kIQ3_XXS) &&
+         up == gate &&
+         (down == GgmlType::kQ5_1 || down == GgmlType::kQ8_0 ||
+          down == GgmlType::kIQ4_NL || down == GgmlType::kQ2_0 ||
+          down == GgmlType::kQ5_0) &&
+         c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
+}
+
+/// Expert formats with no tiled MMQ route: the IQ formats, Q2_0 and Q5_0.
+[[nodiscard]] inline bool IsIqExpert(core::GgmlType type) {
+  return type == core::GgmlType::kIQ3_S || type == core::GgmlType::kIQ4_NL ||
+         type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ2_S ||
+         type == core::GgmlType::kIQ3_XXS || type == core::GgmlType::kQ2_0 ||
+         type == core::GgmlType::kQ5_0;
+}
+
+/// IQ (and Q2_0) experts have no tiled MMQ route, so prefill must reach them
+/// through WMMA. Decode reads the same layouts through the vector kernels.
+[[nodiscard]] inline bool IqExpertLayoutSupported(const Config& c,
+                                                  core::GgmlType gate,
+                                                  core::GgmlType up,
+                                                  core::GgmlType down) {
+  return !(IsIqExpert(gate) || IsIqExpert(up) || IsIqExpert(down)) ||
+         WmmaExpertLayout(c, gate, up, down);
+}
 
 /// One weight resident in device memory, still in its GGUF encoding.
 struct DeviceTensor {
@@ -60,6 +94,31 @@ struct DeviceLayer {
   DeviceMixer nextn_head;
 };
 
+/// How Upload stores a hyper-connection inject projection read in `disk`
+/// format. The binder accepts F32, Q8_0 and BF16 rows, and each reaches the
+/// device as F32 rows for the fused inject kernels, which compute a prompt
+/// row the same way at any pass width. A separate 16-bit projection would
+/// take the library GEMM, whose sums depend on the pass width, and on the
+/// wide HC route it shares the half staging buffer with the mixed row.
+enum class HcInjectUpload { kCopy, kExpandQ8_0, kWidenBF16 };
+
+[[nodiscard]] constexpr HcInjectUpload HcInjectUploadFor(
+    core::GgmlType disk) noexcept {
+  switch (disk) {
+    case core::GgmlType::kQ8_0:
+      return HcInjectUpload::kExpandQ8_0;
+    case core::GgmlType::kBF16:
+      return HcInjectUpload::kWidenBF16;
+    default:
+      return HcInjectUpload::kCopy;
+  }
+}
+
+/// Widens `count` BF16 values to F32 exactly: a BF16 value is the upper half
+/// of an F32.
+void WidenBF16(const std::uint16_t* src, float* dst,
+               std::size_t count) noexcept;
+
 /// The trunk (and optionally the MTP draft block) uploaded to the GPU. The
 /// n-gram table is never uploaded: it is read from disk per token.
 class DeviceModel {
@@ -77,6 +136,26 @@ public:
   const Config& config() const noexcept { return config_; }
   const DeviceTensor& token_embd() const noexcept { return token_embd_; }
   const DeviceTensor& output() const noexcept { return output_; }
+  /// The leading output() rows the MTP draft head scores in place (see
+  /// draft_vocab.hpp); empty when the draft projects the full vocabulary.
+  const DeviceTensor& draft_output() const noexcept { return draft_output_; }
+  /// Special tokens above the prefix: the first rows of each session's
+  /// draft table.
+  std::span<const std::int32_t> draft_specials() const noexcept {
+    return draft_specials_;
+  }
+  /// Bytes of one output() row.
+  std::size_t output_row_bytes() const noexcept {
+    return output_.rows == 0 ? 0 : output_bytes_ / output_.rows;
+  }
+  /// Drafts score output() rows [0, prefix_rows) in place plus a
+  /// per-session table that starts with `specials`. Draft proposals only
+  /// steer speculation: the target still verifies every token, so greedy
+  /// text is unchanged. Sampled text can differ: a smaller head changes
+  /// acceptance, and so the later random draws.
+  [[nodiscard]] bool SetDraftVocab(std::uint32_t prefix_rows,
+                                   std::vector<std::int32_t> specials,
+                                   std::string* error_msg);
   const DeviceMixer& hc_head() const noexcept { return hc_head_; }
   const std::vector<DeviceLayer>& layers() const noexcept { return layers_; }
   [[nodiscard]] bool has_mtp() const noexcept { return has_mtp_; }
@@ -92,11 +171,15 @@ public:
   }
 
 private:
+  friend struct DeviceModelTestAccess;  // synthetic models in GPU tests
   DeviceModel() = default;
 
   Config config_;
   DeviceTensor token_embd_;
   DeviceTensor output_;
+  std::size_t output_bytes_{0};
+  DeviceTensor draft_output_;
+  std::vector<std::int32_t> draft_specials_;
   DeviceMixer hc_head_;
   std::vector<DeviceLayer> layers_;
   DeviceLayer mtp_;

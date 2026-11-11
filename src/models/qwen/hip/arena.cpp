@@ -1,23 +1,23 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstring>
+#include <gufo/ext/experimental/hip_utils.hpp>
+#include <gufo/ext/experimental/snapshot_transfer.hpp>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
 
-#include "src/core/hip/hip_utils.hpp"
-#include "src/core/hip/snapshot_transfer.hpp"
-#include "src/models/qwen/hip/detail/attention_policy.hpp"
+#include "src/families/qwen/hip_common/attention_policy.hpp"
+#include "src/families/qwen/kernels/ops/gemm.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/ops/gemm.hpp"
 
 namespace gufo::hip {
 namespace {
 
-constexpr std::uint32_t kMaxPromptBatch = 4096;
 constexpr std::size_t kMaxTargetLayerTaps = 5;
 constexpr std::array<std::uint8_t, 8> kCompactSnapshotMagic = {
     'G', 'Q', 'K', 'V', 'S', 'N', 'P', '1'};
@@ -259,7 +259,10 @@ std::size_t QwenGpuSnapshot::SerializeCompact(
     throw std::invalid_argument(
         "Qwen compact snapshot destination size is invalid");
   }
-  std::fill(destination.begin(), destination.end(), std::uint8_t{0});
+  // Only the header has reserved bytes. Every payload byte is overwritten
+  // below; clearing it first needlessly competes with inference for bandwidth.
+  std::fill_n(destination.begin(), kCompactSnapshotHeaderBytes,
+              std::uint8_t{0});
   std::copy(kCompactSnapshotMagic.begin(), kCompactSnapshotMagic.end(),
             destination.begin());
   PutLittleEndian<std::uint32_t>(destination, 8,
@@ -413,21 +416,40 @@ QwenGpuMemoryUsage QwenGpuArena::EstimateMemoryUsage(
       policy.UsesFp16AttentionKv() ? sizeof(std::uint16_t) : sizeof(float),
       &state);
 
+  CheckedAdd(RecurrentStateBytes(config, policy), &state);
+  return usage;
+}
+
+std::size_t QwenGpuArena::RecurrentStateBytes(const core::ModelConfig& config,
+                                              QwenExecutionPolicy policy) {
+  std::size_t state = 0;
   const std::size_t total_conv = CheckedMultiply(
-      CheckedMultiply(config.SsmLayerCount(), ssm_qkv), config.ssm_conv_kernel);
+      CheckedMultiply(config.SsmLayerCount(), config.SsmQkvSize()),
+      config.ssm_conv_kernel);
   AddAllocation(total_conv, sizeof(float), &state);
   const std::size_t total_deltanet = CheckedMultiply(
-      CheckedMultiply(CheckedMultiply(config.SsmLayerCount(), time_step),
-                      config.ssm_state_size),
+      CheckedMultiply(
+          CheckedMultiply(config.SsmLayerCount(), config.ssm_time_step_rank),
+          config.ssm_state_size),
       config.SsmValueSize());
   AddAllocation(total_deltanet,
                 QwenRecurrentStateElementBytes(policy.recurrent_state_storage),
                 &state);
-  return usage;
+  return state;
 }
 
 QwenGpuMemoryUsage QwenGpuArena::GetMemoryUsage() const {
-  return EstimateMemoryUsage(config_, max_context_, policy_);
+  auto usage = EstimateMemoryUsage(config_, max_context_, policy_);
+  if (d_ssm_conv_buffers_[1] && d_ssm_deltanet_buffers_[1])
+    CheckedAdd(RecurrentStateBytes(config_, policy_),
+               &usage.request_state_bytes);
+  // Rollback scratch, not snapshot state: only the slots a wide verification
+  // added to the ring (the runner claims them).
+  if (d_ssm_replay_qkv_ != nullptr && replay_capacity_ > kSsmReplayCapacity)
+    CheckedAdd(SsmReplayLogBytes(config_, replay_capacity_) -
+                   SsmReplayLogBytes(config_, kSsmReplayCapacity),
+               &usage.temporary_scratch_bytes);
+  return usage;
 }
 
 std::size_t QwenGpuArena::SnapshotPayloadBytes(
@@ -503,6 +525,12 @@ std::unique_ptr<QwenGpuSnapshot> QwenGpuArena::SaveSnapshot(
   ThrowOnHipError(hipMalloc(&snapshot->d_ssm_deltanet_, deltanet_bytes),
                   "failed to allocate Qwen DeltaNet snapshot");
 
+  // The transfer runs on its own stream. Drain state updates queued on the
+  // arena stream (rollback, replay) before reading them from the live buffer.
+  assert(d_ssm_conv_state == d_ssm_conv_buffers_[live_recurrent_] &&
+         d_ssm_deltanet_state == d_ssm_deltanet_buffers_[live_recurrent_]);
+  ThrowOnHipError(hipStreamSynchronize(stream),
+                  "failed to synchronize Qwen snapshot capture");
   SnapshotTransfer transfer;
   if (kv_f32_bytes != 0) {
     const auto element_bytes =
@@ -776,12 +804,12 @@ QwenGpuArena::QwenGpuArena(const core::ModelConfig& config,
 
     const std::size_t total_conv =
         num_layers * ssm_qkv_size * config_.ssm_conv_kernel;
-    HIP_CHECK(hipMalloc(&d_ssm_conv_state, total_conv * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_ssm_conv_buffers_[0], total_conv * sizeof(float)));
 
     const std::size_t total_deltanet = num_layers * time_step_rank *
                                        config_.ssm_state_size *
                                        config_.SsmValueSize();
-    HIP_CHECK(hipMalloc(&d_ssm_deltanet_state,
+    HIP_CHECK(hipMalloc(&d_ssm_deltanet_buffers_[0],
                         total_deltanet * QwenRecurrentStateElementBytes(
                                              policy_.recurrent_state_storage)));
 
@@ -925,12 +953,16 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   d_scratch_q8_act = other.d_scratch_q8_act;
   d_split_k_attention = other.d_split_k_attention;
   d_weights_bf16 = other.d_weights_bf16;
-  d_saved_ssm_conv_state_ = other.d_saved_ssm_conv_state_;
-  d_saved_ssm_deltanet_state_ = other.d_saved_ssm_deltanet_state_;
+  d_ssm_conv_buffers_ = other.d_ssm_conv_buffers_;
+  d_ssm_deltanet_buffers_ = other.d_ssm_deltanet_buffers_;
+  live_recurrent_ = other.live_recurrent_;
+  saved_recurrent_ = other.saved_recurrent_;
+  source_recurrent_ = other.source_recurrent_;
   d_ssm_replay_qkv_ = other.d_ssm_replay_qkv_;
   d_ssm_replay_alpha_ = other.d_ssm_replay_alpha_;
   d_ssm_replay_beta_ = other.d_ssm_replay_beta_;
   d_ssm_replay_enabled_ = other.d_ssm_replay_enabled_;
+  replay_capacity_ = other.replay_capacity_;
   saved_context_ = other.saved_context_;
   replay_last_position_ = other.replay_last_position_;
   replay_captured_positions_ = other.replay_captured_positions_;
@@ -968,12 +1000,16 @@ QwenGpuArena::QwenGpuArena(QwenGpuArena&& other) noexcept
   other.d_scratch_q8_act = nullptr;
   other.d_split_k_attention = nullptr;
   other.d_weights_bf16 = nullptr;
-  other.d_saved_ssm_conv_state_ = nullptr;
-  other.d_saved_ssm_deltanet_state_ = nullptr;
+  other.d_ssm_conv_buffers_ = {};
+  other.d_ssm_deltanet_buffers_ = {};
+  other.live_recurrent_ = 0;
+  other.saved_recurrent_ = 0;
+  other.source_recurrent_ = 0;
   other.d_ssm_replay_qkv_ = nullptr;
   other.d_ssm_replay_alpha_ = nullptr;
   other.d_ssm_replay_beta_ = nullptr;
   other.d_ssm_replay_enabled_ = nullptr;
+  other.replay_capacity_ = kSsmReplayCapacity;
   other.saved_context_ = 0;
   other.replay_last_position_ = 0;
   other.replay_captured_positions_ = 0;
@@ -1021,12 +1057,16 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     d_scratch_q8_act = other.d_scratch_q8_act;
     d_split_k_attention = other.d_split_k_attention;
     d_weights_bf16 = other.d_weights_bf16;
-    d_saved_ssm_conv_state_ = other.d_saved_ssm_conv_state_;
-    d_saved_ssm_deltanet_state_ = other.d_saved_ssm_deltanet_state_;
+    d_ssm_conv_buffers_ = other.d_ssm_conv_buffers_;
+    d_ssm_deltanet_buffers_ = other.d_ssm_deltanet_buffers_;
+    live_recurrent_ = other.live_recurrent_;
+    saved_recurrent_ = other.saved_recurrent_;
+    source_recurrent_ = other.source_recurrent_;
     d_ssm_replay_qkv_ = other.d_ssm_replay_qkv_;
     d_ssm_replay_alpha_ = other.d_ssm_replay_alpha_;
     d_ssm_replay_beta_ = other.d_ssm_replay_beta_;
     d_ssm_replay_enabled_ = other.d_ssm_replay_enabled_;
+    replay_capacity_ = other.replay_capacity_;
     saved_context_ = other.saved_context_;
     replay_last_position_ = other.replay_last_position_;
     replay_captured_positions_ = other.replay_captured_positions_;
@@ -1064,12 +1104,16 @@ QwenGpuArena& QwenGpuArena::operator=(QwenGpuArena&& other) noexcept {
     other.d_scratch_q8_act = nullptr;
     other.d_split_k_attention = nullptr;
     other.d_weights_bf16 = nullptr;
-    other.d_saved_ssm_conv_state_ = nullptr;
-    other.d_saved_ssm_deltanet_state_ = nullptr;
+    other.d_ssm_conv_buffers_ = {};
+    other.d_ssm_deltanet_buffers_ = {};
+    other.live_recurrent_ = 0;
+    other.saved_recurrent_ = 0;
+    other.source_recurrent_ = 0;
     other.d_ssm_replay_qkv_ = nullptr;
     other.d_ssm_replay_alpha_ = nullptr;
     other.d_ssm_replay_beta_ = nullptr;
     other.d_ssm_replay_enabled_ = nullptr;
+    other.replay_capacity_ = kSsmReplayCapacity;
     other.saved_context_ = 0;
     other.replay_last_position_ = 0;
     other.replay_captured_positions_ = 0;
@@ -1086,6 +1130,13 @@ void QwenGpuArena::Reset() {
   const std::size_t total_deltanet = num_layers * config_.ssm_time_step_rank *
                                      config_.ssm_state_size *
                                      config_.SsmValueSize();
+
+  // Buffer 0 becomes the live state again; whatever buffer 1 holds is fully
+  // overwritten before it is read.
+  live_recurrent_ = 0;
+  saved_recurrent_ = 0;
+  source_recurrent_ = 0;
+  SyncLivePointers();
 
   // Attention only reads positions through the current token. Prefill/decode
   // writes those rows before use; clearing reserved future KV adds O(capacity)
@@ -1155,10 +1206,12 @@ void QwenGpuArena::FreeAll() noexcept {
   }
   if (d_kv_cache != nullptr)
     LogCleanupError(hipFree(d_kv_cache));
-  if (d_ssm_conv_state != nullptr)
-    LogCleanupError(hipFree(d_ssm_conv_state));
-  if (d_ssm_deltanet_state != nullptr)
-    LogCleanupError(hipFree(d_ssm_deltanet_state));
+  for (float* buffer : d_ssm_conv_buffers_)
+    if (buffer != nullptr)
+      LogCleanupError(hipFree(buffer));
+  for (void* buffer : d_ssm_deltanet_buffers_)
+    if (buffer != nullptr)
+      LogCleanupError(hipFree(buffer));
   if (d_prompt_tokens != nullptr)
     LogCleanupError(hipFree(d_prompt_tokens));
   if (d_scratch_bf16 != nullptr)
@@ -1169,10 +1222,6 @@ void QwenGpuArena::FreeAll() noexcept {
     LogCleanupError(hipFree(d_split_k_attention));
   if (d_weights_bf16 != nullptr)
     LogCleanupError(hipFree(d_weights_bf16));
-  if (d_saved_ssm_conv_state_ != nullptr)
-    LogCleanupError(hipFree(d_saved_ssm_conv_state_));
-  if (d_saved_ssm_deltanet_state_ != nullptr)
-    LogCleanupError(hipFree(d_saved_ssm_deltanet_state_));
   if (d_ssm_replay_qkv_ != nullptr)
     LogCleanupError(hipFree(d_ssm_replay_qkv_));
   if (d_ssm_replay_alpha_ != nullptr)
@@ -1215,8 +1264,11 @@ void QwenGpuArena::FreeAll() noexcept {
   d_scratch_q8_act = nullptr;
   d_split_k_attention = nullptr;
   d_weights_bf16 = nullptr;
-  d_saved_ssm_conv_state_ = nullptr;
-  d_saved_ssm_deltanet_state_ = nullptr;
+  d_ssm_conv_buffers_ = {};
+  d_ssm_deltanet_buffers_ = {};
+  live_recurrent_ = 0;
+  saved_recurrent_ = 0;
+  source_recurrent_ = 0;
   d_ssm_replay_qkv_ = nullptr;
   d_ssm_replay_alpha_ = nullptr;
   d_ssm_replay_beta_ = nullptr;

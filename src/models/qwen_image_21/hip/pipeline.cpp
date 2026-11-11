@@ -8,7 +8,7 @@
 #include <random>
 #include <stdexcept>
 
-#include "src/models/qwen/control_tokens.hpp"
+#include "src/families/qwen/control_tokens/control_tokens.hpp"
 #include "src/models/qwen_image_21/hip/runtime.hpp"
 #include "src/models/qwen_image_21/tokenizer.hpp"
 
@@ -525,8 +525,10 @@ Matrix Denoise(Runtime& rt, DiffusionContext& context, const Matrix& latent,
         "dit." + std::to_string(step) + ".block." + std::to_string(layer), x);
   }
   const auto scale = rt.Linear(activated, "transformer.norm_out.linear");
+  rt.Observe(observer, "dit." + std::to_string(step) + ".output_scale", scale);
   x = rt.NormalizeModulate(x.Slice(prefix, latent.rows),
                            rt.ModulationFactors(scale, false), 0, 0);
+  rt.Observe(observer, "dit." + std::to_string(step) + ".output_norm", x);
   x = rt.Linear(x, "transformer.proj_out");
   rt.Observe(observer, "dit." + std::to_string(step) + ".output", x);
   return x;
@@ -547,6 +549,10 @@ Model::Model(const std::filesystem::path& root)
     : impl_(std::make_unique<Impl>(root)) {}
 Model::~Model() = default;
 
+const SamplingConfig& Model::sampling() const {
+  return impl_->weights.Sampling();
+}
+
 std::vector<std::uint32_t> Model::Tokenize(std::string_view text) const {
   return impl_->tokenizer.Encode(text);
 }
@@ -555,6 +561,7 @@ Result Model::Generate(const Request& request,
                        const CancellationCheck& cancelled,
                        const Observer& observer) {
   ValidateRequest(request);
+  const int steps = sampling().ResolveSteps(request.steps);
   std::unique_lock lock(impl_->mutex);
   Cancel(cancelled);
   const auto start = Clock::now();
@@ -582,10 +589,10 @@ Result Model::Generate(const Request& request,
     auto latent = rt.Upload(noise, height * width, 64);
     rt.Observe(observer, "noise", latent);
     const auto denoise_start = Clock::now();
-    const auto sigmas = FlowSigmas(request.steps, height * width);
+    const auto sigmas = sampling().Sigmas(steps, height * width);
     if (observer.Wants("sigmas"))
       observer.write("sigmas", sigmas, 1, static_cast<int>(sigmas.size()));
-    for (int step = 0; step < request.steps; ++step) {
+    for (int step = 0; step < steps; ++step) {
       const auto velocity =
           Denoise(rt, context, latent, sigmas[step], step, cancelled, observer);
       latent = rt.Euler(latent, velocity, sigmas[step + 1] - sigmas[step]);
@@ -600,6 +607,7 @@ Result Model::Generate(const Request& request,
     result.metrics.vae_ms = Milliseconds(vae_start);
     result.metrics.total_ms = Milliseconds(start);
     result.metrics.resident_weight_bytes = rt.WeightBytes();
+    result.metrics.steps = steps;
     return result;
   } catch (...) {
     // All launches on this request's stream must finish before temporary

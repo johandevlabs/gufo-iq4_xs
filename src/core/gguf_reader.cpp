@@ -1,10 +1,5 @@
 #include "src/core/gguf_reader.hpp"
 
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -25,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "src/core/platform/mapped_file.hpp"
 #include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::core {
@@ -44,6 +40,11 @@ bool ReadPod(const std::uint8_t* data, std::size_t size, std::size_t& offset,
   return true;
 }
 
+std::string UnsizedError(std::string_view name) {
+  return "Invalid GGUF tensor shape or unsupported storage type: " +
+         std::string(name);
+}
+
 bool ReadString(const std::uint8_t* data, std::size_t size, std::size_t& offset,
                 std::string_view& out) {
   std::uint64_t len = 0;
@@ -60,21 +61,13 @@ bool ReadString(const std::uint8_t* data, std::size_t size, std::size_t& offset,
 
 }  // namespace
 
-GgufReader::~GgufReader() {
-  if (owns_mmap_ && mmap_addr_ != nullptr && size_ > 0) {
-    munmap(mmap_addr_, size_);
-  }
-  if (fd_ >= 0) {
-    close(fd_);
-  }
-}
+GgufReader::~GgufReader() = default;
 
 GgufReader::GgufReader(GgufReader&& other) noexcept
     : data_(other.data_),
-      mmap_addr_(other.mmap_addr_),
       size_(other.size_),
-      fd_(other.fd_),
-      owns_mmap_(other.owns_mmap_),
+      source_path_(std::move(other.source_path_)),
+      mapping_(std::move(other.mapping_)),
       version_(other.version_),
       alignment_(other.alignment_),
       metadata_(std::move(other.metadata_)),
@@ -83,26 +76,19 @@ GgufReader::GgufReader(GgufReader&& other) noexcept
       mapped_regions_(std::move(other.mapped_regions_)),
       shards_(std::move(other.shards_)) {
   other.data_ = nullptr;
-  other.mmap_addr_ = nullptr;
   other.size_ = 0;
-  other.fd_ = -1;
-  other.owns_mmap_ = false;
 }
 
 GgufReader& GgufReader::operator=(GgufReader&& other) noexcept {
   if (this != &other) {
-    if (owns_mmap_ && mmap_addr_ != nullptr && size_ > 0) {
-      munmap(mmap_addr_, size_);
-    }
-    if (fd_ >= 0) {
-      close(fd_);
-    }
+    mapping_.Close();
+    shards_.clear();
+    mapped_regions_.clear();
 
     data_ = other.data_;
-    mmap_addr_ = other.mmap_addr_;
     size_ = other.size_;
-    fd_ = other.fd_;
-    owns_mmap_ = other.owns_mmap_;
+    source_path_ = std::move(other.source_path_);
+    mapping_ = std::move(other.mapping_);
     version_ = other.version_;
     alignment_ = other.alignment_;
     metadata_ = std::move(other.metadata_);
@@ -112,17 +98,15 @@ GgufReader& GgufReader::operator=(GgufReader&& other) noexcept {
     shards_ = std::move(other.shards_);
 
     other.data_ = nullptr;
-    other.mmap_addr_ = nullptr;
     other.size_ = 0;
-    other.fd_ = -1;
-    other.owns_mmap_ = false;
   }
   return *this;
 }
 
 std::unique_ptr<GgufReader> GgufReader::OpenFile(
-    const std::filesystem::path& path, std::string* error_msg) {
-  auto first = OpenSingleFile(path, error_msg);
+    const std::filesystem::path& path, std::string* error_msg,
+    GgufOpenOptions options) {
+  auto first = OpenSingleFile(path, error_msg, options);
   if (!first) {
     return nullptr;
   }
@@ -138,48 +122,30 @@ std::unique_ptr<GgufReader> GgufReader::OpenFile(
   if (split_count <= 1) {
     return first;
   }
-  return OpenSplitFileSet(path, std::move(first), error_msg);
+  return OpenSplitFileSet(path, std::move(first), error_msg, options);
 }
 
 std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
-    const std::filesystem::path& path, std::string* error_msg) {
-  const int fd = open(path.c_str(), O_RDONLY);
-  if (fd < 0) {
+    const std::filesystem::path& path, std::string* error_msg,
+    GgufOpenOptions options) {
+  std::string open_error;
+  auto mapping = platform::ReadOnlyMappedFile::Open(path, &open_error);
+  if (!mapping.valid()) {
     if (error_msg != nullptr) {
-      *error_msg = "Failed to open file: " + path.string();
+      *error_msg =
+          "Failed to open or map file: " + path.string() + ": " + open_error;
     }
     return nullptr;
   }
-
-  struct stat sb{};
-  if (fstat(fd, &sb) != 0 || sb.st_size <= 0) {
-    close(fd);
-    if (error_msg != nullptr) {
-      *error_msg = "Invalid or empty file: " + path.string();
-    }
-    return nullptr;
-  }
-
-  const auto size = static_cast<std::size_t>(sb.st_size);
-  void* const addr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-  if (addr == MAP_FAILED) {
-    close(fd);
-    if (error_msg != nullptr) {
-      *error_msg = "Failed to mmap file: " + path.string();
-    }
-    return nullptr;
-  }
-  (void)madvise(addr, size, MADV_SEQUENTIAL);
 
   auto reader = std::unique_ptr<GgufReader>(new GgufReader());
-  reader->mmap_addr_ = addr;
-  reader->data_ = static_cast<const std::uint8_t*>(addr);
-  reader->size_ = size;
-  reader->fd_ = fd;
-  reader->owns_mmap_ = true;
+  reader->data_ = mapping.data();
+  reader->size_ = mapping.size();
+  reader->source_path_ = path;
+  reader->mapping_ = std::move(mapping);
 
   try {
-    if (!reader->ParseHeaders(error_msg)) {
+    if (!reader->ParseHeaders(error_msg, options)) {
       if (error_msg && error_msg->empty())
         *error_msg = "Malformed or truncated GGUF";
       return nullptr;
@@ -189,14 +155,15 @@ std::unique_ptr<GgufReader> GgufReader::OpenSingleFile(
       *error_msg = "Insufficient memory for GGUF descriptors";
     return nullptr;
   }
-  reader->mapped_regions_.push_back(
-      {reader->data_, reader->size_, reader->fd_});
+  reader->mapped_regions_.push_back({reader->data_, reader->size_,
+                                     reader->mapping_.PlatformHandle(),
+                                     reader->source_path_});
   return reader;
 }
 
 std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
     const std::filesystem::path& path, std::unique_ptr<GgufReader> first,
-    std::string* error_msg) {
+    std::string* error_msg, GgufOpenOptions options) {
   const auto split_count = first->GetMetadataUint32("split.count").value_or(1U);
   const auto split_no = first->GetMetadataUint32("split.no");
   const auto total_tensor_count =
@@ -240,7 +207,7 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
       continue;
     }
     const auto shard_path = build_path(i);
-    shards[i] = OpenSingleFile(shard_path, error_msg);
+    shards[i] = OpenSingleFile(shard_path, error_msg, options);
     if (!shards[i]) {
       if (error_msg != nullptr && error_msg->empty()) {
         *error_msg = "Failed to open split GGUF shard: " + shard_path.string();
@@ -294,8 +261,9 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
   combined->mapped_regions_.reserve(split_count);
 
   for (const auto& shard : shards) {
-    combined->mapped_regions_.push_back(
-        {shard->data_, shard->size_, shard->fd_});
+    combined->mapped_regions_.push_back({shard->data_, shard->size_,
+                                         shard->mapping_.PlatformHandle(),
+                                         shard->source_path_});
     for (const auto& tensor : shard->tensors_) {
       if (combined->tensor_index_.contains(tensor.name)) {
         if (error_msg != nullptr) {
@@ -324,7 +292,8 @@ std::unique_ptr<GgufReader> GgufReader::OpenSplitFileSet(
 
 std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
                                                    std::size_t size,
-                                                   std::string* error_msg) {
+                                                   std::string* error_msg,
+                                                   GgufOpenOptions options) {
   if (data == nullptr || size < 24) {
     if (error_msg != nullptr) {
       *error_msg = "Invalid memory buffer for GGUF";
@@ -333,14 +302,11 @@ std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
   }
 
   auto reader = std::unique_ptr<GgufReader>(new GgufReader());
-  reader->mmap_addr_ = nullptr;
   reader->data_ = static_cast<const std::uint8_t*>(data);
   reader->size_ = size;
-  reader->fd_ = -1;
-  reader->owns_mmap_ = false;
 
   try {
-    if (!reader->ParseHeaders(error_msg)) {
+    if (!reader->ParseHeaders(error_msg, options)) {
       if (error_msg && error_msg->empty())
         *error_msg = "Malformed or truncated GGUF";
       return nullptr;
@@ -351,11 +317,11 @@ std::unique_ptr<GgufReader> GgufReader::OpenMemory(const void* data,
     return nullptr;
   }
   reader->mapped_regions_.push_back(
-      {reader->data_, reader->size_, reader->fd_});
+      {reader->data_, reader->size_, platform::kInvalidFile, {}});
   return reader;
 }
 
-bool GgufReader::ParseHeaders(std::string* error_msg) {
+bool GgufReader::ParseHeaders(std::string* error_msg, GgufOpenOptions options) {
   if (size_ < 24) {
     if (error_msg != nullptr) {
       *error_msg = "File too small for GGUF header";
@@ -729,10 +695,16 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     const auto block = quant::QuantizedBlockElements(info.type);
     info.size_bytes = quant::EncodedSizeBytes(info.type, elements);
     if (!info.size_bytes || (block && info.dimensions.front() % block != 0)) {
-      if (error_msg)
-        *error_msg = "Invalid GGUF tensor shape or unsupported storage type: " +
-                     std::string(info.name);
-      return false;
+      // An extension may own this layout; its extent follows from the next
+      // tensor's offset once every offset is known.
+      if (options.allow_unsized_tensors && elements != 0) {
+        info.sized = false;
+        info.size_bytes = 0;
+      } else {
+        if (error_msg)
+          *error_msg = UnsizedError(info.name);
+        return false;
+      }
     }
 
     if (!ReadPod(data_, size_, offset, info.offset)) {
@@ -747,14 +719,34 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     tensors_.push_back(std::move(info));
   }
 
-  // Align data payload base to alignment boundary
+  // Align data payload base to alignment boundary. A tensorless file, such as
+  // a metadata-only first split shard, may end unpadded after its header.
   const auto padding = (alignment_ - offset % alignment_) % alignment_;
-  if (offset > size_ || padding > size_ - offset)
+  if (tensors_.empty())
+    return true;
+  if (offset > size_ || padding > size_ - offset) {
+    if (error_msg)
+      *error_msg = "GGUF data section is truncated before its alignment";
     return false;
+  }
   const std::size_t data_base = offset + padding;
+  const std::size_t data_size = size_ - data_base;
+  std::vector<std::uint64_t> offsets;
+  if (FirstUnsizedTensor() != nullptr) {
+    offsets.reserve(tensors_.size());
+    for (const auto& tensor : tensors_)
+      offsets.push_back(tensor.offset);
+    std::ranges::sort(offsets);
+  }
   for (auto& tensor : tensors_) {
-    if (tensor.offset % alignment_ != 0 || tensor.offset > size_ - data_base ||
-        tensor.size_bytes > size_ - data_base - tensor.offset) {
+    if (!tensor.sized && tensor.offset < data_size) {
+      const auto next = std::ranges::upper_bound(offsets, tensor.offset);
+      tensor.size_bytes = static_cast<std::size_t>(
+          (next == offsets.end() ? data_size : *next) - tensor.offset);
+    }
+    if (tensor.offset % alignment_ != 0 || tensor.offset > data_size ||
+        (!tensor.sized && tensor.size_bytes == 0) ||
+        tensor.size_bytes > data_size - tensor.offset) {
       if (error_msg != nullptr) {
         *error_msg = "Tensor extent or alignment is invalid: " +
                      std::string(tensor.name);
@@ -765,6 +757,11 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
   }
 
   return true;
+}
+
+std::string GgufReader::UnsizedTensorError() const {
+  const auto* tensor = FirstUnsizedTensor();
+  return tensor != nullptr ? UnsizedError(tensor->name) : std::string{};
 }
 
 const GgufMetadataValue* GgufReader::FindMetadata(
@@ -909,117 +906,6 @@ bool GgufReader::HasVisionTensors() const noexcept {
     return t.name.starts_with("model.visual") ||
            t.name.starts_with("visual.") || t.name.starts_with("v.");
   });
-}
-
-std::optional<ModelConfig> GgufReader::ExtractModelConfig(
-    std::string* error_msg) const {
-  ModelConfig config;
-
-  // 1. Check architecture prefix (e.g. "qwen2", "qwen3", "qwen35", "llama")
-  auto arch_str = GetMetadataString("general.architecture").value_or("qwen");
-  config.architecture = std::string(arch_str);
-  const std::string prefix = config.architecture + ".";
-
-  // 2. Read standard architectural hyperparameters
-  const auto total_layers =
-      GetMetadataUint32(prefix + "block_count").value_or(config.num_layers);
-  if (auto val = GetMetadataUint32(prefix + "embedding_length")) {
-    config.hidden_size = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "feed_forward_length")) {
-    config.intermediate_size = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "attention.head_count")) {
-    config.num_attention_heads = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "attention.head_count_kv")) {
-    config.num_key_value_heads = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "attention.key_length")) {
-    config.head_dim = *val;
-  } else if (config.num_attention_heads > 0) {
-    config.head_dim = config.hidden_size / config.num_attention_heads;
-  }
-  if (auto val = GetMetadataUint32(prefix + "context_length")) {
-    config.context_length = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "full_attention_interval")) {
-    config.full_attention_interval = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "ssm.conv_kernel")) {
-    config.ssm_conv_kernel = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "ssm.state_size")) {
-    config.ssm_state_size = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "ssm.group_count")) {
-    config.ssm_group_count = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "ssm.time_step_rank")) {
-    config.ssm_time_step_rank = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "ssm.inner_size")) {
-    config.ssm_inner_size = *val;
-  }
-  if (auto val = GetMetadataFloat32(prefix + "rope.freq_base")) {
-    config.rope_theta = *val;
-  }
-  if (auto val = GetMetadataUint32(prefix + "rope.dimension_count")) {
-    config.rotary_dim = *val;
-  } else {
-    config.rotary_dim = config.head_dim;
-  }
-
-  // 3. MTP speculative layers are included in qwen35.block_count but are not
-  // part of the main autoregressive transformer stack.
-  const auto embedded_mtp_layers =
-      GetMetadataUint32(prefix + "nextn_predict_layers");
-  config.mtp_num_layers =
-      embedded_mtp_layers.value_or(HasMtpTensors() ? 1U : 0U);
-  const std::uint32_t layers_in_block_count = embedded_mtp_layers.value_or(0U);
-  if (layers_in_block_count > total_layers) {
-    if (error_msg != nullptr) {
-      *error_msg = "MTP layer count exceeds qwen block count";
-    }
-    return std::nullopt;
-  }
-  config.num_layers = total_layers - layers_in_block_count;
-
-  // 4. Assert text-only contract
-  if (HasVisionTensors()) {
-    config.is_text_only = false;
-    if (error_msg != nullptr) {
-      *error_msg =
-          "Model contains vision encoder tensors; text-only contract violation";
-    }
-    return std::nullopt;
-  }
-  config.is_text_only = true;
-
-  // 5. Model name
-  if (auto name = GetMetadataString("general.name")) {
-    config.model_name = std::string(*name);
-  }
-  if (const auto* token_embd = FindTensor("token_embd.weight");
-      token_embd != nullptr && config.hidden_size > 0) {
-    const auto elements = token_embd->ElementCount();
-    if ((elements % config.hidden_size) == 0) {
-      config.vocab_size =
-          static_cast<std::uint32_t>(elements / config.hidden_size);
-    }
-  }
-
-  // 6. Validate configuration against Qwen3.5/3.8 structural rules
-  if (!config.IsValidQwen()) {
-    if (error_msg != nullptr) {
-      *error_msg = "Model config failed Qwen structural validation (head_dim=" +
-                   std::to_string(config.head_dim) +
-                   ", layers=" + std::to_string(config.num_layers) + ")";
-    }
-    return std::nullopt;
-  }
-
-  return config;
 }
 
 }  // namespace gufo::core

@@ -43,7 +43,26 @@ struct ds4_rocm_verify_item {
    * floats each). The frontier gather is skipped for such items because the
    * caller decides acceptance by sampling those rows. */
   float* row_logits;
+  /* Greedy items: the token the request stops at, or -1. The frontier gather
+   * stops before an accepted stop token exactly as the CPU commit does. */
+  int stop_token = -1;
 };
+
+/* Greedy acceptance of a verified DSpark block: tokens[0] is the anchor and
+ * row_tops[i] the target argmax after tokens[i]. Accepts while the argmax
+ * reproduces the next token and stops before an accepted stop_token (-1 for
+ * none), so frontier row accepted - 1 proposes it as the next anchor. The CPU
+ * commit and the GPU frontier gather both use it and must agree. */
+inline uint32_t ds4_dspark_greedy_accept(const int32_t* row_tops,
+                                         const int32_t* tokens,
+                                         uint32_t n_tokens, int stop_token) {
+  uint32_t accepted = 1;
+  while (accepted < n_tokens && row_tops[accepted - 1] == tokens[accepted] &&
+         tokens[accepted] != stop_token) {
+    accepted++;
+  }
+  return accepted;
+}
 
 struct ds4_rocm_dspark_draft_item {
   ds4_rocm_graph* graph;
@@ -62,6 +81,10 @@ struct ds4_engine {
     ds4_weights *weights;
     ds4_dspark_model *dspark;
     ds4_rocm_graph* batch_workspace;
+    /* Every session graph, and the small batch workspace their decodes use
+     * while a layered prefill pass of one of them yields. */
+    ds4_rocm_graph* graphs;
+    ds4_rocm_graph* decode_workspace;
     bool rocm_ready;
 };
 
@@ -112,6 +135,14 @@ int ds4_sample_top_p_min_p(const float *logits,
                            uint64_t *rng_state);
 
 uint32_t ds4_rocm_graph_prefill_capacity(int context_size);
+/* Splits the following layer-major prefill passes of `graph` into at most
+ * `groups` layer groups of about equal depth and calls yield(ctx) between
+ * them, once the queued layers have finished. Fewer than two groups, or a
+ * NULL yield, restores unsplit passes. */
+void ds4_rocm_graph_set_prefill_yield(ds4_rocm_graph *graph,
+                                      uint32_t groups,
+                                      void (*yield)(void *ctx),
+                                      void *ctx);
 uint32_t ds4_rocm_graph_resume_prefill_min_tokens(void);
 ds4_rocm_graph *ds4_rocm_graph_create(ds4_engine *engine,
                                       int context_size,
@@ -195,6 +226,19 @@ bool ds4_rocm_graph_dspark_draft(ds4_rocm_graph* graph, ds4_engine* engine,
 bool ds4_rocm_graph_dspark_draft_head_batch(
     ds4_engine* engine, const ds4_rocm_dspark_draft_item* items,
     size_t item_count);
+
+void* ds4_rocm_graph_continuation_tensor(const ds4_rocm_graph* graph,
+                                         ds4_continuation_tensor tensor,
+                                         uint32_t index);
+ds4_continuation_ring ds4_rocm_graph_raw_ring(const ds4_rocm_graph* graph,
+                                              uint32_t position);
+ds4_continuation_ring ds4_rocm_graph_draft_ring(const ds4_rocm_graph* graph,
+                                                uint32_t position);
+bool ds4_rocm_graph_draft_capture(const ds4_rocm_graph* graph);
+bool ds4_rocm_graph_rows_at(const ds4_rocm_graph* graph, uint32_t position);
+bool ds4_rocm_graph_reserve_rows(ds4_rocm_graph* graph, uint32_t position);
+bool ds4_rocm_graph_commit_rows(ds4_rocm_graph* graph, uint32_t position,
+                                uint32_t draft_tokens, bool draft_capture);
 
 uint64_t ds4_rocm_graph_snapshot_bytes(const ds4_rocm_graph *graph,
                                        const ds4_tokens *checkpoint);

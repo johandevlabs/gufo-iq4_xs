@@ -2,7 +2,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
@@ -11,22 +10,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/file.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
-#include "src/cli/serve/logging.hpp"
-#include "src/core/mapped_prefetch.hpp"
+#include <gufo/ext/host.hpp>
+#include <gufo/ext/mapped_prefetch.hpp>
+#include <gufo/ext/platform/publish.hpp>
 #include "../kernels/rocm/resident_api.h"
 #include "dspark_internal.h"
 #include "model.h"
@@ -35,7 +33,7 @@
 
 static uint32_t g_ds4_compress_ratios[DS4_N_LAYER] = {0};
 
-static int g_ds4_lock_fd = -1;
+static gufo::platform::FileLock g_ds4_lock;
 
 /* =========================================================================
  * GGUF Quant Block Formats.
@@ -149,9 +147,8 @@ void *ds4_xrealloc(void *ptr, size_t size) {
 }
 
 double ds4_now_seconds(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return std::chrono::duration<double>(now).count();
 }
 
 static void cursor_error(ds4_cursor *c, const char *msg) {
@@ -478,10 +475,13 @@ static void model_close(ds4_model *m) {
     if (!m) return;
     free(m->kv);
     free(m->tensors);
-    if (m->map) munmap((void *)m->map, (size_t)m->size);
-    if (m->fd >= 0) close(m->fd);
+    m->mapping.Close();
+    if (gufo::platform::FileValid(m->fd)) {
+        gufo::platform::CloseFile(m->fd);
+    }
+    m->map = nullptr;
     memset(m, 0, sizeof(*m));
-    m->fd = -1;
+    m->fd = gufo::platform::kInvalidFile;
 }
 
 /* Read the GGUF metadata table.  Values stay in the mmap; we store offsets so
@@ -573,22 +573,18 @@ static void parse_tensors(ds4_model *m, ds4_cursor *c) {
 /* Open and map the GGUF once for resident ROCm tensor views. */
 static void model_open(ds4_model *m, const char *path) {
     memset(m, 0, sizeof(*m));
-    m->fd = -1;
+    m->fd = gufo::platform::OpenReadFile(path);
+    if (!gufo::platform::FileValid(m->fd) || !m->mapping.Open(path)) {
+        if (gufo::platform::FileValid(m->fd)) {
+            gufo::platform::CloseFile(m->fd);
+            m->fd = gufo::platform::kInvalidFile;
+        }
+        ds4_die("cannot open or map model");
+    }
 
-    int fd = open(path, O_RDONLY);
-    if (fd == -1) ds4_die_errno("cannot open model", path);
-    m->fd = fd;
-
-    struct stat st;
-    if (fstat(fd, &st) == -1) ds4_die_errno("cannot stat model", path);
-    if (st.st_size < 32) ds4_die("model file is too small to be GGUF");
-
-    void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) ds4_die_errno("cannot mmap model", path);
-
-    m->fd = fd;
-    m->map = static_cast<const uint8_t *>(map);
-    m->size = (uint64_t)st.st_size;
+    if (m->mapping.size < 32) ds4_die("model file is too small to be GGUF");
+    m->map = static_cast<const uint8_t *>(m->mapping.data);
+    m->size = (uint64_t)m->mapping.size;
 
     ds4_cursor c = cursor_at(m, 0);
     uint32_t magic;
@@ -625,12 +621,30 @@ static uint64_t accelerator_rocm_preload_span_bytes(void) {
     return 1024ull * 1048576ull;
 }
 
-static bool accelerator_cache_model_tensor_spans(const ds4_model *m, uint64_t *cached_out) {
+static std::vector<const ds4_tensor *> accelerator_f16_rows_tensors(const ds4_weights *w) {
+    std::vector<const ds4_tensor *> tensors;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const ds4_layer_weights &l = w->layer[il];
+        for (const ds4_tensor *t : {l.hc_attn_fn, l.hc_ffn_fn,
+                                    l.attn_compressor_kv, l.attn_compressor_gate,
+                                    l.indexer_compressor_kv, l.indexer_compressor_gate,
+                                    l.indexer_attn_q_b, l.indexer_proj}) {
+            if (t) tensors.push_back(t);
+        }
+    }
+    return tensors;
+}
+
+static bool accelerator_cache_model_tensor_spans(
+        const ds4_model *m,
+        const std::vector<const ds4_tensor *> &f16_rows,
+        uint64_t *cached_out) {
     std::vector<accelerator_tensor_span> spans;
     spans.reserve(static_cast<size_t>(m->n_tensors));
     for (uint64_t i = 0; i < m->n_tensors; i++) {
         const ds4_tensor *t = &m->tensors[i];
         if (t->bytes == 0) continue;
+        if (std::find(f16_rows.begin(), f16_rows.end(), t) != f16_rows.end()) continue;
         if (t->abs_offset > m->size || t->bytes > m->size - t->abs_offset) {
             return false;
         }
@@ -671,16 +685,27 @@ static bool accelerator_cache_model_tensor_spans(const ds4_model *m, uint64_t *c
             off = chunk_end;
         }
     }
+    for (const ds4_tensor *t : f16_rows) {
+        if (ds4_gpu_cache_model_f16_rows(m->map, m->size, t->abs_offset, t->dim[0],
+                                         t->dim[1], "f16-rows") == 0) {
+            fprintf(stderr,
+                    "ds4: accelerator failed to cache F16 tensor %.*s with padded rows\n",
+                    (int)t->name.len, t->name.ptr);
+            return false;
+        }
+        cached += t->bytes;
+    }
     if (cached_out) *cached_out = cached;
     return true;
 }
 
-static bool accelerator_cache_model_tensors(const ds4_model *m) {
+static bool accelerator_cache_model_tensors(const ds4_model *m, const ds4_weights *w) {
     if (!m || !m->map || m->size == 0) return false;
 
     const double t0 = ds4_now_seconds();
     uint64_t cached = 0;
-    const bool cache_ok = accelerator_cache_model_tensor_spans(m, &cached);
+    const bool cache_ok =
+        accelerator_cache_model_tensor_spans(m, accelerator_f16_rows_tensors(w), &cached);
     const bool upload_ok = ds4_gpu_release_model_staging() != 0;
     if (!cache_ok || !upload_ok) return false;
     if (cached != 0) {
@@ -692,6 +717,15 @@ static bool accelerator_cache_model_tensors(const ds4_model *m) {
             (double)cached / 1073741824.0, t1 - t0);
     }
     return true;
+}
+
+/* Attention output A and B and the shared-expert down projection run through
+ * hipBLAS at prompt width on F16 copies of their Q8 weights, with B read
+ * transposed. Registering every copy at load lets the backend build the whole
+ * set at once. */
+static ds4_gpu_q8_f16_weight accelerator_f16_weight(const ds4_tensor *t,
+                                                    bool transposed) {
+    return {t->abs_offset, t->dim[0], t->dim[1], transposed ? 1u : 0u};
 }
 
 /* =========================================================================
@@ -1105,8 +1139,7 @@ static void config_expect_u32(const char *name, uint32_t got, uint32_t expected)
 }
 
 static void config_expect_f32(const char *name, float got, float expected) {
-    const float scale = fabsf(expected) > 1.0f ? fabsf(expected) : 1.0f;
-    if (fabsf(got - expected) <= scale * 1.0e-6f) return;
+    if (ds4_config_f32_matches(got, expected)) return;
     fprintf(stderr, "ds4: expected %s=%.9g for %s, got %.9g\n",
             name, (double)expected, DS4_MODEL_SHAPE_NAME, (double)got);
     throw std::runtime_error("incompatible or invalid DeepSeek artifact");
@@ -1595,12 +1628,26 @@ int ds4_dspark_open(ds4_dspark_model **out, const char *path) {
           ds4_xcalloc(1, sizeof(ds4_dspark_model))));
       auto* d = owned.get();
       d->model = static_cast<ds4_model*>(ds4_xcalloc(1, sizeof(ds4_model)));
-      d->model->fd = -1;
+      d->model->fd = gufo::platform::kInvalidFile;
 
       model_open(d->model, path);
       dspark_validate_metadata(d);
       dspark_bind(d);
       if (!dspark_cache_tensors(d)) {
+        return 1;
+      }
+      /* Support attention runs per session at block width, at most
+       * DS4_DSPARK_MAX_BLOCK rows, which stays on the Q8 kernels. Only the
+       * shared expert, batched across sessions, reaches the F16 route. */
+      std::vector<ds4_gpu_q8_f16_weight> f16_weights;
+      for (uint32_t s = 0; s < d->n_stages; s++) {
+        f16_weights.push_back(
+            accelerator_f16_weight(d->stage[s].block.ffn_down_shexp, false));
+      }
+      if (!ds4_gpu_register_q8_f16_weights(d->model->map, d->model->size,
+                                           f16_weights.data(),
+                                           (uint32_t)f16_weights.size())) {
+        fprintf(stderr, "ds4: failed to register DSpark F16 weight copies\n");
         return 1;
       }
 
@@ -1639,55 +1686,33 @@ void ds4_dspark_close(ds4_dspark_model *d) {
  */
 
 static void ds4_release_instance_lock(void) {
-    if (g_ds4_lock_fd >= 0) {
-        close(g_ds4_lock_fd);
-        g_ds4_lock_fd = -1;
-    }
+    g_ds4_lock.Release();
 }
 
 /* Refuse to start a second ds4 process.  The model can map tens of GiB, so a
  * stale accidental second run is more dangerous than a normal CLI error. */
 static void ds4_acquire_instance_lock(void) {
-    const char *path = getenv("DS4_LOCK_FILE");
-    if (!path || !path[0]) path = "/tmp/ds4.lock";
-
-    const int fd = open(path, O_RDWR | O_CREAT, 0600);
-    if (fd < 0) {
-        fprintf(stderr, "ds4: failed to open lock file %s: %s\n", path, strerror(errno));
-        throw std::runtime_error("DeepSeek instance lock unavailable");
-    }
-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-
-    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        if (errno == EWOULDBLOCK) {
-            char buf[64];
-            const ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
-            long owner = -1;
-            if (n > 0) {
-                buf[n] = '\0';
-                char *end = NULL;
-                owner = strtol(buf, &end, 10);
-            }
-            if (owner > 0) {
-                fprintf(stderr, "ds4: another ds4 process is already running (pid %ld); refusing to start\n", owner);
+    const char *env_path = getenv("DS4_LOCK_FILE");
+    const std::filesystem::path lock_path =
+        (env_path && env_path[0])
+            ? std::filesystem::path(env_path)
+            : gufo::platform::DefaultProcessLockPath("ds4.lock");
+    bool contended = false;
+    std::string holder_pid;
+    g_ds4_lock = gufo::platform::FileLock::TryAcquireProcessLock(
+        lock_path, &contended, &holder_pid);
+    if (!g_ds4_lock.valid()) {
+        if (contended) {
+            if (!holder_pid.empty() && holder_pid != "?") {
+                fprintf(stderr, "ds4: another ds4 process is already running (pid %s); refusing to start\n", holder_pid.c_str());
             } else {
                 fprintf(stderr, "ds4: another ds4 process is already running; refusing to start\n");
             }
-            close(fd);
-            throw std::runtime_error("DeepSeek instance lock unavailable");
+        } else {
+            fprintf(stderr, "ds4: failed to open or lock %s\n", lock_path.string().c_str());
         }
-        fprintf(stderr, "ds4: failed to lock %s: %s\n", path, strerror(errno));
-        close(fd);
         throw std::runtime_error("DeepSeek instance lock unavailable");
     }
-
-    if (ftruncate(fd, 0) != 0) {
-        fprintf(stderr, "ds4: failed to truncate lock file %s: %s\n", path, strerror(errno));
-        close(fd);
-        throw std::runtime_error("DeepSeek instance lock unavailable");
-    }
-    dprintf(fd, "%ld\n", (long)getpid());
-    g_ds4_lock_fd = fd;
 }
 
 int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
@@ -1697,7 +1722,7 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     return 1;
   static std::mutex load_mutex;
   const std::lock_guard lock(load_mutex);
-  if (g_ds4_lock_fd >= 0) {
+  if (g_ds4_lock.valid()) {
     fprintf(stderr, "ds4: a DeepSeek engine is already open\n");
     return 1;
   }
@@ -1707,7 +1732,7 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
 
     e = static_cast<ds4_engine*>(ds4_xcalloc(1, sizeof(ds4_engine)));
     e->model = static_cast<ds4_model*>(ds4_xcalloc(1, sizeof(ds4_model)));
-    e->model->fd = -1;
+    e->model->fd = gufo::platform::kInvalidFile;
     e->weights = static_cast<ds4_weights*>(ds4_xcalloc(1, sizeof(ds4_weights)));
 
     model_open(e->model, opt->model_path);
@@ -1737,8 +1762,23 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
         *out = NULL;
         return 1;
     }
-    if (!accelerator_cache_model_tensors(e->model)) {
+    if (!accelerator_cache_model_tensors(e->model, e->weights)) {
         fprintf(stderr, "ds4: ROCm failed to prepare startup model cache\n");
+        ds4_engine_close(e);
+        *out = NULL;
+        return 1;
+    }
+    std::vector<ds4_gpu_q8_f16_weight> f16_weights;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const ds4_layer_weights *l = &e->weights->layer[il];
+        f16_weights.push_back(accelerator_f16_weight(l->attn_output_a, false));
+        f16_weights.push_back(accelerator_f16_weight(l->attn_output_b, true));
+        f16_weights.push_back(accelerator_f16_weight(l->ffn_down_shexp, false));
+    }
+    if (!ds4_gpu_register_q8_f16_weights(e->model->map, e->model->size,
+                                         f16_weights.data(),
+                                         (uint32_t)f16_weights.size())) {
+        fprintf(stderr, "ds4: ROCm failed to register F16 weight copies\n");
         ds4_engine_close(e);
         *out = NULL;
         return 1;
@@ -1784,6 +1824,8 @@ void ds4_engine_close(ds4_engine *e) {
     if (!e) return;
     ds4_rocm_graph_destroy(e->batch_workspace);
     e->batch_workspace = NULL;
+    ds4_rocm_graph_destroy(e->decode_workspace);
+    e->decode_workspace = NULL;
     ds4_dspark_close(e->dspark);
     e->dspark = NULL;
     weights_free(e->weights);

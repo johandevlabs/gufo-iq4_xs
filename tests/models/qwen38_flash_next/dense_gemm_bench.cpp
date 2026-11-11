@@ -2,7 +2,9 @@
 // (diagnostic): the Q8_0 2560 x 6144 output projection, the 2560 x 640
 // shared-expert down projection, the fused SSM projection (16384 x 2560 with
 // its convolution), the stacked attention projection (13312 x 2560 with norms
-// and RoPE), and the F16 router (513 x 2560) and recurrent gates (96 x 2560).
+// and RoPE), the F16 router (513 x 2560) and recurrent gates (96 x 2560),
+// and the Dynamic 3.1 Q6_K trunk shapes on the Q6_K F16 route beside Q8_0's
+// W8A8 and F16 routes.
 //
 // dense_gemm_bench [tokens] [reps]
 //
@@ -12,6 +14,8 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -101,11 +105,19 @@ double MedianMs(const std::function<void()>& launch, int reps) {
     launch();
   std::vector<float> ms(reps);
   for (int i = 0; i < reps; ++i) {
+    CheckHip(hipDeviceSynchronize(), "hipDeviceSynchronize");
+    const auto host_start = std::chrono::steady_clock::now();
     CheckHip(hipEventRecord(start, nullptr), "hipEventRecord");
     launch();
     CheckHip(hipEventRecord(stop, nullptr), "hipEventRecord");
     CheckHip(hipEventSynchronize(stop), "hipEventSynchronize");
     CheckHip(hipEventElapsedTime(&ms[i], start, stop), "hipEventElapsedTime");
+    // Some driver states report zero for every event pair; time the
+    // synchronized launch on the host clock then.
+    if (ms[i] <= 0.0F)
+      ms[i] = std::chrono::duration<float, std::milli>(
+                  std::chrono::steady_clock::now() - host_start)
+                  .count();
   }
   std::sort(ms.begin(), ms.end());
   return ms[reps / 2];
@@ -203,6 +215,35 @@ int main(int argc, char** argv) try {
     CheckHip(hipFree(y), "hipFree");
   }
 
+  // HC up projection fused with the stream mixer: [tokens][320] gates over
+  // four 2560-wide F16 streams into F16 and tiled Q8 mixer rows.
+  {
+    constexpr std::uint32_t hidden = 2560;
+    constexpr std::uint32_t rank = 320;
+    auto* w = Upload(Q8Weights(4 * hidden, rank, 51U));
+    auto* low = Upload(Activations(std::size_t{tokens} * rank, 52U));
+    auto* xn = Upload(Activations(std::size_t{tokens} * 4 * hidden, 53U));
+    auto* mixed = static_cast<__half*>(
+        Zeros(std::size_t{tokens} * hidden * sizeof(__half)));
+    const std::size_t q8_bytes =
+        ((tokens + 15) / 16) * std::size_t{hidden / 32} * 576;
+    auto* mixed_q8 = Zeros(q8_bytes);
+    const double ms = MedianMs(
+        [&] {
+          if (!q::HcMixF16Gemm(w, low, xn, nullptr, nullptr, mixed, mixed_q8,
+                               nullptr, tokens, hidden, rank, nullptr))
+            throw std::runtime_error("HcMixF16Gemm");
+        },
+        reps);
+    report("hcmix", ms, 2.0 * tokens * 4 * hidden * rank,
+           Hash(mixed, std::size_t{tokens} * hidden * sizeof(__half)) ^
+               Hash(mixed_q8, q8_bytes));
+    for (void* p :
+         {static_cast<void*>(w), static_cast<void*>(low),
+          static_cast<void*>(xn), static_cast<void*>(mixed), mixed_q8})
+      CheckHip(hipFree(p), "hipFree");
+  }
+
   // SSM projection fused with the four-tap convolution.
   {
     constexpr std::uint32_t m = 16384;
@@ -276,9 +317,10 @@ int main(int argc, char** argv) try {
   }
 
   // BF16 indexer projections (query 512 x 2560, key 128 x 2560, and a TP2
-  // rank's halves): the library kernel against BlasLt::Gemm, which runs
-  // DenseBf16Gemm where that reproduces the library. Timed at the requested
-  // tokens; every token count up to it must match bitwise.
+  // rank's halves): the library kernel against BlasLt::Gemm's own kernel,
+  // which sums every token in K order. Timed at the requested tokens; the two
+  // agree to rounding, and the own kernel's rows must not depend on where a
+  // token sits in the batch.
   {
     std::string error;
     auto blas = q::BlasLt::Create(nullptr, &error);
@@ -328,33 +370,108 @@ int main(int argc, char** argv) try {
       std::printf("%s-own", name);
       report("", MedianMs([&] { own(t); }, reps), 2.0 * tokens * m * k,
              Hash(y_own, bytes));
-      int routed = 0;
-      int differ = 0;
-      std::string library_only;
-      for (int n = 1; n <= t; ++n) {
-        const bool uses_own = blas->UsesOwnKernel(HIP_R_16BF, m, n, k, &error);
-        routed += uses_own;
-        if (!uses_own) {
-          if (library_only.size() < 200)
-            library_only += " " + std::to_string(n);
+      if (!q::BlasLt::UsesOwnKernel(HIP_R_16BF, m, k))
+        throw std::runtime_error(std::string(name) + " runs the library");
+      lib(t);
+      own(t);
+      CheckHip(hipDeviceSynchronize(), "hipDeviceSynchronize");
+      const std::size_t count = std::size_t{static_cast<unsigned>(t)} * m;
+      const auto library = host(y_lib, count);
+      const auto whole = host(y_own, count);
+      double worst = 0.0;
+      for (std::size_t i = 0; i < count; ++i)
+        worst = std::max(worst, std::abs(double{library[i]} - whole[i]));
+      // The same rows at other offsets and batch widths.
+      int moved = 0;
+      for (const int offset : {1, 31, 37, 128, 777}) {
+        if (offset >= t)
           continue;
-        }
-        lib(n);
-        own(n);
+        const int n = t - offset;
+        if (!blas->Gemm(
+                w, static_cast<std::uint16_t*>(x) + std::size_t(offset) * k,
+                y_own, HIP_R_16BF, m, n, k, &error))
+          throw std::runtime_error(error);
         CheckHip(hipDeviceSynchronize(), "hipDeviceSynchronize");
-        const auto a = host(y_lib, std::size_t{static_cast<unsigned>(n)} * m);
-        const auto b = host(y_own, std::size_t{static_cast<unsigned>(n)} * m);
-        if (std::memcmp(a.data(), b.data(), a.size() * 4) != 0) {
-          if (++differ <= 10)
-            std::printf("%s n %d DIFF\n", name, n);
+        const auto part =
+            host(y_own, std::size_t{static_cast<unsigned>(n)} * m);
+        if (std::memcmp(part.data(), whole.data() + std::size_t(offset) * m,
+                        part.size() * 4) != 0) {
+          ++moved;
+          std::printf("%s offset %d DIFF\n", name, offset);
         }
       }
       std::printf(
-          "%s n 1..%d: own kernel at %d, bitwise differ at %d; "
-          "library only at:%s\n",
-          name, t, routed, differ, library_only.c_str());
+          "%s n %d: max |own - library| %.3g; rows changed with their "
+          "batch offset at %d of 5 offsets\n",
+          name, t, worst, moved);
       for (void* p : {static_cast<void*>(w), static_cast<void*>(x),
                       static_cast<void*>(y_lib), static_cast<void*>(y_own)})
+        CheckHip(hipFree(p), "hipFree");
+    }
+  }
+  // Q6_K trunk (Dynamic 3.1): each shape on the Q6_K F16 route, and the
+  // same shape's Q8_0 W8A8 and F16 routes for comparison.
+  {
+    struct Shape {
+      const char* name;
+      std::size_t m;
+      std::size_t k;
+    };
+    const Shape shapes[] = {{"qkv", 10240, 2560}, {"gate", 6144, 2560},
+                            {"q", 12288, 2560},   {"kv", 512, 2560},
+                            {"shexp", 640, 2560}, {"ssmout", 2560, 6144}};
+    for (const Shape& sh : shapes) {
+      std::vector<std::uint8_t> q6((sh.m * sh.k / 256) * 210);
+      std::uint32_t seed = 31U;
+      for (std::size_t b = 0; b < q6.size(); b += 210) {
+        for (std::size_t i = 0; i < 208; ++i)
+          q6[b + i] = static_cast<std::uint8_t>(Next(&seed));
+        const __half d = __float2half(1.0F / 4096.0F);
+        std::memcpy(&q6[b + 208], &d, 2);
+      }
+      auto* w6 = Upload(q6);
+      auto* w8 = Upload(Q8Weights(sh.m, sh.k, 13U));
+      std::vector<float> xf(static_cast<std::size_t>(tokens) * sh.k);
+      for (auto& v : xf)
+        v = static_cast<float>(static_cast<int>(Next(&seed) % 2001) - 1000) /
+            1000.0F;
+      auto* x = Upload(xf);
+      auto* xh = Upload(Activations(tokens * sh.k, 12U));
+      auto* tiled = Zeros(q::Q8TiledBytes(tokens, sh.k));
+      auto* y = static_cast<float*>(Zeros(tokens * sh.m * sizeof(float)));
+      const double flops = 2.0 * tokens * sh.m * sh.k;
+      q::QuantizeQ8Tiled(x, tiled, tokens, sh.k, nullptr);
+      const double quant_ms = MedianMs(
+          [&] { q::QuantizeQ8Tiled(x, tiled, tokens, sh.k, nullptr); }, reps);
+      std::printf("%-8s quantize %8.3f ms\n", sh.name, quant_ms);
+
+      const double q8_ms = MedianMs(
+          [&] {
+            if (!q::W8A8Gemm(w8, tiled, y, tokens, sh.m, sh.k, nullptr))
+              throw std::runtime_error("W8A8Gemm");
+          },
+          reps);
+      report("q8w8", q8_ms, flops, Hash(y, tokens * sh.m * sizeof(float)));
+      const double q6f16_ms = MedianMs(
+          [&] {
+            if (!q::DenseQ6F16Gemm(w6, xh, y, tokens, sh.m, sh.k, nullptr))
+              throw std::runtime_error("DenseQ6F16Gemm");
+          },
+          reps);
+      report("q6f16", q6f16_ms, flops, Hash(y, tokens * sh.m * sizeof(float)));
+      if (sh.k <= 2560) {
+        const double f16_ms = MedianMs(
+            [&] {
+              if (!q::DenseF16Gemm(w8, xh, y, tokens, sh.m, sh.k, nullptr))
+                throw std::runtime_error("DenseF16Gemm");
+            },
+            reps);
+        report("q8f16", f16_ms, flops, Hash(y, tokens * sh.m * sizeof(float)));
+      }
+      std::printf("^ %s m=%zu k=%zu\n", sh.name, sh.m, sh.k);
+      for (void* p : {static_cast<void*>(w6), static_cast<void*>(w8),
+                      static_cast<void*>(x), static_cast<void*>(xh), tiled,
+                      static_cast<void*>(y)})
         CheckHip(hipFree(p), "hipFree");
     }
   }

@@ -734,6 +734,13 @@ struct ggml_hip_type_traits<GGML_TYPE_Q1_0> {
 };
 
 template<>
+struct ggml_hip_type_traits<GGML_TYPE_Q2_0> {
+    static constexpr int qk = QK2_0;
+    static constexpr int qr = QR2_0;
+    static constexpr int qi = QI2_0;
+};
+
+template<>
 struct ggml_hip_type_traits<GGML_TYPE_Q4_0> {
     static constexpr int qk = QK4_0;
     static constexpr int qr = QR4_0;
@@ -1182,6 +1189,9 @@ struct ggml_backend_hip_context {
         return pool(device);
     }
 };
+
+// The scratch pool for kernels queued on `stream` (one per device and stream).
+ggml_hip_pool & qfn_pool_for_stream(int device, hipStream_t stream);
 
 struct ggml_hip_mm_fusion_args_host {
     const ggml_tensor * x_bias = nullptr;

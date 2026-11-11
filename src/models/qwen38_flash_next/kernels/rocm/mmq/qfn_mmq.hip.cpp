@@ -10,6 +10,7 @@ namespace qfn_mmq {
 #include "mmid.hpp"
 static int g_routed_max_expert_rows = 0;
 static int g_routed_tile_cols = 0;
+static int prepare_decode_kernels();
 extern "C" int qfn_mmq_init(int device) {
     if (device < 0) {
         fprintf(stderr, "qfn_mmq_init: invalid device %d\n", device);
@@ -28,7 +29,7 @@ extern "C" int qfn_mmq_init(int device) {
         return -1;
     }
 
-    return 0;
+    return prepare_decode_kernels();
 }
 
 extern "C" void qfn_mmq_set_routed_max_expert_rows(int rows) {
@@ -130,7 +131,7 @@ int qfn_mmq_dense_impl(
             y_values_per_block +
         get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
 
-    ggml_hip_pool_alloc<char> src1_q8_1_pool(ctx->pool(), nbytes_src1_q8_1);
+    ggml_hip_pool_alloc<char> src1_q8_1_pool(qfn_pool_for_stream(ctx->device, stream), nbytes_src1_q8_1);
     char *src1_q8_1 = src1_q8_1_pool.get();
 
         quantize_mmq_q8_1_hip(
@@ -244,9 +245,9 @@ int qfn_mmq_moe_impl(
     const int64_t s01          = (int64_t)K / blck;
     const int64_t s02          = (int64_t)M * s01;
 
-    ggml_hip_pool_alloc<int32_t> ids_src1(ctx->pool(), ne_get_rows);
-    ggml_hip_pool_alloc<int32_t> ids_dst(ctx->pool(), ne_get_rows);
-    ggml_hip_pool_alloc<int32_t> expert_bounds(ctx->pool(), n_experts + 1);
+    ggml_hip_pool_alloc<int32_t> ids_src1(qfn_pool_for_stream(ctx->device, stream), ne_get_rows);
+    ggml_hip_pool_alloc<int32_t> ids_dst(qfn_pool_for_stream(ctx->device, stream), ne_get_rows);
+    ggml_hip_pool_alloc<int32_t> expert_bounds(qfn_pool_for_stream(ctx->device, stream), n_experts + 1);
 
     hipMemsetAsync(ids_src1.get(), 0, ne_get_rows * sizeof(int32_t), stream);
     hipMemsetAsync(ids_dst.get(),  0, ne_get_rows * sizeof(int32_t), stream);
@@ -269,7 +270,7 @@ int qfn_mmq_moe_impl(
     const size_t nbytes_src1_q8_1 =
         ne_get_rows * ne10_padded * y_block_size / y_values_per_block +
         get_mmq_x_max_host(cc) * sizeof(block_q8_1_mmq);
-    ggml_hip_pool_alloc<char> src1_q8_1(ctx->pool(), nbytes_src1_q8_1);
+    ggml_hip_pool_alloc<char> src1_q8_1(qfn_pool_for_stream(ctx->device, stream), nbytes_src1_q8_1);
 
     const int64_t s11_src = (int64_t)K;
     const int64_t s12_src = (int64_t)K * ne11;
@@ -360,7 +361,9 @@ static int moe_vector_projection(int weight_type, const void* W,
   if (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
       type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0 &&
       type != GGML_TYPE_IQ3_S && type != GGML_TYPE_IQ4_NL &&
-      type != GGML_TYPE_IQ4_XS) {
+      type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ2_S &&
+      type != GGML_TYPE_IQ3_XXS && type != GGML_TYPE_Q2_0 &&
+      type != GGML_TYPE_Q5_0) {
     fprintf(stderr, "%s: unsupported weight type %d\n", tag, weight_type);
     return -1;
   }
@@ -393,7 +396,8 @@ static int moe_vector_projection(int weight_type, const void* W,
   if (gated && (n_tokens > max_gated_rows || n_expert_used > 32 ||
                 (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
                  type != GGML_TYPE_Q8_0 && type != GGML_TYPE_IQ3_S &&
-                 type != GGML_TYPE_IQ4_NL && type != GGML_TYPE_IQ4_XS))) {
+                 type != GGML_TYPE_IQ4_NL && type != GGML_TYPE_IQ4_XS &&
+                 type != GGML_TYPE_IQ2_S && type != GGML_TYPE_IQ3_XXS))) {
     fprintf(stderr,
             "%s: gated vector exceeds its format's row or expert limit\n",
             tag);
@@ -432,7 +436,7 @@ static int moe_vector_projection(int weight_type, const void* W,
   ggml_hip_pool_alloc<char> src1_q8_1_pool;
   char* src1_q8_1_ptr = nullptr;
   if (input_bytes + group_bytes > 0) {
-    src1_q8_1_pool.alloc(ctx->pool(), input_bytes + group_bytes);
+    src1_q8_1_pool.alloc(qfn_pool_for_stream(ctx->device, stream), input_bytes + group_bytes);
     src1_q8_1_ptr = src1_q8_1_pool.get();
   }
   hipError_t err = hipSuccess;
@@ -570,33 +574,6 @@ extern "C" int qfn_mmq_q5_K_moe_raw(
                                             nullptr, nullptr);
 }
 
-extern "C" int qfn_mmq_iq3_s_moe_raw(
-        const void * W, const float * X, const int32_t * ids, float * out,
-        int M, int K, int n_tokens, int n_experts, int n_expert_used,
-        hipStream_t stream) {
-    return qfn_mmq_moe_impl<GGML_TYPE_IQ3_S>("qfn_mmq_iq3_s_moe_raw", W, X, ids, out, M, K,
-                                             n_tokens, n_experts, n_expert_used, stream,
-                                             nullptr, nullptr);
-}
-
-extern "C" int qfn_mmq_iq4_nl_moe_raw(
-        const void * W, const float * X, const int32_t * ids, float * out,
-        int M, int K, int n_tokens, int n_experts, int n_expert_used,
-        hipStream_t stream) {
-    return qfn_mmq_moe_impl<GGML_TYPE_IQ4_NL>("qfn_mmq_iq4_nl_moe_raw", W, X, ids, out, M, K,
-                                              n_tokens, n_experts, n_expert_used, stream,
-                                              nullptr, nullptr);
-}
-
-extern "C" int qfn_mmq_iq4_xs_moe_raw(
-        const void * W, const float * X, const int32_t * ids, float * out,
-        int M, int K, int n_tokens, int n_experts, int n_expert_used,
-        hipStream_t stream) {
-    return qfn_mmq_moe_impl<GGML_TYPE_IQ4_XS>("qfn_mmq_iq4_xs_moe_raw", W, X, ids, out, M, K,
-                                              n_tokens, n_experts, n_expert_used, stream,
-                                              nullptr, nullptr);
-}
-
 extern "C" int qfn_mmq_q4_K_moe_pair_unique(
     const void * W_a, const void * W_b, const float * X, const int32_t * ids,
     float * out_a, float * out_b, int M, int K, int n_tokens, int n_experts,
@@ -691,6 +668,26 @@ __launch_bounds__(32) __global__ static void qfn_q8_hc_down_kernel(
 }
 
 template<int tokens = 1>
+static int prepare_hc_down() {
+    hipFuncAttributes attributes{};
+    if (hipFuncGetAttributes(
+            &attributes,
+            reinterpret_cast<const void*>(qfn_q8_hc_down_kernel<tokens, false>)) != hipSuccess)
+        return -2;
+    if constexpr (tokens < MMVQ_MAX_BATCH_SIZE)
+        return prepare_hc_down<tokens + 1>();
+    return 0;
+}
+
+static int prepare_decode_kernels() {
+    // Resolving the first scalar HC function can leave a ~30 ms GPU idle
+    // gap after prefill. Load the AR/MTP functions before serving, without
+    // trial launches, temporary activations, or changes to session state.
+    const auto status = prepare_hc_down();
+    return status == 0 ? prepare_q8_decode() : status;
+}
+
+template<int tokens = 1>
 static void launch_q8_hc_down(const void* weights, const void* input,
                               float* output, int rows, hipStream_t stream) {
     if (rows == tokens) {
@@ -758,11 +755,5 @@ template void mul_mat_q_case<GGML_TYPE_Q4_K>(
 template void mul_mat_q_case<GGML_TYPE_Q5_1>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 template void mul_mat_q_case<GGML_TYPE_Q5_K>(
-    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
-template void mul_mat_q_case<GGML_TYPE_IQ3_S>(
-    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
-template void mul_mat_q_case<GGML_TYPE_IQ4_NL>(
-    ggml_backend_hip_context&, const mmq_args&, hipStream_t);
-template void mul_mat_q_case<GGML_TYPE_IQ4_XS>(
     ggml_backend_hip_context&, const mmq_args&, hipStream_t);
 } // namespace qfn_mmq

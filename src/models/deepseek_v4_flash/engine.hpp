@@ -1,16 +1,17 @@
 #ifndef GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
 #define GUFO_MODELS_DEEPSEEK_V4_FLASH_ENGINE_HPP_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <gufo/ext/session_mode.hpp>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "src/core/session_mode.hpp"
 #include "src/models/deepseek_v4_flash/chat_template.hpp"
 #include "src/models/deepseek_v4_flash/runtime/model.h"
 
@@ -24,6 +25,7 @@ struct ModelOptions {
 
 class Session;
 class SessionSnapshot;
+class ContinuationAdapter;
 
 struct SessionBatchItem {
   Session* session = nullptr;
@@ -91,7 +93,10 @@ private:
 
   ds4_engine* engine_ = nullptr;
   ModelOptions options_;
+  /// Vocabulary IDs indexed by ControlToken, resolved at load.
+  std::array<int, kControlTokenCount> control_tokens_{};
 
+  friend class ContinuationAdapter;
   friend class Session;
 };
 
@@ -149,6 +154,9 @@ public:
     bool operator==(const DsparkStats&) const = default;
   };
   [[nodiscard]] DsparkStats DsparkStatistics() const;
+  /// Valid until the next Evaluate, Sync, step, or restore on this session.
+  [[nodiscard]] std::span<const float> Logits(
+      std::string* error_msg = nullptr) const;
   [[nodiscard]] std::vector<float> CopyLogits(
       std::string* error_msg = nullptr) const;
   [[nodiscard]] std::unique_ptr<SessionSnapshot> SaveSnapshot(
@@ -158,11 +166,17 @@ public:
   [[nodiscard]] bool RestoreSnapshot(std::span<const std::uint8_t> payload,
                                      std::string* error_msg = nullptr);
   void SetCancellationCheck(CancellationCheck is_cancelled);
+  /// Splits the following prefill passes into at most `groups` layer groups
+  /// and calls `yield` between them, where other sessions may decode. One
+  /// group, or an empty `yield`, restores unsplit passes.
+  void SetPrefillYield(std::size_t groups, std::function<void()> yield);
   void Invalidate() noexcept;
 
   [[nodiscard]] int Position() const;
   [[nodiscard]] int ContextSize() const;
   [[nodiscard]] std::uint32_t PrefillCapacity() const;
+  /// Rows of one prefill pass of a session with this context.
+  [[nodiscard]] static std::uint32_t PrefillCapacityFor(int context_size);
   [[nodiscard]] std::uint64_t PayloadBytes() const;
 
 private:
@@ -171,7 +185,9 @@ private:
   std::shared_ptr<Model> model_;
   ds4_session* session_ = nullptr;
   CancellationCheck is_cancelled_;
+  std::function<void()> prefill_yield_;
 
+  friend class ContinuationAdapter;
   friend class Model;
 };
 

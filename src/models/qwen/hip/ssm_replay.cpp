@@ -1,30 +1,21 @@
 #if defined(ENGINE_ENABLE_HIP)
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
+#include <gufo/ext/experimental/hip_utils.hpp>
 #include <limits>
 #include <stdexcept>
 
-#include "src/core/hip/hip_utils.hpp"
+#include "src/families/qwen/kernels/ops/ssm.hpp"
 #include "src/models/qwen/hip/executor.hpp"
-#include "src/models/qwen/hip/ops/ssm.hpp"
 
 namespace gufo::hip {
-namespace {
 
-// Live and saved state contain only recurrent layers in the same order.
-void CopyRecurrentState(void* live, void* saved, std::size_t layer_bytes,
-                        const core::ModelConfig& config, bool save,
-                        hipStream_t stream) {
-  const auto bytes = config.SsmLayerCount() * layer_bytes;
-  if (bytes != 0)
-    HIP_CHECK(hipMemcpyAsync(save ? saved : live, save ? live : saved, bytes,
-                             hipMemcpyDeviceToDevice, stream));
-}
-
-}  // namespace
-
+// The second buffer of the rollback pair; it holds only recurrent layers in
+// the same order as the first.
 void QwenGpuArena::AllocateRecurrentSnapshot() {
-  if (d_saved_ssm_conv_state_ != nullptr) {
+  if (d_ssm_conv_buffers_[1] != nullptr &&
+      d_ssm_deltanet_buffers_[1] != nullptr) {
     return;
   }
 
@@ -35,10 +26,25 @@ void QwenGpuArena::AllocateRecurrentSnapshot() {
       recurrent_layers * config_.ssm_time_step_rank * config_.ssm_state_size *
       config_.SsmValueSize();
 
-  HIP_CHECK(hipMalloc(&d_saved_ssm_conv_state_, total_conv * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_saved_ssm_deltanet_state_,
-                      total_deltanet * QwenRecurrentStateElementBytes(
-                                           policy_.recurrent_state_storage)));
+  // Publish the pair only once both allocations exist: a pin over a half
+  // allocated pair would divert the next pass into a null buffer.
+  float* conv = nullptr;
+  void* deltanet = nullptr;
+  HIP_CHECK(hipMalloc(&conv, total_conv * sizeof(float)));
+  const hipError_t status = hipMalloc(
+      &deltanet, total_deltanet * QwenRecurrentStateElementBytes(
+                                      policy_.recurrent_state_storage));
+  if (status != hipSuccess) {
+    LogCleanupError(hipFree(conv));
+    HIP_CHECK(status);
+  }
+  d_ssm_conv_buffers_[1] = conv;
+  d_ssm_deltanet_buffers_[1] = deltanet;
+}
+
+void QwenGpuArena::SyncLivePointers() noexcept {
+  d_ssm_conv_state = d_ssm_conv_buffers_[live_recurrent_];
+  d_ssm_deltanet_state = d_ssm_deltanet_buffers_[live_recurrent_];
 }
 
 void QwenGpuArena::SaveState(std::uint32_t valid_context) {
@@ -50,17 +56,9 @@ void QwenGpuArena::SaveState(std::uint32_t valid_context) {
   // KV entries are append-only and every attention launch is bounded by its
   // explicit position. Draft entries beyond valid_context can remain in place:
   // accepted positions reuse them and rejected positions are overwritten.
-  CopyRecurrentState(
-      d_ssm_conv_state, d_saved_ssm_conv_state_,
-      config_.SsmQkvSize() * config_.ssm_conv_kernel * sizeof(float), config_,
-      true, stream);
-  CopyRecurrentState(
-      d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
-      config_.ssm_time_step_rank * config_.ssm_state_size *
-          config_.SsmValueSize() *
-          QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
-      config_, true, stream);
-  HIP_CHECK(hipStreamSynchronize(stream));
+  // The recurrent state is pinned where it is; BeginRecurrentWrite diverts the
+  // next pass into the other buffer.
+  saved_recurrent_ = live_recurrent_;
   saved_context_ = valid_context;
   replay_last_position_ = valid_context;
   replay_captured_positions_ = 0;
@@ -72,17 +70,39 @@ void QwenGpuArena::RestoreState() {
     throw std::logic_error("GPU state has not been saved");
   }
 
-  CopyRecurrentState(
-      d_ssm_conv_state, d_saved_ssm_conv_state_,
-      config_.SsmQkvSize() * config_.ssm_conv_kernel * sizeof(float), config_,
-      false, stream);
-  CopyRecurrentState(
-      d_ssm_deltanet_state, d_saved_ssm_deltanet_state_,
-      config_.ssm_time_step_rank * config_.ssm_state_size *
-          config_.SsmValueSize() *
-          QwenRecurrentStateElementBytes(policy_.recurrent_state_storage),
-      config_, false, stream);
-  HIP_CHECK(hipStreamSynchronize(stream));
+  live_recurrent_ = saved_recurrent_;
+  SyncLivePointers();
+}
+
+QwenRecurrentStateIo QwenGpuArena::BeginRecurrentWrite() {
+  assert(d_ssm_conv_state == d_ssm_conv_buffers_[live_recurrent_] &&
+         d_ssm_deltanet_state == d_ssm_deltanet_buffers_[live_recurrent_]);
+  source_recurrent_ = live_recurrent_;
+  // Writing into the pinned buffer would destroy the rollback point, so the
+  // first pass after SaveState or RestoreState writes the other one. Buffer 1
+  // exists whenever a state has been saved.
+  if (has_saved_state_ && live_recurrent_ == saved_recurrent_) {
+    live_recurrent_ ^= 1U;
+    SyncLivePointers();
+  }
+  return {
+      .conv_in = d_ssm_conv_buffers_[source_recurrent_],
+      .conv_out = d_ssm_conv_buffers_[live_recurrent_],
+      .recurrent_in = d_ssm_deltanet_buffers_[source_recurrent_],
+      .recurrent_out = d_ssm_deltanet_buffers_[live_recurrent_],
+  };
+}
+
+std::uint64_t QwenGpuArena::RecurrentIoIdentity() const noexcept {
+  return (static_cast<std::uint64_t>(source_recurrent_) << 1U) |
+         live_recurrent_;
+}
+
+std::size_t QwenGpuArena::SsmReplayLogBytes(const core::ModelConfig& config,
+                                            std::size_t capacity) {
+  return static_cast<std::size_t>(config.SsmLayerCount()) * capacity *
+         (config.SsmQkvSize() + 2 * std::size_t{config.ssm_time_step_rank}) *
+         sizeof(float);
 }
 
 bool QwenGpuArena::AllocateSsmReplayLog() {
@@ -91,7 +111,7 @@ bool QwenGpuArena::AllocateSsmReplayLog() {
   }
 
   const std::size_t layer_slots =
-      static_cast<std::size_t>(config_.SsmLayerCount()) * kSsmReplayCapacity;
+      static_cast<std::size_t>(config_.SsmLayerCount()) * replay_capacity_;
   HIP_CHECK(hipMalloc(&d_ssm_replay_qkv_,
                       layer_slots * config_.SsmQkvSize() * sizeof(float)));
   HIP_CHECK(
@@ -100,7 +120,35 @@ bool QwenGpuArena::AllocateSsmReplayLog() {
   HIP_CHECK(
       hipMalloc(&d_ssm_replay_beta_,
                 layer_slots * config_.ssm_time_step_rank * sizeof(float)));
-  HIP_CHECK(hipMalloc(&d_ssm_replay_enabled_, sizeof(std::uint32_t)));
+  if (d_ssm_replay_enabled_ == nullptr)
+    HIP_CHECK(hipMalloc(&d_ssm_replay_enabled_, sizeof(std::uint32_t)));
+  return true;
+}
+
+bool QwenGpuArena::EnsureSsmReplayCapacity(std::size_t rows) {
+  if (rows <= replay_capacity_)
+    return false;
+  // Positions captured so far belong to a ring of the old size. A pass grows
+  // the ring only before it captures anything.
+  if (replay_capture_active_ && replay_captured_positions_ != 0)
+    throw std::logic_error("SSM replay ring grows while rows are captured");
+  replay_captured_positions_ = 0;
+  std::size_t capacity = replay_capacity_;
+  while (capacity < rows)
+    capacity *= 2;
+  if (d_ssm_replay_qkv_ == nullptr) {
+    replay_capacity_ = capacity;
+    return false;
+  }
+  HIP_CHECK(hipStreamSynchronize(stream));
+  HIP_CHECK(hipFree(d_ssm_replay_qkv_));
+  HIP_CHECK(hipFree(d_ssm_replay_alpha_));
+  HIP_CHECK(hipFree(d_ssm_replay_beta_));
+  d_ssm_replay_qkv_ = nullptr;
+  d_ssm_replay_alpha_ = nullptr;
+  d_ssm_replay_beta_ = nullptr;
+  replay_capacity_ = capacity;
+  (void)AllocateSsmReplayLog();
   return true;
 }
 
@@ -136,7 +184,7 @@ bool QwenGpuArena::CanReplaySsmPosition(std::uint32_t position) const noexcept {
       replay_captured_positions_ == 0) {
     return false;
   }
-  return replay_captured_positions_ <= kSsmReplayCapacity &&
+  return replay_captured_positions_ <= replay_capacity_ &&
          position >= saved_context_ && position <= replay_last_position_;
 }
 
@@ -147,6 +195,7 @@ SsmReplayCapture QwenGpuArena::GetSsmReplayCapture() const noexcept {
       .beta = d_ssm_replay_beta_,
       .position = d_prompt_tokens + 1,
       .enabled = d_ssm_replay_enabled_,
+      .capacity = static_cast<std::uint32_t>(replay_capacity_),
   };
 }
 
@@ -156,10 +205,10 @@ const float* QwenGpuArena::GetReplayQkv(std::uint32_t layer,
     throw std::out_of_range("SSM replay position is outside the capture");
   }
   const std::size_t slot =
-      static_cast<std::size_t>(position) % kSsmReplayCapacity;
+      static_cast<std::size_t>(position) % replay_capacity_;
   const std::size_t offset =
       (static_cast<std::size_t>(config_.SsmLayerIndex(layer)) *
-           kSsmReplayCapacity +
+           replay_capacity_ +
        slot) *
       config_.SsmQkvSize();
   return d_ssm_replay_qkv_ + offset;
@@ -171,10 +220,10 @@ const float* QwenGpuArena::GetReplayAlpha(std::uint32_t layer,
     throw std::out_of_range("SSM replay position is outside the capture");
   }
   const std::size_t slot =
-      static_cast<std::size_t>(position) % kSsmReplayCapacity;
+      static_cast<std::size_t>(position) % replay_capacity_;
   const std::size_t offset =
       (static_cast<std::size_t>(config_.SsmLayerIndex(layer)) *
-           kSsmReplayCapacity +
+           replay_capacity_ +
        slot) *
       config_.ssm_time_step_rank;
   return d_ssm_replay_alpha_ + offset;
@@ -186,10 +235,10 @@ const float* QwenGpuArena::GetReplayBeta(std::uint32_t layer,
     throw std::out_of_range("SSM replay position is outside the capture");
   }
   const std::size_t slot =
-      static_cast<std::size_t>(position) % kSsmReplayCapacity;
+      static_cast<std::size_t>(position) % replay_capacity_;
   const std::size_t offset =
       (static_cast<std::size_t>(config_.SsmLayerIndex(layer)) *
-           kSsmReplayCapacity +
+           replay_capacity_ +
        slot) *
       config_.ssm_time_step_rank;
   return d_ssm_replay_beta_ + offset;

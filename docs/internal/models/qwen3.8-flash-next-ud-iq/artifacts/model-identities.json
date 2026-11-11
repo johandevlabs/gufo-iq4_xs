@@ -1,0 +1,51 @@
+{
+  "sha256": {
+    "Target UD-IQ4_XS shard 1 of 4": "93ff23a08e5cd7501f24fa16f5b415d5807d0175e04edd3ed6a7a41b601a4eef",
+    "Target UD-IQ4_XS shard 2 of 4": "13d5dc8b93d039e4cfade5a9af7037f10c97f7ec4e53f75bd2e9ae34aae54aeb",
+    "Target UD-IQ4_XS shard 3 of 4": "f6b9b5934908a2043732269dd740155d0f921d0763a1dcdd3452246311651f87",
+    "Target UD-IQ4_XS shard 4 of 4": "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36",
+    "Target UD-IQ3_XXS shard 1 of 4": "9d5644b371ffac921427c8021cc7242dab8e3ba37d7b48d1e79fe3770fbf9915",
+    "Target UD-IQ3_XXS shard 2 of 4": "aacaff3bdb9032c2c3be428167930809735f65d3cfb204eba07d85e421e7ddf4",
+    "Target UD-IQ3_XXS shard 3 of 4": "ef8f14e790ab471b363f146d5e8664eefbaf03e5776f317a1fb96a2bc7707b07",
+    "Target UD-IQ3_XXS shard 4 of 4": "5de8b5dbf89409acc39468decafd4a4a95b13c29d88a14b0356107897829ec36",
+    "MTP shared Q8_0": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6",
+    "Vision projector BF16": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"
+  },
+  "sources": {
+    "target": "unsloth/Qwen3.8-Flash-Next-GGUF, revision d96201194f103c906994f283f504209dc8d2a10c, UD-IQ4_XS and UD-IQ3_XXS (four shards each); downloaded at 084c631ac221016019d6e0a863afe92d90edd3b0, where every file has the same SHA-256",
+    "mtp": "same repository and revision, MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+    "mmproj": "same repository and revision, mmproj-BF16.gguf",
+    "verification": "Each downloaded file was checked against the Hugging Face LFS SHA-256."
+  },
+  "quality-2026-11-10": {
+    "reference": "llama.cpp b11557 (5c8854fd), ROCm gfx1151, Strata data/quant_quality/v1 (c62d5e3a), 4,995 positions, reference UD-Q4_K_XL",
+    "gufo": "e9d4e5cd for model tests and the CPU F32 reference probe; 198892f1 for functional suites (e9d4e5cd changes only bit-exact Q6_K prefill decode)"
+  },
+  "benchmarks-2026-11-11": {
+    "scope": "Every table in BENCHMARKS.md, both engines, both files (UTC measurement date)",
+    "host": "96 GB GMKtec Evo-X2, Ubuntu 24.04, kernel 7.0, ROCm 10.1, powersave governor with EPP balance_performance, GPU 39-102 C during the runs",
+    "gufo": {
+      "revision": "e9d4e5cd1a28db988aa2fa6a911cdf07c27ebd27",
+      "build": "nix build, production gfx1151 binary",
+      "binarySha256": "46ba68d1aed0bce907c0cfc9fa9a5395dde56ea703b5cbc03cdd03a8aa564d22"
+    },
+    "referenceAr": "llama.cpp b11069 (commit 68d9053a) from the pinned flake recipe with the gfx1151 rocmPackages passed to llama-cpp.override, ROCm gfx1151",
+    "referenceMtp": "llama-server-mtp, llama.cpp commit 6fcaa16f, pinned ROCm recipe in flake.nix",
+    "note": "Per-artifact source revisions and commands are authoritative. unavailable.json lists the reference cells the host could not produce."
+  },
+  "older-files-2026-11-11": {
+    "source": "unsloth/Qwen3.8-Flash-Next-GGUF, revision 38bb39ee97821de2c9009abb7e93950eec396e66, UD-IQ4_XS and UD-IQ3_XXS (three shards each); the same files are at 766911a6b7369840a91dbcd95f9f997acaab6cd6, the last revision before UD 3.1",
+    "sha256": {
+      "Older UD-IQ3_XXS shard 1 of 3": "268f81fdedf3149a538f252308927a4d5d1f6e062c178568a51e3b519744f8a8",
+      "Older UD-IQ3_XXS shard 2 of 3": "cfe600b236b88c7fad1613a5ca5e83b9f2beb63cbd44c32b2be50a44747c695f",
+      "Older UD-IQ3_XXS shard 3 of 3": "f1912ba34c79427d2295a58dcb2b732b5931af5bef7a373c60557a57d9ee7250",
+      "Older UD-IQ4_XS shard 1 of 3": "5ce89370720f8bf90890f439361282104c1aa1482d4013bb9a50923e758e71a4",
+      "Older UD-IQ4_XS shard 2 of 3": "577a38a2392b40ca2193cea502e1d92f60b8cd370675d308e0ec21885d9daaa7",
+      "Older UD-IQ4_XS shard 3 of 3": "d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833"
+    },
+    "verification": "The benchmark host's files were checked against the Hugging Face LFS SHA-256.",
+    "quality": "llama.cpp b11557 (5c8854fd), same method and UD-Q4_K_XL reference as quality-2026-11-10; both measured 2026-11-02",
+    "gufo": "e9d4e5cd, the same binary as benchmarks-2026-11-11, for the CPU F32 reference probe, functional suites and benchmarks",
+    "benchmarks": "older-files/: single-user AR and MTP at depths 0 and 131,072, 8 users AR and MTP on mixed text, Gufo only, same host and settings as benchmarks-2026-11-11"
+  }
+}

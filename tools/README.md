@@ -24,9 +24,9 @@ benchmark/tuning executables; Python tools run from this source tree.
 Qwen reference tests. `gufo/safetensors.py` validates source snapshots used by
 MiniMax's manifest and quality tooling. Both support model verification.
 
-See [performance commands](../docs/PERFORMANCE.md),
-[benchmark methodology](../docs/BENCHMARKS.md), and
-[MiniMax validation](../docs/models/minimax-h3/QUALITY.md).
+See [performance commands](../docs/internal/performance.md),
+[benchmark methodology](../docs/internal/benchmarks.md), and
+[MiniMax validation](../docs/internal/models/minimax-h3/QUALITY.md).
 
 Functional and regression tests live in [tests/functional/](../tests/functional/README.md),
 including the OpenAI SDK suites and interrupted-chat/disk replay. Use its runner
@@ -75,6 +75,15 @@ compares separate and fused draft normalization/RoPE.
 `qwen27b/prefill_gemm_bench.hip` compares production Q8_0 gate/up GEMM
 with separate or fused SwiGLU, including every activation byte and scale.
 It replaces the old standalone W8A8 kernel copies.
+`qwen27b/verify_sweep/` measures the 2–8 row launch shapes of
+`verify_gemm_27b.hip` on a GGUF's real projections against the production
+dispatch (exact outputs, weights rotated beyond the MALL cache); build the
+`qwen27b_verify_sweep` target and run `sweep.py`, see its README.
 `qwen27b/dflash_reference.py` checks a GPU trace against
-pinned upstream PyTorch operators using the same GGUF weights. See
-`docs/models/qwen3.8-27b/BENCHMARKS.md` and its quality report for commands and evidence.
+pinned upstream PyTorch operators using the same GGUF weights.
+`qwen27b/hidden_state_reference.py` records unquantized Hugging Face pre- and
+post-norm last-layer states for `qwen_text_hidden_states_test`, which checks
+`TextModelRunner::EncodeHiddenStates` (`GUFO_QWEN_HIDDEN_REFERENCE`);
+`--device cuda --dtype bfloat16` loads the checkpoint onto the GPU instead of
+host RAM (needs `accelerate`). See
+`docs/internal/models/qwen3.8-27b/BENCHMARKS.md` and its quality report for commands and evidence.

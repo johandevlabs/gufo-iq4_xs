@@ -29,10 +29,21 @@ import zlib
 from metrics import compare, comparison_status, join_server_timings, timing_measurement
 
 TESTS = Path(__file__).resolve().parent
-SUITES = ("discovery", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "structured", "structured-limits",
-          "tool-reasoning", "tool-streaming", "reasoning-separator",
-          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "batch",
-          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "system-injection", "cache")
+SUITES = ("discovery", "openai-count-tokens", "messages-count-tokens", "messages-image-counts", "responses", "stops", "conversation", "image-inputs", "image-count", "tool-images", "image-detail", "structured", "structured-limits",
+          "tool-reasoning", "tool-streaming", "reasoning-separator", "reasoning-budget",
+          "tools", "auto-tools", "tool-edges", "tool-agent", "tool-agent-loop", "tool-history", "messages-tools", "tool-untyped", "tool-mixed", "tool-native-schemas", "tool-native-types", "tool-choice-cache", "tool-parameter-order", "tool-type-unions", "tool-schema-edges", "sampling-defaults", "sampling-ranges", "logprobs", "responses-logprobs", "batch",
+          "long-context", "state-edges", "progress", "stream-start", "prefill-scheduling", "metrics", "cache-edits", "cache-growth", "cache-depth", "cache-rotation", "cache-concurrency", "cache-shared-prefix", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "system-injection", "cache")
+# Suites that already run another suite's checks; selecting both repeats the work.
+INCLUDED_IN = {"auto-tools": "tools", "tool-native-types": "tool-native-schemas"}
+# Server --context each suite's histories need. Without an explicit --context
+# the runner starts the server with the largest one selected (8192 at least).
+MIN_CONTEXT = {"cache-stalls": 65536, "cache-depth": 32768, "cache-transforms": 32768,
+               "cache-pressure": 32768, "cache-shared-prefix": 16384, "cache-compaction": 16384,
+               "cache-messages-loop": 16384, "prefill-scheduling": 16384}
+DEFAULT_CONTEXT = 8192
+# These fill the RAM budget before measuring; the default budget sized for the
+# host takes far more requests than they send for a model with small checkpoints.
+NEEDS_CACHE_RAM = ("cache-bridge", "cache-pressure")
 SAMPLING = {
     "--temperature": ("temperature", float), "--top-p": ("top_p", float),
     "--top-k": ("top_k", int), "--min-p": ("min_p", float),
@@ -42,15 +53,16 @@ SAMPLING = {
     "--repeat-penalty": ("repeat_penalty", float),
     "--repeat-last-n": ("repeat_last_n", int),
 }
-COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides",
+COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout", "tier",
                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
                      "expected_input_modalities")
 
 
 HARNESS_ROOTS = ("run.py", "metrics.py", "progress.py", "stream_start.py", "prefill_scheduling.py", "server_metrics.py", "openai_sdk.py", "continuation.py",
                  "tool_reasoning.py", "tool_streaming.py", "tool_agent.py", "tool_native.py", "discovery.py", "image_inputs.py", "cache_edits.py", "cache_growth.py", "cache_depth.py", "cache_rotation.py", "cache_concurrency.py", "cache_shared_prefix.py", "cache_bridge.py", "system_injection.py",
-                 "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py",
-                 "cache_disk_spacing.py", "tool_images.py")
+                 "cache_compaction.py", "cache_workloads.py", "cache_messages_loop.py", "cache_stalls.py",
+                 "cache_disk_spacing.py", "cache_persist.py", "tool_images.py",
+                 "reasoning_budget.py")
 
 
 def harness_files():
@@ -92,7 +104,9 @@ def provenance():
                                                 if kernel_command.is_file() else None), **{
             key: os.environ.get(key) for key in (
                 "GPU_MAX_HW_QUEUES", "HSA_ENABLE_SDMA", "HSA_ENABLE_INTERRUPT",
-                "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "LD_PRELOAD")}},
+                "HSA_USERPTR_FOR_PAGED_MEM", "HSA_USE_SVM",
+                "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+                "LD_LIBRARY_PATH", "LD_PRELOAD")}},
     }
 
 
@@ -172,7 +186,9 @@ def compare_runs(baseline_dir, candidate_dir):
         if report.get("functional_status", report["status"]) != "passed":
             raise ValueError("functional checks did not pass")
     for key in (*COMPARISON_FIELDS, "through_case"):
-        if baseline.get(key) != candidate.get(key):
+        # Reports from before tiers always ran the full matrix.
+        default = "full" if key == "tier" else None
+        if baseline.get(key, default) != candidate.get(key, default):
             raise ValueError(f"unmatched baseline {key}")
     if list(baseline["suites"]) != list(candidate["suites"]):
         raise ValueError("unmatched baseline suites")
@@ -180,6 +196,17 @@ def compare_runs(baseline_dir, candidate_dir):
     compare_lifecycle(comparison, baseline, candidate)
     comparison["runs"] = [str(baseline_dir.resolve()), str(candidate_dir.resolve())]
     return comparison
+
+
+# Windows Popen cannot deliver SIGINT. A server started in its own process
+# group receives CTRL_BREAK_EVENT instead, which gufo handles like SIGINT.
+SERVER_POPEN = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                if os.name == "nt" else {})
+
+
+def interrupt_server(process):
+    """Requests the graceful shutdown that Ctrl+C starts."""
+    process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
 
 
 @contextlib.contextmanager
@@ -191,10 +218,13 @@ def server(command, log_path, startup_timeout, environment=None):
         process = None
         previous_handlers = {}
         try:
+            stop_signals = [signal.SIGTERM]
+            if hasattr(signal, "SIGHUP"):
+                stop_signals.append(signal.SIGHUP)
             previous_handlers = {signum: signal.signal(signum, interrupt)
-                                 for signum in (signal.SIGTERM, signal.SIGHUP)}
+                                 for signum in stop_signals}
             process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                                       env=environment)
+                                       env=environment, **SERVER_POPEN)
             deadline = time.monotonic() + startup_timeout
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -215,7 +245,7 @@ def server(command, log_path, startup_timeout, environment=None):
             yield process
         finally:
             if process is not None and process.poll() is None:
-                process.send_signal(signal.SIGINT)
+                interrupt_server(process)
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
@@ -239,13 +269,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True,
                         help="New report directory; existing results are never overwritten")
-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"), required=True)
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "provider"), required=True,
+                        help="Expected text defaults; provider reads the served model's own from /props")
     parser.add_argument("--suite", action="append", choices=("all", *SUITES), required=True,
                         help="Repeat to select affected suites; use all for an explicit full run")
     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
                         help="Expected loaded inputs for the discovery suite")
+    parser.add_argument("--tier", choices=("pr", "full"), default="full",
+                        help="pr trims each suite's transport matrix; full runs every combination")
     parser.add_argument("--startup-timeout", type=float, default=240)
     parser.add_argument("--suite-timeout", type=float, default=900)
+    parser.add_argument("--request-timeout", type=float, default=120,
+                        help="SDK request deadline in seconds; recorded separately from timing qualification")
     qualification = parser.add_mutually_exclusive_group(required=True)
     qualification.add_argument("--baseline", type=Path,
                                help="Matched previous run directory; compare every HTTP request")
@@ -258,8 +293,10 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER,
                         help="-- ./result/bin/gufo serve llm --model PATH [server options]")
     args = parser.parse_args()
-    if set(args.suite) & {"discovery", "messages-image-counts", "all"} and args.expected_input_modalities is None:
-        parser.error("discovery and messages-image-counts require --expected-input-modalities text or text,image")
+    if not math.isfinite(args.request_timeout) or args.request_timeout <= 0:
+        parser.error("--request-timeout must be finite and positive")
+    if set(args.suite) & {"discovery", "openai-count-tokens", "messages-image-counts", "all"} and args.expected_input_modalities is None:
+        parser.error("discovery, openai-count-tokens and messages-image-counts require --expected-input-modalities text or text,image")
     if args.allow_missing_progress and not args.record_baseline:
         parser.error("--allow-missing-progress is only for --record-baseline")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -269,20 +306,28 @@ def main():
                      "--cache-disk-staging-bytes"):
         if option(command, reserved) is not None:
             parser.error(f"the test runner owns {reserved}; omit it from the server command")
-    if option(command, "--api-key") is not None:
-        parser.error("omit --api-key for the isolated loopback test server")
-    if set(args.suite) & {"image-inputs", "image-count", "tool-images"} and option(command, "--mmproj") is None:
-        parser.error("image-inputs, image-count and tool-images require --mmproj in the server command")
+    if set(args.suite) & {"image-inputs", "image-count", "tool-images", "image-detail"} and option(command, "--mmproj") is None:
+        parser.error("image-inputs, image-count, tool-images, and image-detail require --mmproj in the server command")
     selected = args.suite
     if "all" in selected:
         if len(selected) != 1:
             parser.error("all cannot be combined with other suites")
-        selected = [suite for suite in SUITES if suite not in ("auto-tools", "tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "prefill-scheduling")
-                    and (suite not in ("image-inputs", "image-count", "tool-images")
+        selected = [suite for suite in SUITES if suite not in (*INCLUDED_IN, "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
+                    and (suite not in ("image-inputs", "image-count", "tool-images", "image-detail")
                          or option(command, "--mmproj") is not None)]
-    selected = list(dict.fromkeys(selected))
+    selected = [suite for suite in dict.fromkeys(selected) if INCLUDED_IN.get(suite) not in selected]
     disk_enabled = bool(set(selected) & {"cache", "image-count"})
+    context_needed = max([DEFAULT_CONTEXT, *(MIN_CONTEXT.get(suite, 0) for suite in selected)])
     try:
+        pressure = [suite for suite in NEEDS_CACHE_RAM if suite in selected]
+        if pressure and option(command, "--cache-ram-bytes") is None:
+            raise ValueError(f"{' and '.join(pressure)} require --cache-ram-bytes in the server "
+                             "command, small enough that their background requests fill it")
+        if option(command, "--context") is not None and \
+                int(option(command, "--context")) < context_needed:
+            raise ValueError(", ".join(f"{suite} needs --context {MIN_CONTEXT[suite]}"
+                                       for suite in selected
+                                       if MIN_CONTEXT.get(suite, 0) > int(option(command, "--context"))))
         overrides = sampling_overrides(command)
         sessions = int(option(command, "--sessions", "4"))
         if not 1 <= sessions <= 8:
@@ -302,12 +347,14 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     output = args.output.resolve()
+    # Every suite process inherits the tier; see tier.py.
+    os.environ["GUFO_FUNCTIONAL_TIER"] = args.tier
     with socket.socket() as reserve:
         reserve.bind(("127.0.0.1", 0))
         port = reserve.getsockname()[1]
     command = [command[0], "serve", "--host", "127.0.0.1", "--port", str(port),
                *command[2:]]
-    for flag, default in (("--sessions", "4"), ("--context", "8192"),
+    for flag, default in (("--sessions", "4"), ("--context", str(context_needed)),
                           ("--served-model-name", "functional-test"),
                           ("--max-pending-per-client", str(max(4, sessions)))):
         if option(command, flag) is None:
@@ -329,6 +376,7 @@ def main():
               "binary": str(Path(command[0]).resolve()),
               "mode": "baseline" if args.record_baseline else "qualification",
               "sampling_preset": args.sampling_preset, "sampling_overrides": overrides,
+              "request_timeout": args.request_timeout, "tier": args.tier,
               "vision": vision, "speculative": speculative,
               "suites": {}, "through_case": args.through_case,
               "allow_missing_progress": args.allow_missing_progress,
@@ -396,6 +444,7 @@ def main():
         ]
     ready_to_restore = []
     spacing = False
+    persist = False
     try:
         if "cache-rotation" in selected:
             from cache_rotation import check_snapshot_budget, host_available_bytes
@@ -408,7 +457,7 @@ def main():
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
             configured = bool(set(selected) & {"cache-bridge", "cache-pressure"}) and re.search(
-                r"event=snapshot_cache_configured .*?\bcapacity_bytes=(\d+)\b",
+                r"event=configured .*?\bcapacity_bytes=(\d+)\b",
                 (output / "server.log").read_text())
             for suite in selected:
                 if suite == "cache":
@@ -417,6 +466,7 @@ def main():
                             "--suite", suite, "--output", str(output / (suite + ".json")),
                             "--sampling-preset", args.sampling_preset,
                             "--sampling-overrides", json.dumps(overrides),
+                            "--request-timeout", str(args.request_timeout),
                             "--concurrency", str(sessions), "--speculative", speculative,
                             "--context", option(command, "--context"),
                             "--server-log", str(output / "server.log")]
@@ -448,12 +498,15 @@ def main():
                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
                             "--output", str(output / (label + ".json")), *extra]):
                         ready_to_restore.append(label)
-                # Last, so the drained log after this offset belongs to it.
+                # Retain the window; checkpoint IDs identify fixture-owned writes.
                 spacing_offset = (output / "server.log").stat().st_size
                 spacing = run("disk-spacing", "cache_disk_spacing.py", [
                     "--url", base_url, "--model", model,
                     "--output", str(output / "disk-spacing.json")])
-        if ready_to_restore or spacing:
+                persist = run("cache-persist", "cache_persist.py", [
+                    "--url", base_url, "--model", model,
+                    "--output", str(output / "cache-persist.json")])
+        if ready_to_restore or spacing or persist:
             startup_started = time.monotonic()
             with server(command, output / "server-restarted.log", args.startup_timeout):
                 report["restart_ms"] = (time.monotonic() - startup_started) * 1000
@@ -462,6 +515,11 @@ def main():
                         "--url", base_url, "--model", model,
                         "--restore", str(output / (label + ".json")),
                         "--output", str(output / (label + "-disk.json"))])
+                if persist:
+                    run("cache-persist-disk", "cache_persist.py", [
+                        "--url", base_url, "--model", model,
+                        "--restore", str(output / "cache-persist.json"),
+                        "--output", str(output / "cache-persist-disk.json")])
                 if spacing:
                     spacing = run("disk-spacing-disk", "cache_disk_spacing.py", [
                         "--url", base_url, "--model", model,
@@ -474,7 +532,8 @@ def main():
                 grown_log = log.read()
             report["disk_spacing"] = check_disk_spacing(
                 grown_log, (output / "server-restarted.log").read_text(),
-                json.loads((output / "disk-spacing.json").read_text())[0])
+                json.loads((output / "disk-spacing.json").read_text())[0],
+                json.loads((output / "disk-spacing-disk.json").read_text())[0])
     except Exception as error:
         report["error"] = str(error)
         report["traceback"] = traceback.format_exc()

@@ -6,6 +6,9 @@
 extern "C" {
 int qfn_mmq_init(int device);
 
+// Frees the scratch arena of a stream about to be destroyed (waits for its queued work).
+void qfn_mmq_release_stream(hipStream_t stream);
+
 void qfn_mmq_set_routed_max_expert_rows(int rows);
 
 void qfn_mmq_set_routed_tile_cols(int cols);
@@ -92,21 +95,6 @@ int qfn_mmq_q5_1_moe_raw(
     hipStream_t stream);
 
 int qfn_mmq_q5_K_moe_raw(
-    const void * W, const float * X_f32, const int32_t * ids, float * out,
-    int M, int K, int n_tokens, int n_experts, int n_expert_used,
-    hipStream_t stream);
-
-int qfn_mmq_iq3_s_moe_raw(
-    const void * W, const float * X_f32, const int32_t * ids, float * out,
-    int M, int K, int n_tokens, int n_experts, int n_expert_used,
-    hipStream_t stream);
-
-int qfn_mmq_iq4_nl_moe_raw(
-    const void * W, const float * X_f32, const int32_t * ids, float * out,
-    int M, int K, int n_tokens, int n_experts, int n_expert_used,
-    hipStream_t stream);
-
-int qfn_mmq_iq4_xs_moe_raw(
     const void * W, const float * X_f32, const int32_t * ids, float * out,
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
