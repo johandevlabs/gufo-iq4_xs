@@ -217,7 +217,7 @@ benchmarks() {
   # The memory tables read hipMemGetInfo from the CLR the bundle runs on.
   local py="env GUFO_HIP_LIBRARY=$ROCM_PATH/lib/libamdhip64.so $TOOLCHAIN/run-rocm10.sh $BENCH_PYTHON"
   local art=$out/bench
-  local c35=$src/docs/models/qwen3.6-35b-a3b/artifacts corn=$src/docs/models/ornith-1.5-122b/artifacts
+  local c35=$src/docs/internal/models/qwen3.6-35b-a3b/artifacts corn=$src/docs/internal/models/ornith-1.5-122b/artifacts
   mkdir -p "$art/35b" "$art/ornith"
   # Speculative concurrency tables check their outputs against AR C1 hashes,
   # recorded first with a one-user AR variant of the DFlash2 table.

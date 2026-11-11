@@ -192,7 +192,7 @@ q8_0):
 | 128K | 877 → 879 | 40.1 → 44.4 | 135 → 145 | 55.4 → 57.9 |
 
 Thinking/template controls and HTTP sampling defaults are described in
-[the server guide](../../SERVER.md#reasoning-controls).
+[the server guide](../../server.md#reasoning-controls).
 
 ### Keeping sessions across restarts
 
@@ -204,7 +204,7 @@ and `SIGTERM`, so stopping it to free memory for another model and starting it
 again later brings the sessions back. The directory keeps 8 GiB by default;
 `--cache-disk-bytes` changes that, and one server owns a directory at a time.
 Entries record the KV format, so a server restarted with a different
-`--kv-cache` re-prefills. See [the KV cache guide](../../KV-CACHE.md#the-disk-tier)
+`--kv-cache` re-prefills. See [the KV cache guide](../../cache.md#the-disk-tier)
 for how checkpoints are spaced and evicted.
 
 [@morrisfamily](https://github.com/morrisfamily) uses it this way on a 64 GB
