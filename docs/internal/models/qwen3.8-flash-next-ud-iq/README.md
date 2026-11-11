@@ -28,8 +28,11 @@ except layer 2's `attn_qkv`, `attn_gate` and shared gate/up in Q8_0.
 Gate and up share one format in every layer. Shard 4 is the 28.8 GB IQ4_NL per-layer token embedding, the same
 bytes in both files; it is read from disk as for UD-Q4_K_XL.
 
-The earlier three-shard UD-IQ4_XS (revision `38bb39ee9782`: IQ3_S gate/up,
-IQ4_NL down, Q8_0 dense, Q6_K head) still loads.
+The older three-shard files from revision `38bb39ee9782` still run (see
+[older files](BENCHMARKS.md#older-files)): UD-IQ4_XS with IQ3_S gate/up
+(IQ4_XS in layer 2), IQ4_NL down (Q8_0 in five layers), Q8_0 dense and a Q6_K
+head; UD-IQ3_XXS with IQ2_S gate/up (IQ3_S in one layer), IQ4_NL down, and a
+Q6_K trunk, embedding and head, with `ffn_down_shexp` and HC in Q8_0.
 
 ## New formats
 

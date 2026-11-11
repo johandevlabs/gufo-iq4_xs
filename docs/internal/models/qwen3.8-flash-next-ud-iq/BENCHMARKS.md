@@ -192,3 +192,30 @@ Gufo reads that tensor through the reclaimable file cache.
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-iq3.svg)
+
+## Older files
+
+Unsloth's three-shard UD-IQ4_XS and UD-IQ3_XXS from revision `38bb39ee`,
+which UD 3.1 replaced. Gufo only, the same binary, host and settings as the
+tables above, November 11, 2026; artifacts in
+[`artifacts/older-files/`](artifacts/older-files/), whose `iq3`/`iq4`
+variants are these files. Depth is the cached prefix in tokens; 8-user rows
+are total decode.
+
+| Flash-Next older files, Gufo | UD-IQ4_XS (tok/s) | UD-IQ3_XXS (tok/s) |
+| --- | ---: | ---: |
+| AR pp, depth 0 | 1808.19 | 1836.10 |
+| AR pp, depth 131,072 | 1471.89 | 1493.43 |
+| AR tg, depth 0 | 31.94 | 34.16 |
+| AR tg, depth 131,072 | 31.46 | 33.55 |
+| MTP tg mixed, depth 0 | 42.48 | 48.90 |
+| MTP tg mixed, depth 131,072 | 47.98 | 43.88 |
+| MTP tg repetitive, depth 0 | 152.41 | 106.81 |
+| MTP tg repetitive, depth 131,072 | 134.57 | 92.53 |
+| 8 users AR | 136.96 | 104.08 |
+| 8 users MTP mixed | 126.82 | 89.00 |
+
+The older UD-IQ4_XS keeps a Q8_0 trunk and IQ3_S/IQ4_NL experts; it is the
+fastest of the four files when many rows are decoded or verified at once.
+Single-user AR and MTP completions match at depth 0, and every 8-user
+completion matches its AR C1 reference.

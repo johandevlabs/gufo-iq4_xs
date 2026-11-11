@@ -52,8 +52,10 @@ hf download unsloth/Qwen3.8-Flash-Next-GGUF \
 ```
 
 Replace `UD-IQ4_XS` with `UD-IQ3_XXS` for the smaller file. The MTP head and
-the vision projector are the same files as for UD-Q4_K_XL. The three-shard
-UD-IQ4_XS from revision `38bb39ee9782` also runs.
+the vision projector are the same files as for UD-Q4_K_XL. The older
+three-shard UD-IQ4_XS and UD-IQ3_XXS from revision `38bb39ee9782`, which UD
+3.1 replaced, also run; their results are under
+[older files](../internal/models/qwen3.8-flash-next-ud-iq/BENCHMARKS.md#older-files).
 
 ## Run
 

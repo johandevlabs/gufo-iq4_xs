@@ -1,10 +1,115 @@
 # Gufo: The ***Open Source*** Strix Halo AI engine
 
 > [!NOTE]
-> This fork adds Qwen3.8 Flash-Next in Unsloth's smaller
-> [UD-IQ4_XS and UD-IQ3_XXS](docs/models/qwen3.8-flash-next-ud-iq.md)
-> quantizations, for 96 GB Strix Halo machines. Everything
-> else is Gufo 0.33.0.
+> This is a community fork of [gufo-org/gufo](https://github.com/gufo-org/gufo),
+> not the official project. It adds Qwen3.8 Flash-Next in Unsloth's smaller
+> **UD-IQ4_XS** and **UD-IQ3_XXS** quantizations, both the current UD 3.1 files
+> and the older ones, so the model runs on **96 GB** Strix Halo machines with
+> MTP, images and the full 262K context. Everything else is Gufo 0.33.0; the
+> Gufo README follows the fork section.
+
+## This fork
+
+Gufo supports Flash-Next as UD-Q4_K_XL, whose 78 GiB of GPU weights leave too
+little room on a 96 GB machine. This fork runs Unsloth's smaller files instead.
+
+New in November 2026:
+
+- Based on Gufo 0.33.0.
+- Unsloth's UD 3.1 files, which replaced UD-IQ4_XS on November 4, run with
+  their new expert formats (IQ2_S, IQ3_XXS, Q2_0, Q5_0), Q6_K trunk and IQ4_XS
+  embedding.
+- UD 3.1 UD-IQ3_XXS agrees with UD-Q4_K_XL about as closely as the older
+  UD-IQ4_XS did, with about 9 GiB less GPU memory.
+- The older three-shard UD-IQ4_XS and UD-IQ3_XXS still run and pass the same
+  functional suites.
+- The [container image](https://github.com/johandevlabs/gufo-toolboxes) is
+  built from this version.
+
+### Files
+
+| File | Unsloth revision | Download | Agreement with UD-Q4_K_XL | GPU weights |
+| --- | --- | ---: | --- | ---: |
+| UD 3.1 UD-IQ4_XS (4 shards) | `d9620119` | 93.7 GB | 89.4% of next tokens, mean KL 0.096 | 60.1 GiB |
+| UD 3.1 UD-IQ3_XXS (4 shards) | `d9620119` | 83.6 GB | 88.3% of next tokens, mean KL 0.123 | 50.6 GiB |
+| Older UD-IQ4_XS (3 shards) | `38bb39ee` | 93.7 GB | 88.8% of next tokens, mean KL 0.119 | 59.8 GiB |
+| Older UD-IQ3_XXS (3 shards) | `38bb39ee` | 82.0 GB | 85.5% of next tokens, mean KL 0.186 | 50.2 GiB |
+
+Agreement is llama.cpp's next-token choice on 4,995 positions of code,
+documentation, English, multilingual and agent text; GPU weights are the
+model buffer llama.cpp allocates. For a new download, take UD 3.1 UD-IQ3_XXS,
+or UD 3.1 UD-IQ4_XS for slightly higher agreement. With MTP and images at the
+full 262,144-token context, the UD 3.1 files used 64.8 GiB (UD-IQ3_XXS) and
+74.1 GiB (UD-IQ4_XS) of GPU memory. Neither UD 3.1 file fits a 64 GB machine,
+and the older UD-IQ3_XXS needs only about 1.4 GiB less than UD 3.1
+UD-IQ3_XXS.
+
+### Performance
+
+As of November 11, 2026, on a 96 GB GMKtec Evo-X2, tokens/s, one sample per
+point. Prefill is a 2,048-token prompt; decode is 128 tokens.
+
+| Workload | UD 3.1 UD-IQ4_XS | UD 3.1 UD-IQ3_XXS | Older UD-IQ4_XS | Older UD-IQ3_XXS | llama.cpp, UD 3.1 UD-IQ3_XXS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Prefill | 1,847 | 1,821 | 1,808 | 1,836 | 500 |
+| Prefill after 128K cached tokens | 1,445 | 1,446 | 1,472 | 1,493 | 158 |
+| Decode, AR | 33.4 | 34.4 | 31.9 | 34.2 | 23.8 |
+| Decode, AR, after 128K | 32.9 | 33.7 | 31.5 | 33.6 | 9.5 |
+| Decode, MTP, mixed text | 42.2 | 49.5 | 42.5 | 48.9 | — |
+| Decode, MTP, mixed text, after 128K | 48.4 | 46.9 | 48.0 | 43.9 | — |
+| Decode, MTP, repetitive text | 106.2 | 102.0 | 152.4 | 106.8 | — |
+| Decode, MTP, repetitive text, after 128K | 107.4 | 99.2 | 134.6 | 92.5 | — |
+| 8 users, AR, in total | 105.8 | 103.1 | 137.0 | 104.1 | 67.3 |
+| 8 users, MTP, mixed text, in total | 91.9 | 90.2 | 126.8 | 89.0 | — |
+
+Gufo prefills 3.6 to 9.2 times as fast as llama.cpp and decodes 1.4 to 3.6
+times as fast in AR, the gap growing with the cached context. The older
+UD-IQ4_XS decodes fastest when many tokens go through the model at once
+(repetitive text with MTP, 8 users). llama.cpp is the ROCm build Gufo benchmarks against;
+its MTP output differs from its own AR output, so its MTP speeds are not
+compared here.
+
+The [model guide](docs/models/qwen3.8-flash-next-ud-iq.md) has the download,
+run and memory details, with links to the
+[full benchmarks](docs/internal/models/qwen3.8-flash-next-ud-iq/BENCHMARKS.md)
+and the [quality report](docs/internal/models/qwen3.8-flash-next-ud-iq/QUALITY.md).
+UD-Q4_K_XL behaves exactly as in Gufo 0.33.0, with byte-identical logits.
+
+### Run
+
+Download a file with its MTP head and vision projector:
+
+```sh
+hf download unsloth/Qwen3.8-Flash-Next-GGUF \
+  --revision d96201194f103c906994f283f504209dc8d2a10c \
+  --include "UD-IQ3_XXS/*" \
+  --include "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" \
+  --include "mmproj-BF16.gguf" \
+  --local-dir models/qwen3.8-flash-next
+```
+
+Replace `UD-IQ3_XXS` with `UD-IQ4_XS` for the larger file. The older files
+are at revision `38bb39ee9782`.
+
+Serve it with the container built from this fork:
+
+```sh
+docker run --rm --device /dev/kfd --device /dev/dri \
+  --group-add "$(stat -c %g /dev/kfd)" \
+  --ulimit memlock=-1 -p 8080:8080 -v "$PWD/models":/models:ro \
+  ghcr.io/johandevlabs/gufo-toolboxes/gufo-runtime:edge \
+  gufo serve --host 0.0.0.0 --port 8080 llm \
+  --model /models/qwen3.8-flash-next/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf \
+  --speculative mtp \
+  --mtp-model /models/qwen3.8-flash-next/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf \
+  --mmproj /models/qwen3.8-flash-next/mmproj-BF16.gguf
+```
+
+For an older file, pass its first shard, `...-00001-of-00003.gguf`. To build
+from source, clone this repository and follow
+[install](docs/install.md#build-from-source).
+
+---
 
 <p align="center">
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">

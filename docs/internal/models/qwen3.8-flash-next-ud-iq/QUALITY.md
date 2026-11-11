@@ -20,6 +20,7 @@ no Q8_0 or BF16 file was available. A deterministic rerun was byte-identical.
 | UD-IQ4_XS | 89.43% | 0.096 | 1.31 | 3.906 | 60.1 GiB |
 | UD-IQ3_XXS | 88.31% | 0.123 | 1.71 | 3.959 | 50.6 GiB |
 | UD-IQ4_XS, three shards (`38bb39ee`) | 88.75% | 0.119 | 1.62 | 4.114 | 59.8 GiB |
+| UD-IQ3_XXS, three shards (`38bb39ee`) | 85.51% | 0.186 | 2.58 | 4.106 | 50.2 GiB |
 
 Per segment (top-1 / mean KL):
 
@@ -29,8 +30,9 @@ Per segment (top-1 / mean KL):
 | UD-IQ3_XXS | 92.99% / 0.082 | 79.38% / 0.176 | 88.39% / 0.066 | 92.79% / 0.046 | 87.99% / 0.245 |
 
 Perplexity below the reference's does not mean either file beats UD-Q4_K_XL;
-the reference is itself quantized. Both files agree with it more closely than
-the three-shard UD-IQ4_XS did.
+the reference is itself quantized. Both UD 3.1 files agree with it more
+closely than the three-shard UD-IQ4_XS did; the three-shard UD-IQ3_XXS, measured
+on November 2 with the same tool and reference, is the furthest from it.
 
 ## Gufo against the CPU F32 reference
 
@@ -42,10 +44,12 @@ reference forward (independent decoders in `src/core/quant`) on the same
 | --- | ---: | ---: | ---: |
 | UD-IQ4_XS | 22/24 | 0.0037 | 0.0217 |
 | UD-IQ3_XXS | 23/24 | 0.0074 | 0.0503 |
-| UD-IQ4_XS, three shards (before the Q6_K F16 trunk) | 24/24 | 0.0188 | — |
+| UD-IQ4_XS, three shards | 24/24 | 0.0188 | 0.1008 |
+| UD-IQ3_XXS, three shards | 23/24 | 0.0298 | 0.2376 |
 
 The UD-IQ4_XS differences are near ties (KL 0.0014 and 0.0123 at those
-positions). The reference rounds weights the same way as the GPU, so this
+positions). The three-shard UD-IQ3_XXS picks " a" where the reference picks
+" the" (KL 0.129). The reference rounds weights the same way as the GPU, so this
 checks execution, not the quantization.
 
 ## Kernels
@@ -83,6 +87,10 @@ preset: `state-edges`, `tool-agent`, `long-context`, `tools`, `batch`,
 prefill decode, bit-exact. These record correctness only, not timings.
 Once, on UD-IQ3_XXS, the greedy model answered `legacy-tool-cancel` with a
 well-formed tool call instead of text; later runs passed.
+
+On the older three-shard files, at `e9d4e5cd` with the same options, the
+seven suites pass on UD-IQ3_XXS with MTP (3,772 drafted, 3,234 accepted) and
+without it, and on UD-IQ4_XS with MTP (3,760 drafted, 3,102 accepted).
 
 ## UD-Q4_K_XL unchanged
 
