@@ -538,6 +538,15 @@ public:
     rollback_position_.reset();
   }
 
+  /// Bounds the draft of this session's next verification step (the
+  /// concurrent draft cap); the draft backend applies it to its proposals.
+  void SetStepDraftCap(std::uint32_t cap) noexcept {
+    if (dflash_backend_ != nullptr)
+      dflash_backend_->SetStepDraftCap(cap);
+    if (mtp_backend_ != nullptr)
+      mtp_backend_->SetStepDraftCap(cap);
+  }
+
   [[nodiscard]] TextDecodeStep DecodeSpeculative(
       std::size_t max_tokens, sampling::SamplerState& sampler,
       std::uint32_t max_draft_tokens) {
@@ -546,9 +555,10 @@ public:
     if (PrepareSpeculativeDecode(max_tokens, working_sampler, result)) {
       const auto request = VerificationRequest(
           max_tokens - result.selections.size(), working_sampler);
+      SetStepDraftCap(max_draft_tokens);
       auto verification = verifier_->VerifyStep(
           sequence_, request.position, request.current_token, request.eos_id,
-          request.max_emitted_tokens, working_sampler, max_draft_tokens);
+          request.max_emitted_tokens, working_sampler);
       FinishSpeculativeDecode(std::move(verification), working_sampler, result);
     }
     sampler.SetRngState(working_sampler.rng_state());
@@ -1208,8 +1218,9 @@ public:
         indices.push_back(index);
       }
     }
-    for (auto& request : requests)
-      request.max_draft_tokens = DraftCap(request.sampler, requests.size());
+    for (std::size_t item = 0; item < requests.size(); ++item)
+      states[indices[item]]->SetStepDraftCap(
+          DraftCap(requests[item].sampler, requests.size()));
     auto verified = speculative::SpeculativeVerifier::VerifyBatch(requests);
     for (std::size_t item = 0; item < indices.size(); ++item) {
       const std::size_t index = indices[item];

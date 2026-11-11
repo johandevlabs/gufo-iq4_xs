@@ -374,6 +374,11 @@ struct QwenMtpGpuDraftConfig {
 /// Stateful MTP draft provider backed by the production HIP executor.
 class QwenMtpGpuDraftBackend final : public speculative::IDraftBackend {
 public:
+  /// Upper bound on the next proposals' draft length: the concurrent draft
+  /// cap the runner sets before each verification step. Gufo's verifier has
+  /// no per-step bound, so the backend clamps the length it is asked for.
+  void SetStepDraftCap(std::uint32_t cap) noexcept { step_draft_cap_ = cap; }
+
   [[nodiscard]] static std::unique_ptr<QwenMtpGpuDraftBackend> Create(
       std::shared_ptr<const QwenMtpGpuModel> model,
       QwenMtpGpuDraftConfig config = {}, std::string* error_msg = nullptr);
@@ -450,6 +455,7 @@ public:
   }
 
 private:
+  std::uint32_t step_draft_cap_{std::numeric_limits<std::uint32_t>::max()};
   QwenMtpGpuDraftBackend(std::unique_ptr<QwenMtpGpuExecutor> executor,
                          QwenMtpGpuDraftConfig config);
   friend class models::qwen::ContinuationAdapter;

@@ -247,10 +247,9 @@ struct SpeculativeVerifier::PreparedStep {
 };
 
 SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
-    std::span<const sampling::TokenId> current_sequence,
-    std::uint32_t cur_pos, sampling::TokenId current_token,
-    sampling::TokenId eos_id, std::uint32_t max_emitted_tokens,
-    sampling::SamplerState& sampler, std::uint32_t max_draft_tokens) {
+    std::span<const sampling::TokenId> current_sequence, std::uint32_t cur_pos,
+    sampling::TokenId current_token, sampling::TokenId eos_id,
+    std::uint32_t max_emitted_tokens, sampling::SamplerState& sampler) {
   sampler.config().Validate();
   if (!use_batched_verification_ &&
       sampler.config().can_use_unmodified_argmax()) {
@@ -258,9 +257,8 @@ SpeculativeVerifier::StepResult SpeculativeVerifier::VerifyStep(
                                 eos_id, max_emitted_tokens,
                                 sampler.config().logprobs);
   }
-  auto prepared =
-      PrepareStep({*this, current_sequence, cur_pos, current_token, eos_id,
-                   max_emitted_tokens, sampler, max_draft_tokens});
+  auto prepared = PrepareStep({*this, current_sequence, cur_pos, current_token,
+                               eos_id, max_emitted_tokens, sampler});
   if (prepared.immediate.has_value())
     return std::move(*prepared.immediate);
   auto verification = target_executor_->ForwardVerificationChunk(
@@ -697,8 +695,7 @@ std::vector<SpeculativeVerifier::StepResult> SpeculativeVerifier::VerifyBatch(
     const auto& request = requests.front();
     return {request.verifier.VerifyStep(
         request.sequence, request.position, request.current_token,
-        request.eos_id, request.max_emitted_tokens, request.sampler,
-        request.max_draft_tokens)};
+        request.eos_id, request.max_emitted_tokens, request.sampler)};
   }
   std::vector<StepResult> result(requests.size());
   for (std::size_t index = 0; index < requests.size(); ++index) {

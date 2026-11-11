@@ -8,6 +8,7 @@
 #include <gufo/ext/draft_backend.hpp>
 #include <gufo/ext/gguf_reader.hpp>
 #include <gufo/ext/prompt_lookup.hpp>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -338,6 +339,11 @@ struct QwenDFlashGpuDraftConfig {
 /// interface.
 class QwenDFlashGpuDraftBackend final : public speculative::IDraftBackend {
 public:
+  /// Upper bound on the next proposals' draft length: the concurrent draft
+  /// cap the runner sets before each verification step. Gufo's verifier has
+  /// no per-step bound, so the backend clamps the length it is asked for.
+  void SetStepDraftCap(std::uint32_t cap) noexcept { step_draft_cap_ = cap; }
+
   /// Committed target rows the draft leaves pending for its next proposal,
   /// as continuation snapshots expect (an ordinary verification's rows).
   static constexpr std::size_t kMaxPendingRows = 8;
@@ -434,6 +440,7 @@ public:
   }
 
 private:
+  std::uint32_t step_draft_cap_{std::numeric_limits<std::uint32_t>::max()};
   void InjectPendingFeatures(std::uint32_t position);
   /// Brings the request's draft table up to its committed history and
   /// returns whether this block, anchored on `tokens.back()`, drafts through
