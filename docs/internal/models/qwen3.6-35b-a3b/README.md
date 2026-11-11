@@ -127,8 +127,7 @@ UD-Q8_K_XL. The target test asserts the identity (see [Quality](QUALITY.md)).
 ```sh
 ./result/bin/gufo serve --sessions 4 llm --model "$MODEL" --context 262144 \
   --speculative dflash2 --dflash-model Qwen3.6-35B-A3B-DFlash2-Q8_0.gguf \
-  --draft-tokens 7 --draft-policy adaptive \
-  --prefill-chunk 2048 --prefill-decode-rounds 8
+  --draft-tokens 7 --draft-policy adaptive
 ```
 
 For MTP, replace the draft arguments with
@@ -143,10 +142,11 @@ proposed in one batch, and keeps 1 draft token at 2 requests and none at 3 or
 more, where one draft token no longer pays for its row; there it decodes within
 3% of the plain rate, the cost of keeping each session's draft context current.
 
-Prefill is not batched across sessions: requests take turns, and while other
-sessions decode, a prompt is prefilled in `--prefill-chunk` token slices.
-`--prefill-decode-rounds N` gives the decoding sessions N rounds between two
-slices, so a larger chunk does not lengthen their stalls in proportion. Each
+Prefill is not batched across sessions: requests take turns. While other
+sessions decode, a prompt keeps the runner's 4,096-token pass and Gufo's
+layered prefill splits each pass into up to 16 layer groups, with a decode
+round for the other sessions between groups (see
+[the server guide](../../server.md)); outputs stay bit-identical. Each
 session holds its own KV/SSM state: at context 262144, one session used
 38.7 GiB of device memory in total and four 59.7 GiB. On this hardware DFlash2
 decodes much faster than MTP on repetitive text, the two are close on mixed
