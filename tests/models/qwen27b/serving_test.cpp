@@ -84,7 +84,6 @@ bool LoadBackend(
   }
   std::shared_ptr<const gufo::hip::QwenDFlashGpuModel> dflash_model;
   gufo::speculative::SpeculativeOptions spec_opts;
-  spec_opts.mtp_prime_chunk = speculative_config.mtp_prime_chunk;
   if (speculative_config.backend ==
       gufo::server::TextSpeculativeBackend::kDFlash) {
     std::string err;
