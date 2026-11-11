@@ -1361,13 +1361,16 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenTextRunner(
     }
     reader = std::shared_ptr<const core::GgufReader>(std::move(reader_owner));
   }
-  if (!options.kv_cache.empty() && options.kv_cache != "f16" &&
-      options.kv_cache != "q8_0") {
+  // Declared in extension.json; the host delivers it only when given.
+  const auto* kv_option =
+      ext::FindOption<std::string>(options.provider_options, "--kv-cache");
+  const std::string kv_cache = kv_option != nullptr ? *kv_option : "";
+  if (!kv_cache.empty() && kv_cache != "f16" && kv_cache != "q8_0") {
     if (error)
       *error = "--kv-cache must be f16 or q8_0";
     return nullptr;
   }
-  const auto kv_storage = options.kv_cache == "q8_0"
+  const auto kv_storage = kv_cache == "q8_0"
                               ? hip::QwenKvCacheStorage::kQ8
                               : hip::QwenKvCacheStorage::kFp16;
   std::shared_ptr<models::qwen::vision::Encoder> vision;
