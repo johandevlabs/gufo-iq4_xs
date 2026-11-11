@@ -26,18 +26,19 @@ tools/extension/qwen35moe/generate.sh /tmp/qwen35moe-extension [ref]
 | Patch | Why |
 | --- | --- |
 | 0001 | Gufo's `ModelConfig` has no routed-expert fields; the extension derives its own. |
-| 0002 | No hook for the MTP prime chunk size; it uses the default 1,024. |
-| 0003 | No hook for the DFlash2 context skip or the prefill-step checkpoint grid; both are dropped. |
-| 0004 | No per-step draft cap in the verifier; the cap for concurrent sessions on MoE targets moves into the draft backends, with identical proposals. |
-| 0005 | Build fixes against Gufo main (a private test helper). |
-| 0006 | `--kv-cache` is an option the extension declares in `extension.json`; Gufo delivers it in `provider_options`. |
+| 0002 | No hook for the DFlash2 context skip or the prefill-step checkpoint grid; both are dropped. |
+| 0003 | Build fixes against Gufo main (a private test helper). |
+
+`--kv-cache`, the fixed MTP prime chunk and the concurrent draft cap in the
+draft backends need no port: Strycast itself takes them through Gufo's public
+API since its rebase onto Gufo v0.33.0.
 
 When a change to the copied code or a new Gufo revision breaks a patch, the
 workflow fails. To update the patches, generate the tree, fix the failing
 commit in it, and export the ports again:
 
 ```sh
-git -C /tmp/qwen35moe-extension format-patch HEAD~6 -o tools/extension/qwen35moe/ports
+git -C /tmp/qwen35moe-extension format-patch HEAD~3 -o tools/extension/qwen35moe/ports
 ```
 
 Check a new Gufo revision on Strix Halo before raising `gufo-revision`: build

@@ -1,7 +1,7 @@
-From c09ac1ce8e457ae7e9dbecfac331545ce9a2752a Mon Sep 17 00:00:00 2001
+From b6cc4bc43f6ad9bbbd24aeb8f6ba7dddda2cce20 Mon Sep 17 00:00:00 2001
 From: Sami Slimani <slimsamister@gmail.com>
 Date: Thu, 5 Nov 2026 22:06:31 +0100
-Subject: [PATCH 3/6] port: drop the DFlash2 context skip and the prefill step
+Subject: [PATCH 2/3] port: drop the DFlash2 context skip and the prefill step
  grid
 
 Both need core changes upstream does not have: the skip needs
@@ -15,15 +15,15 @@ for a later return.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  q35/model/hip/dflash.hpp         |  5 ----
- q35/model/hip/dflash/backend.cpp | 27 ---------------------
- q35/model/runner.cpp             | 41 +++++---------------------------
- 3 files changed, 6 insertions(+), 67 deletions(-)
+ q35/model/hip/dflash/backend.cpp | 27 ----------------------
+ q35/model/runner.cpp             | 39 +++++---------------------------
+ 3 files changed, 6 insertions(+), 65 deletions(-)
 
 diff --git a/q35/model/hip/dflash.hpp b/q35/model/hip/dflash.hpp
-index ed152eb..37909ba 100644
+index 3587d26..a1644a7 100644
 --- a/q35/model/hip/dflash.hpp
 +++ b/q35/model/hip/dflash.hpp
-@@ -374,11 +374,6 @@ public:
+@@ -380,11 +380,6 @@ public:
        const speculative::DraftTargetContext& context,
        std::uint32_t position) override;
  
@@ -36,7 +36,7 @@ index ed152eb..37909ba 100644
  
    [[nodiscard]] speculative::DraftProposal Propose(
 diff --git a/q35/model/hip/dflash/backend.cpp b/q35/model/hip/dflash/backend.cpp
-index 7a7f0dd..532f4a8 100644
+index 3da4749..ad8661e 100644
 --- a/q35/model/hip/dflash/backend.cpp
 +++ b/q35/model/hip/dflash/backend.cpp
 @@ -255,33 +255,6 @@ QwenDFlashGpuDraftBackend::CreateFromGguf(
@@ -74,10 +74,10 @@ index 7a7f0dd..532f4a8 100644
      const speculative::DraftTargetContext& context) {
    CheckContinuation();
 diff --git a/q35/model/runner.cpp b/q35/model/runner.cpp
-index 3d9e3f2..c039153 100644
+index ca5c8a3..49ae3bf 100644
 --- a/q35/model/runner.cpp
 +++ b/q35/model/runner.cpp
-@@ -304,30 +304,12 @@ public:
+@@ -306,30 +306,12 @@ public:
      return verifier_ != nullptr;
    }
  
@@ -110,7 +110,7 @@ index 3d9e3f2..c039153 100644
      frontier_logits_.clear();
      if (decode_ready) {
        const auto logits = verifier_->CopyLastTargetLogits();
-@@ -387,7 +369,7 @@ public:
+@@ -389,7 +371,7 @@ public:
    }
  
    void ExtendSpeculative(std::span<const TextRunnerToken> suffix,
@@ -119,7 +119,7 @@ index 3d9e3f2..c039153 100644
      if (verifier_ == nullptr || !frontier_.has_value()) {
        throw std::logic_error("Qwen speculative prefix is not initialized");
      }
-@@ -397,7 +379,7 @@ public:
+@@ -399,7 +381,7 @@ public:
      }
      frontier_ =
          verifier_->ExtendPrompt(suffix, static_cast<std::uint32_t>(position_),
@@ -128,7 +128,7 @@ index 3d9e3f2..c039153 100644
      sequence_.insert(sequence_.end(), suffix.begin(), suffix.end());
      position_ += suffix.size();
      frontier_logits_.clear();
-@@ -623,7 +605,6 @@ private:
+@@ -635,7 +617,6 @@ private:
    hip::QwenMtpGpuDraftBackend* mtp_backend_{nullptr};
    models::qwen::ContinuationAdapter* adapter_{};
    cache::Slot* slot_{};
@@ -136,16 +136,7 @@ index 3d9e3f2..c039153 100644
    std::vector<TextRunnerToken> sequence_;
    std::size_t position_{0};
    std::optional<TextRunnerToken>& frontier_;
-@@ -780,8 +761,6 @@ public:
-                 .prefill_rollback = true,
-             },
-         .sampling_defaults = QwenSamplingDefaults(model_->GetConfig()),
--        .prefill_step_tokens = std::min<std::size_t>(
--            max_context_, hip::QwenGpuArena::kMaxPromptBatch),
-     };
-   }
- 
-@@ -936,11 +915,6 @@ public:
+@@ -1057,11 +1038,6 @@ public:
      qwen.PreparePrefixReuse(prefix);
    }
  
@@ -157,7 +148,7 @@ index 3d9e3f2..c039153 100644
    [[nodiscard]] TextPrefillStep Prefill(
        TextRunnerState& state, std::span<const TextRunnerToken> prompt,
        std::size_t offset, std::size_t max_input_tokens) const override {
-@@ -958,8 +932,6 @@ public:
+@@ -1080,8 +1056,6 @@ public:
        }
        max_input_tokens = std::min<std::size_t>(
            max_input_tokens, qwen.executor().GetMaxPromptBatch());
@@ -166,7 +157,7 @@ index 3d9e3f2..c039153 100644
        if (max_input_tokens != 0 && offset != 0 &&
            qwen.ResumeGeneratedToken(prompt[offset],
                                      offset + 1 == prompt.size())) {
-@@ -974,7 +946,7 @@ public:
+@@ -1096,7 +1070,7 @@ public:
                  "Qwen prefill requires a nonzero token budget");
            }
            qwen.PrimeSpeculative(prompt.first(consumed),
@@ -175,7 +166,7 @@ index 3d9e3f2..c039153 100644
            return {.consumed_tokens = consumed,
                    .decode_ready = consumed == prompt.size()};
          }
-@@ -985,8 +957,7 @@ public:
+@@ -1107,8 +1081,7 @@ public:
                "Qwen DFlash retained prefix has no suffix to prefill");
          }
          qwen.ExtendSpeculative(prompt.subspan(offset, consumed),
