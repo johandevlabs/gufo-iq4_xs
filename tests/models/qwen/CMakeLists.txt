@@ -14,6 +14,9 @@ endfunction()
 add_qwen_cpu_test(qwen_vision_cache_test
   tests/models/qwen/vision_cache_test.cpp
   "cpu;vision;qwen;correctness")
+add_qwen_cpu_test(qwen_probe_test
+  tests/models/qwen/probe_test.cpp
+  "cpu;models;qwen;probe")
 add_qwen_cpu_test(qwen_tokenizer_test
   tests/models/qwen/tokenization/tokenizer_test.cpp
   "cpu;tokenization;qwen")

@@ -6,6 +6,7 @@
 
 #include "src/families/qwen/config/qwen_config.hpp"
 #include "src/models/qwen/state.hpp"
+#include "src/models/qwen/weight_formats.hpp"
 
 namespace gufo::models {
 namespace {
@@ -80,12 +81,7 @@ enum class TensorRole : std::uint8_t {
       // opt-q4kxl: the Unsloth UD-Q4_K_XL shard mixes Q5_K, IQ4_XS, Q4_K, Q6_K,
       // IQ4_NL, Q3_K and IQ3_S across projections, and every one of them has an
       // in-kernel decoder, so all are accepted here.
-      return type == core::GgmlType::kF32 || type == core::GgmlType::kBF16 ||
-             type == core::GgmlType::kQ8_K || type == core::GgmlType::kQ8_0 ||
-             type == core::GgmlType::kQ5_K || type == core::GgmlType::kQ6_K ||
-             type == core::GgmlType::kQ4_K || type == core::GgmlType::kQ3_K ||
-             type == core::GgmlType::kIQ4_NL ||
-             type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ3_S;
+      return qwen::IsQwenWeightFormat(type);
   }
   return false;
 }
