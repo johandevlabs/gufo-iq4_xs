@@ -109,7 +109,7 @@ struct LayerWeights {
   TensorRef ple_conv1d;      ///< [conv_kernel, hc_dim]
 
   // Mixture of experts.
-  TensorRef router;          ///< [hidden -> num_experts] F32
+  TensorRef router;          ///< [hidden -> num_experts] F32 or BF16
   TensorRef ffn_gate_exps;   ///< [hidden -> expert_ff] x experts
   TensorRef ffn_up_exps;     ///< [hidden -> expert_ff] x experts
   TensorRef ffn_down_exps;   ///< [expert_ff -> hidden] x experts

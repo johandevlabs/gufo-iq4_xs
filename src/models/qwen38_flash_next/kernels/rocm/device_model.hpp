@@ -119,6 +119,9 @@ enum class HcInjectUpload { kCopy, kExpandQ8_0, kWidenBF16 };
 void WidenBF16(const std::uint16_t* src, float* dst,
                std::size_t count) noexcept;
 
+/// Widens `count` F16 values to F32 exactly.
+void WidenF16(const std::uint16_t* src, float* dst, std::size_t count) noexcept;
+
 /// The trunk (and optionally the MTP draft block) uploaded to the GPU. The
 /// n-gram table is never uploaded: it is read from disk per token.
 class DeviceModel {

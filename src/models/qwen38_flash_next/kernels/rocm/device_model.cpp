@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
 #include <initializer_list>
@@ -168,7 +169,11 @@ struct Uploader {
     allocations.push_back(f32);
     bytes += count * sizeof(float) + kTailMargin;
     std::vector<float> host(count);
-    WidenBF16(static_cast<const std::uint16_t*>(t.data), host.data(), count);
+    if (t.type == core::GgmlType::kF16) {
+      WidenF16(static_cast<const std::uint16_t*>(t.data), host.data(), count);
+    } else {
+      WidenBF16(static_cast<const std::uint16_t*>(t.data), host.data(), count);
+    }
     if (hipMemcpy(f32, host.data(), count * sizeof(float),
                   hipMemcpyHostToDevice) != hipSuccess ||
         hipMemset(static_cast<std::uint8_t*>(f32) + count * sizeof(float), 0,
@@ -229,11 +234,12 @@ struct Uploader {
   }
 
   /// Uploads matrices of one type stacked along rows; every input shares
-  /// `cols`. An F32 stack (router logits, GDN alpha/beta: the only
+  /// `cols`. An F32 or BF16 stack (router logits, GDN alpha/beta: the only
   /// unquantized projections) is narrowed to F16, which the wide-batch GEMM
-  /// tier runs at speed. A Q8_0 stack merges projections of one input into
-  /// a single decode GEMV, unless `expand_q8` asks for the F32 stack's F16
-  /// route over its dequantized values.
+  /// tier runs at speed; BF16 is first widened exactly on the host. A Q8_0
+  /// stack merges projections of one input into a single decode GEMV, unless
+  /// `expand_q8` asks for the F32 stack's F16 route over its dequantized
+  /// values.
   DeviceTensor Stack(std::initializer_list<const TensorRef*> parts,
                      bool expand_q8 = false) {
     DeviceTensor d;
@@ -245,30 +251,49 @@ struct Uploader {
     const core::GgmlType type = (*parts.begin())->type;
     for (const TensorRef* t : parts) {
       if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0 &&
-           type != core::GgmlType::kQ6_K)) {
-        Fail("stacked upload needs F32, Q8_0 or Q6_K tensors of one shape");
+          (type != core::GgmlType::kF32 && type != core::GgmlType::kBF16 &&
+           type != core::GgmlType::kQ8_0 && type != core::GgmlType::kQ6_K)) {
+        Fail(
+            "stacked upload needs F32, BF16, Q8_0 or Q6_K tensors of one "
+            "shape");
         return d;
       }
       rows += t->rows;
       size += t->SizeBytes();
     }
+    const bool widen = type == core::GgmlType::kBF16;
+    const std::size_t elements = rows * (*parts.begin())->cols;
+    const std::size_t stored = widen ? elements * sizeof(float) : size;
     void* ptr = nullptr;
-    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+    if (Allocate(&ptr, stored + kTailMargin) != hipSuccess) {
       Fail("stacked tensor allocation failed");
       return d;
     }
     if (!Measuring()) {
       allocations.push_back(ptr);
-      bytes += size + kTailMargin;
+      bytes += stored + kTailMargin;
       std::size_t offset = 0;
       for (const TensorRef* t : parts) {
-        if (!stager.Copy(shard_base + t->shard, t->file_offset, t->SizeBytes(),
-                         static_cast<std::uint8_t*>(ptr) + offset, error)) {
-          Fail("upload failed for " + std::string(t->name));
-          return d;
+        auto* dst = static_cast<std::uint8_t*>(ptr) + offset;
+        if (widen) {
+          const std::size_t count = t->cols * t->rows;
+          std::vector<float> host(count);
+          WidenBF16(static_cast<const std::uint16_t*>(t->data), host.data(),
+                    count);
+          if (hipMemcpy(dst, host.data(), count * sizeof(float),
+                        hipMemcpyHostToDevice) != hipSuccess) {
+            Fail("upload failed for " + std::string(t->name));
+            return d;
+          }
+          offset += count * sizeof(float);
+        } else {
+          if (!stager.Copy(shard_base + t->shard, t->file_offset,
+                           t->SizeBytes(), dst, error)) {
+            Fail("upload failed for " + std::string(t->name));
+            return d;
+          }
+          offset += t->SizeBytes();
         }
-        offset += t->SizeBytes();
       }
     }
     if ((type == core::GgmlType::kQ8_0 && !expand_q8) ||
@@ -289,9 +314,8 @@ struct Uploader {
       return d;
     }
     void* f32 = ptr;
-    std::size_t f32_bytes = size;
+    std::size_t f32_bytes = stored;
     if (type == core::GgmlType::kQ8_0) {
-      const std::size_t elements = rows * (*parts.begin())->cols;
       f32_bytes = elements * sizeof(float);
       if (Allocate(&f32, f32_bytes + kTailMargin) != hipSuccess) {
         Fail("stacked tensor allocation failed");
@@ -387,7 +411,9 @@ struct Uploader {
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
-    d.ple_conv1d = Copy(l.ple_conv1d);
+    d.ple_conv1d = l.ple_conv1d.type == core::GgmlType::kF16
+                       ? UploadWidened(l.ple_conv1d)
+                       : Copy(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
@@ -465,6 +491,13 @@ void WidenBF16(const std::uint16_t* src, float* dst,
   }
 }
 
+void WidenF16(const std::uint16_t* src, float* dst,
+              std::size_t count) noexcept {
+  for (std::size_t i = 0; i < count; ++i) {
+    dst[i] = gufo::quant::Fp16ToFloat(src[i]);
+  }
+}
+
 std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& w, const core::GgufReader& reader,
     const MtpWeights* mtp, const core::GgufReader* mtp_reader,
@@ -479,7 +512,39 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
       *error_msg = "unsupported HIP expert format Q6_K: " + std::string(t.name);
     return false;
   };
+  // The binder admits every format the CPU reference decodes; refuse here,
+  // before allocating, those the device kernels do not run yet.
+  const auto device_format = [&](const TensorRef& t,
+                                 std::initializer_list<core::GgmlType> types) {
+    if (t.empty() ||
+        std::find(types.begin(), types.end(), t.type) != types.end())
+      return true;
+    if (error_msg != nullptr)
+      *error_msg = "unsupported HIP format " +
+                   std::string(core::ToString(t.type)) + ": " +
+                   std::string(t.name);
+    return false;
+  };
+  const auto dense_supported = [&](const TensorRef& t) {
+    using enum core::GgmlType;
+    return device_format(t, {kQ8_0, kQ6_K, kBF16, kF16, kF32});
+  };
+  const auto expert_supported = [&](const TensorRef& t) {
+    using enum core::GgmlType;
+    return device_format(t, {kQ4_K, kQ5_K, kQ6_K, kQ5_1, kQ5_0, kQ8_0, kQ2_0,
+                             kIQ2_S, kIQ3_S, kIQ3_XXS, kIQ4_XS, kIQ4_NL});
+  };
   const auto layer_supported = [&](const LayerWeights& l) {
+    for (const TensorRef* t :
+         {&l.ssm_qkv, &l.ssm_gate, &l.ssm_out, &l.attn_q, &l.attn_k, &l.attn_v,
+          &l.attn_out, &l.indexer_q, &l.indexer_k, &l.ple_key, &l.ple_value,
+          &l.shexp_gate, &l.shexp_up, &l.shexp_down, &l.nextn_eh_proj}) {
+      if (!dense_supported(*t))
+        return false;
+    }
+    if (!expert_supported(l.ffn_gate_exps) ||
+        !expert_supported(l.ffn_up_exps) || !expert_supported(l.ffn_down_exps))
+      return false;
     if (!supported(l.ffn_gate_exps) || !supported(l.ffn_up_exps) ||
         !supported(l.ffn_down_exps))
       return false;
@@ -504,6 +569,13 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
                    std::string(l.ffn_gate_exps.name);
     return false;
   };
+  {
+    using enum core::GgmlType;
+    if (!device_format(w.token_embd,
+                       {kQ8_0, kQ6_K, kIQ4_XS, kBF16, kF16, kF32}) ||
+        !dense_supported(w.output))
+      return nullptr;
+  }
   if (!std::all_of(w.layers.begin(), w.layers.end(), layer_supported) ||
       (mtp != nullptr && !mtp_block_supported(mtp->block))) {
     return nullptr;

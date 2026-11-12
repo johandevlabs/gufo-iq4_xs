@@ -33,7 +33,7 @@ target_include_directories(gufo_qwen38_flash_next_reference PUBLIC
   ${GUFO_EXTENSION_BUILD_ROOT}
 )
 target_link_libraries(gufo_qwen38_flash_next_reference PUBLIC
-  gufo_qwen38_flash_next)
+  gufo_qwen38_flash_next gufo_qwen_vision)
 set_source_files_properties(
   ${GUFO_EXTENSION_BUILD_ROOT}/cpu_ops.cpp
   ${GUFO_EXTENSION_BUILD_ROOT}/reference.cpp

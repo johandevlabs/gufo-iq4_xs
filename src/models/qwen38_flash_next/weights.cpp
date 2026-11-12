@@ -9,6 +9,14 @@ namespace {
 
 using core::GgmlType;
 
+/// Dense projection formats. GSQ-RCO mixes K-quants, IQ formats and Q2_0
+/// within a layer; the CPU reference decodes them all, and the device upload
+/// refuses those it has no kernels for.
+constexpr std::initializer_list<GgmlType> kDenseFormats = {
+    GgmlType::kQ8_0,   GgmlType::kQ6_K,   GgmlType::kQ5_K,  GgmlType::kQ4_K,
+    GgmlType::kIQ4_XS, GgmlType::kIQ4_NL, GgmlType::kIQ3_S, GgmlType::kQ2_0,
+    GgmlType::kBF16,   GgmlType::kF16,    GgmlType::kF32};
+
 struct Format {
   std::uint32_t block;
   std::uint32_t bytes;
@@ -33,6 +41,10 @@ struct Format {
       return {32, 22};
     case GgmlType::kQ2_0:
       return {64, 18};
+    case GgmlType::kIQ2_XXS:
+      return {256, 66};
+    case GgmlType::kIQ2_XS:
+      return {256, 74};
     case GgmlType::kIQ2_S:
       return {256, 82};
     case GgmlType::kIQ3_XXS:
@@ -150,13 +162,13 @@ struct Binder {
     const std::string p = "blk." + std::to_string(il) + ".";
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
-    const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
-                        GgmlType::kF16, GgmlType::kF32};
+    const auto dense = kDenseFormats;
     const auto experts = {
-        GgmlType::kQ4_K,    GgmlType::kQ5_K,   GgmlType::kQ6_K,
-        GgmlType::kQ5_1,    GgmlType::kQ5_0,   GgmlType::kQ8_0,
-        GgmlType::kQ2_0,    GgmlType::kIQ2_S,  GgmlType::kIQ3_S,
-        GgmlType::kIQ3_XXS, GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
+        GgmlType::kQ4_K,   GgmlType::kQ5_K,    GgmlType::kQ6_K,
+        GgmlType::kQ5_1,   GgmlType::kQ5_0,    GgmlType::kQ8_0,
+        GgmlType::kQ2_0,   GgmlType::kIQ2_XXS, GgmlType::kIQ2_XS,
+        GgmlType::kIQ2_S,  GgmlType::kIQ3_S,   GgmlType::kIQ3_XXS,
+        GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -210,19 +222,19 @@ struct Binder {
       l.ple_norm_conv =
           Get(p + "ple_norm_conv.weight", hc_dim, 1, 1, {GgmlType::kF32});
       l.ple_conv1d = Get(p + "ple_conv1d.weight", c.ple_conv_kernel, hc_dim, 1,
-                         {GgmlType::kF32});
+                         {GgmlType::kF32, GgmlType::kF16});
     }
 
     l.router = Get(p + "ffn_gate_inp.weight", hidden, c.num_experts, 1,
-                   {GgmlType::kF32});
+                   {GgmlType::kF32, GgmlType::kBF16});
     l.ffn_gate_exps = Get(p + "ffn_gate_exps.weight", hidden, c.expert_ff,
                           c.num_experts, experts);
     l.ffn_up_exps = Get(p + "ffn_up_exps.weight", hidden, c.expert_ff,
                         c.num_experts, experts);
     l.ffn_down_exps = Get(p + "ffn_down_exps.weight", c.expert_ff, hidden,
                           c.num_experts, experts);
-    l.shexp_gate_inp =
-        Get(p + "ffn_gate_inp_shexp.weight", hidden, 1, 1, {GgmlType::kF32});
+    l.shexp_gate_inp = Get(p + "ffn_gate_inp_shexp.weight", hidden, 1, 1,
+                           {GgmlType::kF32, GgmlType::kBF16});
     l.shexp_gate =
         Get(p + "ffn_gate_shexp.weight", hidden, c.shared_expert_ff, 1, dense);
     l.shexp_up =
@@ -263,8 +275,7 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   ModelWeights w;
   w.config = *config;
   const Config& c = w.config;
-  const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
-                      GgmlType::kF16, GgmlType::kF32};
+  const auto dense = kDenseFormats;
 
   {
     // The vocabulary is the embedding row count; no metadata key carries it.
@@ -275,10 +286,12 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
     }
     w.config.vocab_size = static_cast<std::uint32_t>(info->dimensions[1]);
   }
-  // UD-IQ4_XS (Dynamic 3.1) stores the embedding as IQ4_XS: a lookup only.
-  w.token_embd = b.Get("token_embd.weight", c.hidden_size, c.vocab_size, 1,
-                       {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kIQ4_XS,
-                        GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32});
+  // UD-IQ4_XS (Dynamic 3.1) stores the embedding as IQ4_XS and GSQ-RCO
+  // IQ3_XXS as IQ3_S. Unless the head is tied to it, it is a lookup only.
+  w.token_embd = b.Get(
+      "token_embd.weight", c.hidden_size, c.vocab_size, 1,
+      {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kIQ4_XS, GgmlType::kIQ3_S,
+       GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32});
   w.output =
       b.Get("output.weight", c.hidden_size, c.vocab_size, 1, dense, false);
   if (w.output.empty()) {
