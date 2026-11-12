@@ -2359,7 +2359,8 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
       (a.type == GgmlType::kQ4_K || a.type == GgmlType::kQ5_K ||
        a.type == GgmlType::kQ8_0 || a.type == GgmlType::kIQ3_S ||
        a.type == GgmlType::kIQ4_NL || a.type == GgmlType::kIQ4_XS ||
-       a.type == GgmlType::kIQ2_S || a.type == GgmlType::kIQ3_XXS)) {
+       a.type == GgmlType::kIQ2_S || a.type == GgmlType::kIQ2_XS ||
+       a.type == GgmlType::kIQ2_XXS || a.type == GgmlType::kIQ3_XXS)) {
     // The shared expert quantized the same rows (or their producer did).
     const void* ready = ReadyQ8(x, n_tokens, a.cols);
     if ((ready != nullptr

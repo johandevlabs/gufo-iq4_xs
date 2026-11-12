@@ -362,6 +362,7 @@ static int moe_vector_projection(int weight_type, const void* W,
       type != GGML_TYPE_Q5_1 && type != GGML_TYPE_Q8_0 &&
       type != GGML_TYPE_IQ3_S && type != GGML_TYPE_IQ4_NL &&
       type != GGML_TYPE_IQ4_XS && type != GGML_TYPE_IQ2_S &&
+      type != GGML_TYPE_IQ2_XS && type != GGML_TYPE_IQ2_XXS &&
       type != GGML_TYPE_IQ3_XXS && type != GGML_TYPE_Q2_0 &&
       type != GGML_TYPE_Q5_0) {
     fprintf(stderr, "%s: unsupported weight type %d\n", tag, weight_type);
@@ -397,7 +398,8 @@ static int moe_vector_projection(int weight_type, const void* W,
                 (type != GGML_TYPE_Q4_K && type != GGML_TYPE_Q5_K &&
                  type != GGML_TYPE_Q8_0 && type != GGML_TYPE_IQ3_S &&
                  type != GGML_TYPE_IQ4_NL && type != GGML_TYPE_IQ4_XS &&
-                 type != GGML_TYPE_IQ2_S && type != GGML_TYPE_IQ3_XXS))) {
+                 type != GGML_TYPE_IQ2_S && type != GGML_TYPE_IQ2_XS &&
+                 type != GGML_TYPE_IQ2_XXS && type != GGML_TYPE_IQ3_XXS))) {
     fprintf(stderr,
             "%s: gated vector exceeds its format's row or expert limit\n",
             tag);

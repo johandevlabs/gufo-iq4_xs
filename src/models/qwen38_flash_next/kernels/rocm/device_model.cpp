@@ -533,8 +533,9 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   };
   const auto expert_supported = [&](const TensorRef& t) {
     using enum core::GgmlType;
-    return device_format(t, {kQ4_K, kQ5_K, kQ6_K, kQ5_1, kQ5_0, kQ8_0, kQ2_0,
-                             kIQ2_S, kIQ3_S, kIQ3_XXS, kIQ4_XS, kIQ4_NL});
+    return device_format(
+        t, {kQ4_K, kQ5_K, kQ6_K, kQ5_1, kQ5_0, kQ8_0, kQ2_0, kIQ2_XXS, kIQ2_XS,
+            kIQ2_S, kIQ3_S, kIQ3_XXS, kIQ4_XS, kIQ4_NL});
   };
   const auto layer_supported = [&](const LayerWeights& l) {
     for (const TensorRef* t :

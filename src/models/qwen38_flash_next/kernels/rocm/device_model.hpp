@@ -20,7 +20,8 @@ namespace gufo::models::qwen38_flash_next::rocm {
   using core::GgmlType;
   return (gate == GgmlType::kQ4_K || gate == GgmlType::kQ5_K ||
           gate == GgmlType::kIQ3_S || gate == GgmlType::kIQ4_XS ||
-          gate == GgmlType::kIQ2_S || gate == GgmlType::kIQ3_XXS) &&
+          gate == GgmlType::kIQ2_S || gate == GgmlType::kIQ2_XS ||
+          gate == GgmlType::kIQ2_XXS || gate == GgmlType::kIQ3_XXS) &&
          up == gate &&
          (down == GgmlType::kQ5_1 || down == GgmlType::kQ8_0 ||
           down == GgmlType::kIQ4_NL || down == GgmlType::kQ2_0 ||
@@ -41,6 +42,7 @@ namespace gufo::models::qwen38_flash_next::rocm {
 [[nodiscard]] inline bool IsIqExpert(core::GgmlType type) {
   return type == core::GgmlType::kIQ3_S || type == core::GgmlType::kIQ4_NL ||
          type == core::GgmlType::kIQ4_XS || type == core::GgmlType::kIQ2_S ||
+         type == core::GgmlType::kIQ2_XS || type == core::GgmlType::kIQ2_XXS ||
          type == core::GgmlType::kIQ3_XXS || type == core::GgmlType::kQ2_0 ||
          type == core::GgmlType::kQ5_0;
 }

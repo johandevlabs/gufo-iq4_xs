@@ -1,8 +1,9 @@
-// IQ3_S/IQ4_NL/IQ4_XS (UD-IQ4_XS) and IQ2_S/IQ3_XXS/Q2_0 (UD-IQ3_XXS) routed
-// experts, the Q6_K logits head and GSQ-RCO's K-quant, IQ and Q2_0 dense
-// projections: accuracy against an F64 dot product over the CPU dequantizers,
-// and the exactness contracts of the vector paths (batched rows, paired and
-// fused gate/up all match single-row decode bit for bit).
+// IQ3_S/IQ4_NL/IQ4_XS (UD-IQ4_XS), IQ2_S/IQ3_XXS/Q2_0 (UD-IQ3_XXS) and
+// IQ2_XS/IQ2_XXS (GSQ-RCO IQ3_XXS) routed experts, the Q6_K logits head and
+// GSQ-RCO's K-quant, IQ and Q2_0 dense projections: accuracy against an F64 dot
+// product over the CPU dequantizers, and the exactness contracts of the vector
+// paths (batched rows, paired and fused gate/up all match single-row decode bit
+// for bit).
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -85,6 +86,10 @@ const Format kIQ4_XS{
     GgmlType::kIQ4_XS, "IQ4_XS", 256, 136, 0, gufo::quant::DequantizeIQ4_XS};
 const Format kIQ2_S{
     GgmlType::kIQ2_S, "IQ2_S", 256, 82, 0, gufo::quant::DequantizeIQ2_S};
+const Format kIQ2_XS{
+    GgmlType::kIQ2_XS, "IQ2_XS", 256, 74, 0, gufo::quant::DequantizeIQ2_XS};
+const Format kIQ2_XXS{
+    GgmlType::kIQ2_XXS, "IQ2_XXS", 256, 66, 0, gufo::quant::DequantizeIQ2_XXS};
 const Format kIQ3_XXS{
     GgmlType::kIQ3_XXS, "IQ3_XXS", 256, 98, 0, gufo::quant::DequantizeIQ3_XXS};
 const Format kQ2_0{
@@ -454,6 +459,8 @@ int main() {
       CheckRouted(kIQ4_NL, rows, 2560, 33, 3);
       CheckRouted(kIQ2_S, rows, 2560, 33, 3);
       CheckRouted(kIQ3_XXS, rows, 2560, 33, 3);
+      CheckRouted(kIQ2_XS, rows, 2560, 33, 3);
+      CheckRouted(kIQ2_XXS, rows, 2560, 33, 3);
     }
     // Down view: one slot per row, K 640.
     CheckRouted(kIQ4_NL, 2560, 640, 40, 1);
