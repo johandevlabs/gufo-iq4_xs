@@ -4,10 +4,11 @@
 #include <array>
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
-#include <vector>
 
 #include "src/models/qwen38_flash_next/weights.hpp"
 
@@ -32,9 +33,10 @@ bool ProbeFlashNextGguf(const core::GgufReader& reader) {
       core::GgmlType::kQ4_K,   core::GgmlType::kQ5_K,  core::GgmlType::kQ6_K,
       core::GgmlType::kQ5_1,   core::GgmlType::kQ8_0,  core::GgmlType::kIQ3_S,
       core::GgmlType::kIQ4_XS, core::GgmlType::kIQ4_NL};
-  // Gate, up and down formats per trunk layer, for the IQ layout rule.
-  std::vector<std::array<std::optional<core::GgmlType>, 3>> layer_formats(
-      trunk_layers);
+  // Gate, up and down formats of the layers present, for the IQ layout rule.
+  // Nothing is sized from block_count, which a corrupt file can inflate.
+  std::map<std::uint32_t, std::array<std::optional<core::GgmlType>, 3>>
+      layer_formats;
   for (const auto& tensor : reader.GetTensors()) {
     auto name = tensor.name;
     if (!name.starts_with("blk.")) {
@@ -64,7 +66,8 @@ bool ProbeFlashNextGguf(const core::GgufReader& reader) {
   }
   // The loader diagnoses missing experts; only complete layers are checked.
   return std::all_of(
-      layer_formats.begin(), layer_formats.end(), [](const auto& formats) {
+      layer_formats.begin(), layer_formats.end(), [](const auto& entry) {
+        const auto& formats = entry.second;
         return !formats[0] || !formats[1] || !formats[2] ||
                IqExpertFormatsSupported(*formats[0], *formats[1], *formats[2]);
       });

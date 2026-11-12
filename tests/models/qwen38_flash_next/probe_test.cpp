@@ -146,6 +146,19 @@ void CheckIgnoredTensors() {
 }
 
 void CheckMetadata() {
+  // A corrupt block_count must not size the probe's work: only the layers
+  // present are checked, including one near the 32-bit limit.
+  constexpr std::uint32_t kHugeBlocks = 0xffffffff;
+  Require(Probe({{"blk.4294967293.ffn_gate_exps.weight", GgmlType::kIQ3_S},
+                 {"blk.4294967293.ffn_up_exps.weight", GgmlType::kIQ3_S},
+                 {"blk.4294967293.ffn_down_exps.weight", GgmlType::kIQ4_NL}},
+                kHugeBlocks),
+          "huge block_count declined a supported layer");
+  Require(!Probe({{"blk.4294967293.ffn_gate_exps.weight", GgmlType::kIQ3_S},
+                  {"blk.4294967293.ffn_up_exps.weight", GgmlType::kIQ4_XS},
+                  {"blk.4294967293.ffn_down_exps.weight", GgmlType::kIQ4_NL}},
+                 kHugeBlocks),
+          "huge block_count claimed an unsupported layer");
   Require(!Probe({}, 49, 1, "qwen3"), "unrelated architecture claimed");
   Require(!Probe({}, std::nullopt), "missing block_count claimed");
   Require(!Probe({}, 0, 0), "zero block_count claimed");
