@@ -440,8 +440,73 @@ void CheckDenseRouted(const Format& f, int rows, int cols) {
     for (void* p : {static_cast<void*>(bounds), static_cast<void*>(out)})
       CheckHip(hipFree(p), "free");
   }
+  // A prefill chunk boundary: the last rows as their own pass.
+  for (int first : {kTokens - 9, 64, 17}) {
+    const int n = kTokens - first;
+    auto* bounds = Upload(std::vector<std::int32_t>{0, n});
+    auto* out = Upload(zeros);
+    Expect(q::RoutedF16Gemm(
+               dw, static_cast<q::WeightType>(f.type),
+               dx + static_cast<std::size_t>(first) * cols, tile_map,
+               static_cast<std::uint32_t>((n + kTileRows - 1) / kTileRows),
+               kTileRows, bounds, rows_map, rows_map, nullptr, out, nullptr,
+               rows, cols, nullptr),
+           tag + ": launch rejected");
+    const auto got = Download(out, static_cast<std::size_t>(n) * rows);
+    Expect(!std::memcmp(got.data(),
+                        full.data() + static_cast<std::size_t>(first) * rows,
+                        got.size() * 4),
+           tag + ": rows from " + std::to_string(first) +
+               " changed bits as their own pass");
+    for (void* p : {static_cast<void*>(bounds), static_cast<void*>(out)})
+      CheckHip(hipFree(p), "free");
+  }
   for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
                   static_cast<void*>(rows_map), static_cast<void*>(tile_map)})
+    CheckHip(hipFree(p), "free");
+}
+
+/// BF16 projections in prefill (GSQ-RCO's hyper-connection mixers and PLE
+/// key/value): the rows of a pass split at a chunk boundary keep their bits.
+void CheckBf16Chunks(int rows, int cols) {
+  const std::string tag =
+      "BF16 GEMM m=" + std::to_string(rows) + " k=" + std::to_string(cols);
+  constexpr int kTokens = 136;
+  std::uint32_t seed = 0xBF16U + rows;
+  const auto bf16 = [](float v) {
+    std::uint32_t bits;
+    std::memcpy(&bits, &v, 4);
+    return static_cast<std::uint16_t>(bits >> 16U);
+  };
+  std::vector<std::uint16_t> w(static_cast<std::size_t>(rows) * cols);
+  std::vector<std::uint16_t> x(static_cast<std::size_t>(kTokens) * cols);
+  for (auto& v : w)
+    v = bf16(Uniform(&seed, 0.05F));
+  for (auto& v : x)
+    v = bf16(Uniform(&seed, 3.0F));
+  auto* dw = Upload(w);
+  auto* dx = Upload(x);
+  const std::vector<float> zeros(static_cast<std::size_t>(kTokens) * rows);
+  auto* full = Upload(zeros);
+  auto* part = Upload(zeros);
+  Expect(q::DenseBf16Gemm(dw, dx, full, kTokens, rows, cols, nullptr),
+         tag + ": launch rejected");
+  const auto whole = Download(full, zeros.size());
+  for (int first : {127, 94, 64, 1}) {
+    const int n = kTokens - first;
+    Expect(q::DenseBf16Gemm(dw, dx + static_cast<std::size_t>(first) * cols,
+                            part, n, rows, cols, nullptr),
+           tag + ": launch rejected");
+    const auto got = Download(part, static_cast<std::size_t>(n) * rows);
+    Expect(!std::memcmp(got.data(),
+                        whole.data() + static_cast<std::size_t>(first) * rows,
+                        got.size() * 4),
+           tag + ": rows from " + std::to_string(first) +
+               " changed bits as their own pass");
+  }
+  std::cout << tag << ": chunked passes exact\n";
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
+                  static_cast<void*>(full), static_cast<void*>(part)})
     CheckHip(hipFree(p), "free");
 }
 
@@ -486,6 +551,9 @@ int main() {
       CheckDenseGemv(*f, 2561, 640);
       CheckDenseRouted(*f, 2561, 640);
     }
+    // Hyper-connection down/up (HC 10240, low rank 320).
+    CheckBf16Chunks(320, 10240);
+    CheckBf16Chunks(10240, 320);
   } catch (const std::exception& e) {
     std::cerr << "FAILED: " << e.what() << '\n';
     return 1;

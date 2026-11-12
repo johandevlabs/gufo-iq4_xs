@@ -108,7 +108,7 @@ void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
-               bool decode = false);
+               bool decode = false, bool prefill = false);
 /// The one-block-per-stream HcCombine that also writes xn's Q8_1 rows (as
 /// qfn_mmq_quantize_q8_1 would) to `xn_q8` for a small-batch mixer down
 /// projection. False, with nothing launched, without `gamma` or unless

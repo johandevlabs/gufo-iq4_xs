@@ -7771,11 +7771,13 @@ void HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
-               bool decode) {
+               bool decode, bool prefill) {
   // One block per token wants a batch: a decode step keeps the
-  // one-block-per-stream kernel's parallelism.
-  if (!decode && n_tokens >= 16 && streams == 4 && hidden % 128 == 0 &&
-      hidden <= 2560) {
+  // one-block-per-stream kernel's parallelism. The two kernels reduce the
+  // norm in different orders, so a prefill pass takes one of them at every
+  // width: a chunk boundary must not change a row's norm.
+  if (!decode && (n_tokens >= 16 || prefill) && streams == 4 &&
+      hidden % 128 == 0 && hidden <= 2560) {
     hipLaunchKernelGGL(HcCombineVec4Kernel<float>, dim3(n_tokens),
                        dim3(kThreads), 0, stream, res, block_out, inject,
                        inject_parts, gamma, xn, nullptr, hidden, eps, nullptr);

@@ -22,9 +22,10 @@ bool OwnF16(hipDataType type, int k) {
 }
 
 bool OwnBf16(hipDataType type, int m, int k) {
-  // The indexer query and key projections, and a TP2 rank's halves.
-  return type == HIP_R_16BF && k == 2560 &&
-         (m == 512 || m == 256 || m == 128 || m == 64);
+  // Every BF16 projection: the indexer query and key projections (and a TP2
+  // rank's halves), and GSQ-RCO's BF16 hyper-connection mixers and PLE key
+  // and value. Library plans would let a row depend on its pass width.
+  return type == HIP_R_16BF && m > 0 && k % 32 == 0;
 }
 
 }  // namespace

@@ -2509,7 +2509,8 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
     return;
   }
   HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, n_tokens,
-            c.hidden_size, c.hc_count, c.rms_eps, stream_);
+            c.hidden_size, c.hc_count, c.rms_eps, stream_, false,
+            prefill_phase);
 }
 
 bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
