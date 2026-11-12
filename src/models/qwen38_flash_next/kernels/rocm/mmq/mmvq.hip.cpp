@@ -797,8 +797,79 @@ void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,
   }
 }
 
+// Q4_K and Q5_K dense dots with every rounding explicit. The vendored
+// d * sum_d - dmin * sum_m contracts differently with the number of inputs a
+// launch carries, which would let a verification row differ from decode.
+template<bool kQ5>
+static __device__ __forceinline__ float vec_dot_kquant_dense(
+    const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
+    const int& kbx, const int& iqs) {
+  constexpr int qr = kQ5 ? QR5_K : QR4_K;
+  const int bq8_offset = qr * ((iqs / 2) / (QI8_1 / 2));
+  int v[2];
+  int vh[2] = {0, 0};
+  uint16_t aux[2];
+  half2 dm;
+  if constexpr (kQ5) {
+    const block_q5_K* b = static_cast<const block_q5_K*>(vbq) + kbx;
+    const int* ql = (const int*)(b->qs + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
+    const int* qh = (const int*)(b->qh + 4 * ((iqs / 2) % 4));
+    v[0] = ql[0];
+    v[1] = ql[4];
+    vh[0] = qh[0] >> bq8_offset;
+    vh[1] = qh[4] >> bq8_offset;
+    const uint16_t* scales = (const uint16_t*)b->scales;
+    const int j = bq8_offset / 2;
+    if (j < 2) {
+      aux[0] = scales[j + 0] & 0x3f3f;
+      aux[1] = scales[j + 2] & 0x3f3f;
+    } else {
+      aux[0] = ((scales[j + 2] >> 0) & 0x0f0f) | ((scales[j - 2] & 0xc0c0) >> 2);
+      aux[1] = ((scales[j + 2] >> 4) & 0x0f0f) | ((scales[j - 0] & 0xc0c0) >> 2);
+    }
+    dm = b->dm;
+  } else {
+    const block_q4_K* b = static_cast<const block_q4_K*>(vbq) + kbx;
+    const int* q4 = (const int*)(b->qs + 16 * bq8_offset + 4 * ((iqs / 2) % 4));
+    v[0] = q4[0];
+    v[1] = q4[4];
+    q4_K_scale_pair(b, bq8_offset / 2, aux);
+    dm = b->dm;
+  }
+  const uint8_t* sc = (const uint8_t*)aux;
+  const uint8_t* m = sc + 2;
+  float sumf_d = 0.0f;
+  float sumf_m = 0.0f;
+#pragma unroll
+  for (int i = 0; i < qr; ++i) {
+    const block_q8_1* bq8i = bq8_1 + bq8_offset + i;
+    const float d8 = __low2float(bq8i->ds);
+    const int* q8 = (const int*)bq8i->qs + ((iqs / 2) % 4);
+    int v0i = (v[0] >> (4 * i)) & 0x0F0F0F0F;
+    int v1i = (v[1] >> (4 * i)) & 0x0F0F0F0F;
+    if constexpr (kQ5) {
+      v0i |= ((vh[0] >> i) << 4) & 0x10101010;
+      v1i |= ((vh[1] >> i) << 4) & 0x10101010;
+    }
+    const int dot1 = ggml_hip_dp4a(v1i, q8[4], ggml_hip_dp4a(v0i, q8[0], 0));
+    const int dot2 =
+        ggml_hip_dp4a(0x01010101, q8[4], ggml_hip_dp4a(0x01010101, q8[0], 0));
+    sumf_d = __fmaf_rn(d8, static_cast<float>(dot1 * sc[i]), sumf_d);
+    sumf_m = __fmaf_rn(d8, static_cast<float>(dot2 * m[i]), sumf_m);
+  }
+  const float2 dmf = __half22float2(dm);
+  return __fmaf_rn(dmf.x, sumf_d, -__fmul_rn(dmf.y, sumf_m));
+}
+
+static constexpr __device__ vec_dot_q_hip_t get_dense_vec_dot(ggml_type type) {
+  return type == GGML_TYPE_Q4_K   ? vec_dot_kquant_dense<false>
+         : type == GGML_TYPE_Q5_K ? vec_dot_kquant_dense<true>
+                                  : get_vec_dot_q_hip(type);
+}
+
 // One wave per weight row and up to eight inputs, for formats without a
-// specialized dense kernel (the Q6_K logits head). Each input's dot products
+// specialized dense kernel (the Q6_K logits head, and GSQ-RCO's K-quant, IQ
+// and Q2_0 projections). Each input's dot products
 // and reduction are those of a single-input launch, so decode, verification
 // and batched rows share the same arithmetic.
 template<ggml_type type, int tokens>
@@ -809,7 +880,7 @@ __launch_bounds__(64) static __global__ void mul_mat_vec_q_dense(
   constexpr int qi = ggml_hip_type_traits<type>::qi;
   constexpr int vdr = get_vdr_mmvq(type);
   constexpr int blocks_per_iter = vdr * 32 / qi;
-  constexpr auto dot = get_vec_dot_q_hip(type);
+  constexpr auto dot = get_dense_vec_dot(type);
   const int lane = threadIdx.x;
   const int row = blockIdx.x * 2 + threadIdx.y;
   if (row >= rows)
@@ -854,6 +925,30 @@ void mul_mat_vec_dense_dispatch(const void* weights, ggml_type type,
   switch (type) {
     case GGML_TYPE_Q6_K:
       launch_dense<GGML_TYPE_Q6_K>(weights, input, output, k, rows, tokens,
+                                   input_stride, stream);
+      break;
+    case GGML_TYPE_Q5_K:
+      launch_dense<GGML_TYPE_Q5_K>(weights, input, output, k, rows, tokens,
+                                   input_stride, stream);
+      break;
+    case GGML_TYPE_Q4_K:
+      launch_dense<GGML_TYPE_Q4_K>(weights, input, output, k, rows, tokens,
+                                   input_stride, stream);
+      break;
+    case GGML_TYPE_IQ4_XS:
+      launch_dense<GGML_TYPE_IQ4_XS>(weights, input, output, k, rows, tokens,
+                                     input_stride, stream);
+      break;
+    case GGML_TYPE_IQ4_NL:
+      launch_dense<GGML_TYPE_IQ4_NL>(weights, input, output, k, rows, tokens,
+                                     input_stride, stream);
+      break;
+    case GGML_TYPE_IQ3_S:
+      launch_dense<GGML_TYPE_IQ3_S>(weights, input, output, k, rows, tokens,
+                                    input_stride, stream);
+      break;
+    case GGML_TYPE_Q2_0:
+      launch_dense<GGML_TYPE_Q2_0>(weights, input, output, k, rows, tokens,
                                    input_stride, stream);
       break;
     default:

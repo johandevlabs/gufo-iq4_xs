@@ -69,8 +69,9 @@ int qfn_mmq_q8_0_dense_vec_preq(const void* W_q8_0, const void* W_gate,
                                 const void* X_q8, float* out_f32, int M, int N,
                                 int K, hipStream_t stream);
 
-// 1–8 rows over a dense Q6_K matrix (the logits head), x in
-// qfn_mmq_quantize_q8_1's layout. Each row's arithmetic is independent of N.
+// 1–8 rows over a dense Q6_K, Q5_K, Q4_K, IQ4_XS, IQ4_NL, IQ3_S or Q2_0
+// matrix, x in qfn_mmq_quantize_q8_1's layout. Each row's arithmetic is
+// independent of N.
 int qfn_mmq_dense_vec_preq(int weight_type, const void* W, const void* X_q8,
                            float* out_f32, int M, int N, int K,
                            hipStream_t stream);

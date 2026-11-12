@@ -110,7 +110,7 @@ __device__ __forceinline__ float Bf16ToF32(std::uint16_t h) {
   return __uint_as_float(static_cast<std::uint32_t>(h) << 16);
 }
 
-/// Reads element i of a Q8_0 / Q6_K / IQ4_XS / F32 / BF16 / F16 row.
+/// Reads element i of a Q8_0 / Q6_K / IQ4_XS / IQ3_S / F32 / BF16 / F16 row.
 __device__ __forceinline__ float RowElement(const void* row, WeightType type,
                                             std::uint32_t i) {
   switch (type) {
@@ -162,6 +162,27 @@ __device__ __forceinline__ float RowElement(const void* row, WeightType type,
       return __half2float(d) * static_cast<float>(static_cast<int>(ls) - 32) *
              static_cast<float>(value);
     }
+    case WeightType::kIQ3_S: {
+      // block_iq3_s: d, qs[64], qh[8], signs[32], scales[4]. K32 block ib
+      // reads grid indices qs[8 ib + 2 l + e / 4] with high bit 2 l + e / 4
+      // of qh[ib], sign bit e of signs[4 ib + l] and the scale nibble
+      // ib % 2 of scales[ib / 2], for element 8 l + e.
+      const auto* blk = static_cast<const std::uint8_t*>(row) + (i / 256) * 110;
+      const std::uint32_t ib = (i % 256) / 32;
+      const std::uint32_t l = (i % 32) / 8;
+      const std::uint32_t e = i % 8;
+      const std::uint32_t pick = (2 * l) + (e / 4);
+      const std::uint32_t index =
+          blk[2 + (8 * ib) + pick] | (((blk[66 + ib] >> pick) & 1U) << 8U);
+      const std::uint32_t magnitude =
+          (kIq3sGrid[index] >> (8 * (e % 4))) & 0xFFU;
+      const bool negative = ((blk[74 + (4 * ib) + l] >> e) & 1U) != 0;
+      const std::uint32_t ls = (blk[106 + (ib / 2)] >> (4 * (ib % 2))) & 0xFU;
+      const __half d = *reinterpret_cast<const __half*>(blk);
+      const float value = __half2float(d) * static_cast<float>(1 + (2 * ls)) *
+                          static_cast<float>(magnitude);
+      return negative ? -value : value;
+    }
     default:
       return 0.0f;
   }
@@ -181,6 +202,8 @@ __device__ __forceinline__ std::size_t RowBytes(WeightType type,
       return static_cast<std::size_t>(k / 256) * 210;
     case WeightType::kIQ4_XS:
       return static_cast<std::size_t>(k / 256) * 136;
+    case WeightType::kIQ3_S:
+      return static_cast<std::size_t>(k / 256) * 110;
     default:
       return 0;
   }

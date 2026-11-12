@@ -56,7 +56,7 @@ enum class WeightType : std::uint32_t {
 };
 
 /// res[t][s][hidden] = table[tokens[t]] for every stream s (Q8_0, Q6_K,
-/// IQ4_XS, F16, BF16 or F32 rows).
+/// IQ4_XS, IQ3_S, F16, BF16 or F32 rows).
 void EmbedTokens(const void* table, WeightType type, const std::int32_t* tokens,
                  float* res, std::uint32_t n_tokens, std::uint32_t hidden,
                  std::uint32_t streams, hipStream_t stream);

@@ -105,12 +105,13 @@ struct Uploader {
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
-    // Q6_K dense projections read F16 activation rows in prefill too.
+    // Q6_K, K-quant, IQ and Q2_0 dense projections read F16 activation rows
+    // in prefill too.
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16 ||
-        (t.type == core::GgmlType::kQ6_K && t.experts == 1)) {
+        (GemvDenseFormat(t.type) && t.experts == 1)) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
-    if ((t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ6_K) &&
+    if ((t.type == core::GgmlType::kQ8_0 || GemvDenseFormat(t.type)) &&
         t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
@@ -527,7 +528,8 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   };
   const auto dense_supported = [&](const TensorRef& t) {
     using enum core::GgmlType;
-    return device_format(t, {kQ8_0, kQ6_K, kBF16, kF16, kF32});
+    return device_format(t, {kQ8_0, kQ6_K, kQ5_K, kQ4_K, kIQ4_XS, kIQ4_NL,
+                             kIQ3_S, kQ2_0, kBF16, kF16, kF32});
   };
   const auto expert_supported = [&](const TensorRef& t) {
     using enum core::GgmlType;
@@ -572,7 +574,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   {
     using enum core::GgmlType;
     if (!device_format(w.token_embd,
-                       {kQ8_0, kQ6_K, kIQ4_XS, kBF16, kF16, kF32}) ||
+                       {kQ8_0, kQ6_K, kIQ4_XS, kIQ3_S, kBF16, kF16, kF32}) ||
         !dense_supported(w.output))
       return nullptr;
   }

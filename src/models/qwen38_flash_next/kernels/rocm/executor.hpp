@@ -569,6 +569,10 @@ private:
   /// Reuse or populate the F16 activation staging buffer.
   void PrepareHalfInput(const float* x, std::uint32_t rows,
                         std::uint32_t cols) const;
+  /// A prefill pass over a K-quant, IQ or Q2_0 dense projection: F16 rows
+  /// and the routed F16 GEMM with one expert holding every row.
+  bool DenseRoutedF16(const DeviceTensor& w, const float* x, float* out,
+                      std::uint32_t n_tokens, std::string* error_msg) const;
   /// Whether a wide dense Q8_0 projection takes the F16 WMMA GEMM.
   bool DenseF16Route(const DeviceTensor& w, std::uint32_t n_tokens) const;
   /// DenseF16Route, or a stacked Q6_K SSM or attention projection in
@@ -811,6 +815,11 @@ private:
     std::int32_t* rows_token;
     std::int32_t* rows_slot;
     std::int32_t* routed_tiles;  ///< (expert | tile << 16) per launched tile
+    // Dense prefill through the routed F16 GEMM: one expert whose bucket is
+    // every row, in order. The bounds' end is set per launch.
+    std::int32_t* dense_rows;    ///< the identity map over max_batch rows
+    std::int32_t* dense_tiles;   ///< tile t << 16 of expert 0
+    std::int32_t* dense_bounds;  ///< {0, rows}
     float* weights;
     float* gate_e;
     float* up_e;

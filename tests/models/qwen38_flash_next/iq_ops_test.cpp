@@ -1,8 +1,8 @@
 // IQ3_S/IQ4_NL/IQ4_XS (UD-IQ4_XS) and IQ2_S/IQ3_XXS/Q2_0 (UD-IQ3_XXS) routed
-// experts and the Q6_K logits head: accuracy against an F64 dot product over
-// the CPU dequantizers, and the exactness contracts of the vector paths
-// (batched rows, paired and fused gate/up all match single-row decode bit for
-// bit).
+// experts, the Q6_K logits head and GSQ-RCO's K-quant, IQ and Q2_0 dense
+// projections: accuracy against an F64 dot product over the CPU dequantizers,
+// and the exactness contracts of the vector paths (batched rows, paired and
+// fused gate/up all match single-row decode bit for bit).
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -74,6 +74,7 @@ struct Format {
   std::size_t bytes;
   std::size_t scale_offset;  ///< byte offset of the F16 block scale
   void (*dequantize)(const void*, float*, std::size_t);
+  std::size_t min_offset{0};  ///< byte offset of a K-quant's F16 dmin, or 0
 };
 
 const Format kIQ3_S{
@@ -92,6 +93,10 @@ const Format kQ5_0{
     GgmlType::kQ5_0, "Q5_0", 32, 22, 0, gufo::quant::DequantizeQ5_0};
 const Format kQ6_K{
     GgmlType::kQ6_K, "Q6_K", 256, 210, 208, gufo::quant::DequantizeQ6_K};
+const Format kQ5_K{
+    GgmlType::kQ5_K, "Q5_K", 256, 176, 0, gufo::quant::DequantizeQ5_K, 2};
+const Format kQ4_K{
+    GgmlType::kQ4_K, "Q4_K", 256, 144, 0, gufo::quant::DequantizeQ4_K, 2};
 
 /// Random blocks of `format` (every code byte random, a moderate positive
 /// F16 scale) plus their dequantized values, row-major [matrices][m][k].
@@ -114,6 +119,10 @@ Weights Make(const Format& f, std::size_t matrices, std::size_t m,
     const float magnitude = f.type == GgmlType::kQ6_K ? 0.0004F : 0.004F;
     const __half d = __float2half(Uniform(&seed, magnitude) + 1.5F * magnitude);
     std::memcpy(w.packed.data() + b * f.bytes + f.scale_offset, &d, 2);
+    if (f.min_offset != 0) {
+      const __half dmin = __float2half(Uniform(&seed, magnitude));
+      std::memcpy(w.packed.data() + b * f.bytes + f.min_offset, &dmin, 2);
+    }
   }
   for (std::size_t r = 0; r < rows; ++r)
     f.dequantize(w.packed.data() + r * blocks_per_row * f.bytes,
@@ -289,8 +298,9 @@ void CheckIqExpertLayouts() {
   Expect(!ok(kIQ3_S, kIQ3_S, kIQ4_NL), "IQ experts outside the WMMA shape");
 }
 
-/// Embedding lookup over IQ4_XS (UD-IQ4_XS) and Q6_K (UD-IQ3_XXS) tables:
-/// every element equal to the CPU decoder's value, copied to each stream.
+/// Embedding lookup over IQ4_XS (UD-IQ4_XS), Q6_K (UD-IQ3_XXS) and IQ3_S
+/// (GSQ-RCO IQ3_XXS) tables: every element equal to the CPU decoder's value,
+/// copied to each stream.
 void CheckEmbedding(const Format& f) {
   constexpr std::size_t kHidden = 2560, kVocab = 97, kStreams = 2;
   const Weights w = Make(f, 1, kVocab, kHidden, 0xE3BEDU);
@@ -316,13 +326,15 @@ void CheckEmbedding(const Format& f) {
     CheckHip(hipFree(p), "free");
 }
 
-/// Q6_K head: 1–8 rows per launch, each row bitwise equal to a one-row
-/// launch, all within tolerance of F64.
-void CheckQ6KHead(int rows, int cols) {
-  const std::string tag =
-      "Q6_K head m=" + std::to_string(rows) + " k=" + std::to_string(cols);
+/// Dense GEMV (the Q6_K head, GSQ-RCO's dense projections in decode): 1–8
+/// rows per launch, each row bitwise equal to a one-row launch, all within
+/// tolerance of F64.
+void CheckDenseGemv(const Format& f, int rows, int cols) {
+  const std::string tag = std::string(f.name) +
+                          " GEMV m=" + std::to_string(rows) +
+                          " k=" + std::to_string(cols);
   constexpr int tokens = 8;
-  const Weights w = Make(kQ6_K, 1, rows, cols, 0x6060U + rows);
+  const Weights w = Make(f, 1, rows, cols, 0x6060U + rows);
   std::vector<float> x(static_cast<std::size_t>(tokens) * cols);
   std::uint32_t seed = 91;
   for (auto& v : x)
@@ -343,7 +355,7 @@ void CheckQ6KHead(int rows, int cols) {
   const std::vector<float> zeros(static_cast<std::size_t>(tokens) * rows);
   auto* single = Upload(zeros);
   auto* out = Upload(zeros);
-  const int type = static_cast<int>(kQ6_K.type);
+  const int type = static_cast<int>(f.type);
   for (int t = 0; t < tokens; ++t)
     Expect(!qfn_mmq_dense_vec_preq(
                type, dw, static_cast<const std::uint8_t*>(xq) + t * row_q8,
@@ -363,6 +375,68 @@ void CheckQ6KHead(int rows, int cols) {
   std::cout << tag << ": rel err " << error << '\n';
   for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx), xq,
                   static_cast<void*>(single), static_cast<void*>(out)})
+    CheckHip(hipFree(p), "free");
+}
+
+/// Dense prefill through the routed F16 GEMM: one expert whose bucket is
+/// every row, in order, as Executor::DenseRoutedF16 launches it. Within
+/// tolerance of F64 over the F16 activations, and each row's bits
+/// independent of the pass width.
+void CheckDenseRouted(const Format& f, int rows, int cols) {
+  const std::string tag = std::string(f.name) +
+                          " dense F16 m=" + std::to_string(rows) +
+                          " k=" + std::to_string(cols);
+  constexpr int kTileRows = 48, kTokens = 113;
+  const Weights w = Make(f, 1, rows, cols, 0xD00DU + rows);
+  std::vector<__half> x(static_cast<std::size_t>(kTokens) * cols);
+  std::uint32_t seed = 17;
+  for (auto& v : x)
+    v = __float2half(Uniform(&seed, 3.0F));
+  std::vector<float> xf(x.size());
+  for (std::size_t i = 0; i < x.size(); ++i)
+    xf[i] = __half2float(x[i]);
+  std::vector<double> ref(static_cast<std::size_t>(kTokens) * rows);
+  for (int t = 0; t < kTokens; ++t)
+    for (int r = 0; r < rows; ++r)
+      ref[static_cast<std::size_t>(t) * rows + r] =
+          Dot(w.values.data() + static_cast<std::size_t>(r) * cols,
+              xf.data() + static_cast<std::size_t>(t) * cols, cols);
+  std::vector<std::int32_t> identity(kTokens), tiles;
+  for (int i = 0; i < kTokens; ++i)
+    identity[i] = i;
+  for (int i = 0; i * kTileRows < kTokens; ++i)
+    tiles.push_back(i << 16);
+  auto* dw = Upload(w.packed);
+  auto* dx = Upload(x);
+  auto* rows_map = Upload(identity);
+  auto* tile_map = Upload(tiles);
+  const std::vector<float> zeros(static_cast<std::size_t>(kTokens) * rows);
+  std::vector<float> full;
+  for (int n : {kTokens, 1, 47, 49}) {
+    auto* bounds = Upload(std::vector<std::int32_t>{0, n});
+    auto* out = Upload(zeros);
+    Expect(q::RoutedF16Gemm(
+               dw, static_cast<q::WeightType>(f.type), dx, tile_map,
+               static_cast<std::uint32_t>((n + kTileRows - 1) / kTileRows),
+               kTileRows, bounds, rows_map, rows_map, nullptr, out, nullptr,
+               rows, cols, nullptr),
+           tag + ": launch rejected");
+    const auto got = Download(out, zeros.size());
+    if (n == kTokens) {
+      const double error = RelativeError(got, ref);
+      Expect(error < 2e-3, tag + ": error " + std::to_string(error));
+      std::cout << tag << ": rel err " << error << '\n';
+      full = got;
+    } else {
+      Expect(!std::memcmp(got.data(), full.data(),
+                          static_cast<std::size_t>(n) * rows * 4),
+             tag + ": " + std::to_string(n) + " rows changed the bits");
+    }
+    for (void* p : {static_cast<void*>(bounds), static_cast<void*>(out)})
+      CheckHip(hipFree(p), "free");
+  }
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dx),
+                  static_cast<void*>(rows_map), static_cast<void*>(tile_map)})
     CheckHip(hipFree(p), "free");
 }
 
@@ -390,12 +464,26 @@ int main() {
     CheckRouted(kQ5_0, 2561, 640, 9, 1);
     CheckEmbedding(kIQ4_XS);
     CheckEmbedding(kQ6_K);
-    CheckQ6KHead(300, 2560);
-    CheckQ6KHead(301, 2560);
+    CheckEmbedding(kIQ3_S);
+    CheckDenseGemv(kQ6_K, 300, 2560);
+    CheckDenseGemv(kQ6_K, 301, 2560);
+    // GSQ-RCO dense projections: K 2560 (attention, linear attention, shared
+    // gate/up), 6144 (output projections) and 640 (shared down).
+    for (const Format* f : {&kQ5_K, &kQ4_K, &kIQ4_XS, &kIQ3_S}) {
+      CheckDenseGemv(*f, 301, 2560);
+      CheckDenseGemv(*f, 257, 6144);
+      CheckDenseRouted(*f, 301, 2560);
+      CheckDenseRouted(*f, 257, 6144);
+    }
+    for (const Format* f : {&kIQ4_NL, &kQ2_0}) {
+      CheckDenseGemv(*f, 2561, 640);
+      CheckDenseRouted(*f, 2561, 640);
+    }
   } catch (const std::exception& e) {
     std::cerr << "FAILED: " << e.what() << '\n';
     return 1;
   }
-  std::cout << "IQ routed experts and Q6_K head: all checks passed\n";
+  std::cout << "IQ routed experts, dense projections and Q6_K head: all "
+               "checks passed\n";
   return 0;
 }

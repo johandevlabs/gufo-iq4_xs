@@ -28,6 +28,15 @@ namespace gufo::models::qwen38_flash_next::rocm {
          c.hidden_size % 256 == 0 && c.expert_ff % 64 == 0;
 }
 
+/// Dense formats the vector GEMV reads with Q8_1 activations in every pass
+/// outside prefill, and an F16 GEMM in prefill: Q6_K through its own tiles,
+/// the others through the routed F16 GEMM with one expert holding every row.
+[[nodiscard]] constexpr bool GemvDenseFormat(core::GgmlType type) noexcept {
+  using enum core::GgmlType;
+  return type == kQ6_K || type == kQ5_K || type == kQ4_K || type == kIQ4_XS ||
+         type == kIQ4_NL || type == kIQ3_S || type == kQ2_0;
+}
+
 /// Expert formats with no tiled MMQ route: the IQ formats, Q2_0 and Q5_0.
 [[nodiscard]] inline bool IsIqExpert(core::GgmlType type) {
   return type == core::GgmlType::kIQ3_S || type == core::GgmlType::kIQ4_NL ||

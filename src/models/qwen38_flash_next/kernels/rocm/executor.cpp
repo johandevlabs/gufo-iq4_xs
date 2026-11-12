@@ -76,6 +76,8 @@ WeightType SmallType(GgmlType type) {
       return WeightType::kQ6_K;
     case GgmlType::kIQ4_XS:
       return WeightType::kIQ4_XS;
+    case GgmlType::kIQ3_S:
+      return WeightType::kIQ3_S;
     case GgmlType::kF32:
       return WeightType::kF32;
     default:
@@ -126,6 +128,9 @@ bool UnpaddedQ8(std::uint32_t k) {
   return k % 32 == 0 &&
          qfn_mmq_q8_1_bytes(1, static_cast<int>(k)) == k / 32 * 36;
 }
+
+/// Token rows per tile of the identity-routed dense prefill GEMM.
+constexpr std::uint32_t kDenseTileRows = 48;
 
 /// Key-tile splits per row of a narrow attention batch (decode at depth).
 constexpr std::uint32_t kAttnSplits = 8;
@@ -1224,6 +1229,32 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     s.routed_tiles =
         Alloc<std::int32_t>(a, 3 * RoutedTileCapacity(slots, c), error_msg);
   }
+  {
+    const std::size_t tiles = (T + kDenseTileRows - 1) / kDenseTileRows;
+    s.dense_rows = Alloc<std::int32_t>(a, T, error_msg);
+    s.dense_tiles = Alloc<std::int32_t>(a, tiles, error_msg);
+    s.dense_bounds = Alloc<std::int32_t>(a, 2, error_msg);
+    if (s.dense_rows == nullptr || s.dense_tiles == nullptr ||
+        s.dense_bounds == nullptr) {
+      return nullptr;
+    }
+    std::vector<std::int32_t> rows(T);
+    std::vector<std::int32_t> tile_ids(tiles);
+    for (std::size_t i = 0; i < T; ++i)
+      rows[i] = static_cast<std::int32_t>(i);
+    for (std::size_t i = 0; i < tiles; ++i)
+      tile_ids[i] = static_cast<std::int32_t>(i << 16U);
+    if (!Check(hipMemcpy(s.dense_rows, rows.data(), T * sizeof(std::int32_t),
+                         hipMemcpyHostToDevice),
+               "dense row map", error_msg) ||
+        !Check(hipMemcpy(s.dense_tiles, tile_ids.data(),
+                         tiles * sizeof(std::int32_t), hipMemcpyHostToDevice),
+               "dense tile map", error_msg) ||
+        !Check(hipMemset(s.dense_bounds, 0, 2 * sizeof(std::int32_t)),
+               "dense bounds", error_msg)) {
+      return nullptr;
+    }
+  }
   s.weights = f32(slots);
   cursor = stage;
   s.gate_e = take(slots * c.expert_ff);
@@ -1930,12 +1961,13 @@ void Executor::AdoptYarnFactor(Session& s, float factor) {
 
 bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
                      std::string* error_msg) const {
-  if (w.type == GgmlType::kQ6_K && q.data != nullptr) {
+  if (GemvDenseFormat(w.type) && q.data != nullptr) {
     if (w.cols != q.k ||
         qfn_mmq_dense_vec_preq(static_cast<int>(w.type), w.data, q.data, out,
                                static_cast<int>(w.rows), static_cast<int>(q.n),
                                static_cast<int>(w.cols), stream_) != 0) {
-      AssignError(error_msg, "Q6_K GEMV failed");
+      AssignError(error_msg,
+                  std::string(core::ToString(w.type)) + " GEMV failed");
       return false;
     }
     return true;
@@ -2034,6 +2066,35 @@ bool Executor::StackedF16Route(const DeviceTensor& w,
           w.cols <= model_->max_half_cols());
 }
 
+bool Executor::DenseRoutedF16(const DeviceTensor& w, const float* x, float* out,
+                              std::uint32_t n_tokens,
+                              std::string* error_msg) const {
+  // The routed kernels decode each format exactly as for the experts, with
+  // the whole K extent accumulated in F32 and every tile height giving each
+  // row the same bits; one expert's bucket is the pass's rows in order.
+  const std::uint32_t piece = static_cast<std::uint32_t>(options_.max_batch);
+  for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
+    const std::uint32_t rows = std::min(piece, n_tokens - r0);
+    PrepareHalfInput(x + static_cast<std::size_t>(r0) * w.cols, rows, w.cols);
+    if (!Check(hipMemsetD32Async(
+                   reinterpret_cast<hipDeviceptr_t>(s_.dense_bounds + 1),
+                   static_cast<int>(rows), 1, stream_),
+               "dense bounds", error_msg) ||
+        !RoutedF16Gemm(w.data, static_cast<WeightType>(w.type),
+                       static_cast<const __half*>(s_.x_half), s_.dense_tiles,
+                       (rows + kDenseTileRows - 1) / kDenseTileRows,
+                       kDenseTileRows, s_.dense_bounds, s_.dense_rows,
+                       s_.dense_rows, nullptr,
+                       out + static_cast<std::size_t>(r0) * w.rows, nullptr,
+                       w.rows, w.cols, stream_)) {
+      AssignError(error_msg, std::string(core::ToString(w.type)) +
+                                 " dense F16 GEMM failed");
+      return false;
+    }
+  }
+  return true;
+}
+
 bool Executor::DenseF16Route(const DeviceTensor& w,
                              std::uint32_t n_tokens) const {
   return w.type == GgmlType::kQ8_0 && MatrixRows(n_tokens) &&
@@ -2064,7 +2125,11 @@ bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
     }
     return true;
   }
-  if (w.type == GgmlType::kQ6_K) {
+  if (GemvDenseFormat(w.type) && w.type != GgmlType::kQ6_K && prefill_phase &&
+      w.data != model_->output().data && w.cols <= model_->max_half_cols()) {
+    return DenseRoutedF16(w, x, out, n_tokens, error_msg);
+  }
+  if (GemvDenseFormat(w.type)) {
     // The logits head, and the trunk outside prefill: every row keeps the
     // single-row GEMV arithmetic, so decode, verification and batched heads
     // agree; wider calls run eight rows per launch.
