@@ -196,6 +196,52 @@ int main(int argc, char** argv) try {
     CheckHip(hipFree(y), "hipFree");
   }
 
+  // GSQ-RCO's dense IQ4_XS linear-attention input (2560 -> 10240) through
+  // the routed F16 GEMM with one expert holding every row, at 48- and
+  // 128-token tiles.
+  {
+    constexpr std::size_t m = 10240;
+    constexpr std::size_t k = 2560;
+    constexpr std::size_t block_bytes = 136;
+    std::vector<std::uint8_t> packed(m * (k / 256) * block_bytes);
+    std::uint32_t seed = 71U;
+    for (auto& b : packed)
+      b = static_cast<std::uint8_t>(Next(&seed));
+    for (std::size_t b = 0; b < packed.size(); b += block_bytes) {
+      const __half d = __float2half(1.0F / 4096.0F);
+      std::memcpy(&packed[b], &d, 2);
+    }
+    auto* w = Upload(packed);
+    auto* x = Upload(Activations(tokens * k, 72U));
+    auto* y = static_cast<float*>(Zeros(tokens * m * sizeof(float)));
+    std::vector<std::int32_t> rows(tokens), tiles((tokens + 15) / 16);
+    for (std::uint32_t i = 0; i < tokens; ++i)
+      rows[i] = static_cast<std::int32_t>(i);
+    for (std::size_t i = 0; i < tiles.size(); ++i)
+      tiles[i] = static_cast<std::int32_t>(i << 16U);
+    auto* d_rows = Upload(rows);
+    auto* d_tiles = Upload(tiles);
+    auto* d_bounds =
+        Upload(std::vector<std::int32_t>{0, static_cast<std::int32_t>(tokens)});
+    for (const std::uint32_t tile_rows : {48U, 128U}) {
+      const double ms = MedianMs(
+          [&] {
+            if (!q::RoutedF16Gemm(w, q::WeightType::kIQ4_XS, x, d_tiles,
+                                  (tokens + tile_rows - 1) / tile_rows,
+                                  tile_rows, d_bounds, d_rows, d_rows, nullptr,
+                                  y, nullptr, m, k, nullptr))
+              throw std::runtime_error("dense RoutedF16Gemm");
+          },
+          reps);
+      report(tile_rows == 48 ? "iq4-48" : "iq4-128", ms, 2.0 * tokens * m * k,
+             Hash(y, tokens * m * sizeof(float)));
+    }
+    for (void* p : {static_cast<void*>(w), static_cast<void*>(x),
+                    static_cast<void*>(y), static_cast<void*>(d_rows),
+                    static_cast<void*>(d_tiles), static_cast<void*>(d_bounds)})
+      CheckHip(hipFree(p), "hipFree");
+  }
+
   // GSQ-RCO's BF16 hyper-connection down (10240 -> 320) and up (320 ->
   // 10240) projections over BF16 activations.
   for (const auto [m, k] : {std::pair<std::size_t, std::size_t>{320, 10240},

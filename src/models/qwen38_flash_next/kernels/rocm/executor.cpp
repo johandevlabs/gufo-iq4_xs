@@ -129,8 +129,10 @@ bool UnpaddedQ8(std::uint32_t k) {
          qfn_mmq_q8_1_bytes(1, static_cast<int>(k)) == k / 32 * 36;
 }
 
-/// Token rows per tile of the identity-routed dense prefill GEMM.
-constexpr std::uint32_t kDenseTileRows = 48;
+/// Token rows per tile of the identity-routed dense prefill GEMM: each tile
+/// decodes the weights once, and 128 rows beat 48 by 25-30 % on GSQ-RCO's
+/// 10240 x 2560 IQ4_XS projection at 512-4,096 tokens, bit for bit.
+constexpr std::uint32_t kDenseTileRows = 128;
 
 /// Key-tile splits per row of a narrow attention batch (decode at depth).
 constexpr std::uint32_t kAttnSplits = 8;

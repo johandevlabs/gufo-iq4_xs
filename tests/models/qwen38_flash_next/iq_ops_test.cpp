@@ -384,14 +384,14 @@ void CheckDenseGemv(const Format& f, int rows, int cols) {
 }
 
 /// Dense prefill through the routed F16 GEMM: one expert whose bucket is
-/// every row, in order, as Executor::DenseRoutedF16 launches it. Within
-/// tolerance of F64 over the F16 activations, and each row's bits
-/// independent of the pass width.
+/// every row, in order, as Executor::DenseRoutedF16 launches it (128-token
+/// tiles). Within tolerance of F64 over the F16 activations, each row's bits
+/// independent of the pass width, and equal to 48-token tiles.
 void CheckDenseRouted(const Format& f, int rows, int cols) {
   const std::string tag = std::string(f.name) +
                           " dense F16 m=" + std::to_string(rows) +
                           " k=" + std::to_string(cols);
-  constexpr int kTileRows = 48, kTokens = 113;
+  constexpr int kTileRows = 128, kTokens = 213;
   const Weights w = Make(f, 1, rows, cols, 0xD00DU + rows);
   std::vector<__half> x(static_cast<std::size_t>(kTokens) * cols);
   std::uint32_t seed = 17;
@@ -409,7 +409,7 @@ void CheckDenseRouted(const Format& f, int rows, int cols) {
   std::vector<std::int32_t> identity(kTokens), tiles;
   for (int i = 0; i < kTokens; ++i)
     identity[i] = i;
-  for (int i = 0; i * kTileRows < kTokens; ++i)
+  for (int i = 0; i * 16 < kTokens; ++i)
     tiles.push_back(i << 16);
   auto* dw = Upload(w.packed);
   auto* dx = Upload(x);
@@ -417,7 +417,7 @@ void CheckDenseRouted(const Format& f, int rows, int cols) {
   auto* tile_map = Upload(tiles);
   const std::vector<float> zeros(static_cast<std::size_t>(kTokens) * rows);
   std::vector<float> full;
-  for (int n : {kTokens, 1, 47, 49}) {
+  for (int n : {kTokens, 1, 47, 49, 127, 129}) {
     auto* bounds = Upload(std::vector<std::int32_t>{0, n});
     auto* out = Upload(zeros);
     Expect(q::RoutedF16Gemm(
@@ -440,8 +440,23 @@ void CheckDenseRouted(const Format& f, int rows, int cols) {
     for (void* p : {static_cast<void*>(bounds), static_cast<void*>(out)})
       CheckHip(hipFree(p), "free");
   }
+  // The 48-token tiles of the expert route give the same bits.
+  {
+    auto* bounds = Upload(std::vector<std::int32_t>{0, kTokens});
+    auto* out = Upload(zeros);
+    Expect(
+        q::RoutedF16Gemm(dw, static_cast<q::WeightType>(f.type), dx, tile_map,
+                         (kTokens + 47) / 48, 48, bounds, rows_map, rows_map,
+                         nullptr, out, nullptr, rows, cols, nullptr),
+        tag + ": 48-token launch rejected");
+    Expect(!std::memcmp(Download(out, zeros.size()).data(), full.data(),
+                        zeros.size() * 4),
+           tag + ": 48- and 128-token tiles differ");
+    for (void* p : {static_cast<void*>(bounds), static_cast<void*>(out)})
+      CheckHip(hipFree(p), "free");
+  }
   // A prefill chunk boundary: the last rows as their own pass.
-  for (int first : {kTokens - 9, 64, 17}) {
+  for (int first : {kTokens - 9, 128, 64, 17}) {
     const int n = kTokens - first;
     auto* bounds = Upload(std::vector<std::int32_t>{0, n});
     auto* out = Upload(zeros);

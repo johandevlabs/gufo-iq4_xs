@@ -8346,6 +8346,12 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                                  rows_in, rows_out, swiglu_gate, out, out_half,
                                  m, k, stream);
     case 128: {
+      // F32 rows of a dense projection (one expert holding every row): the
+      // generic tile, decoding each weight once per 128 tokens.
+      if (out != nullptr && swiglu_gate == nullptr)
+        return LaunchRoutedF16<128>(w, type, x, tiles, n_tiles, pad_bounds,
+                                    rows_in, rows_out, nullptr, out, nullptr, m,
+                                    k, stream);
       if (out_half == nullptr || swiglu_gate != nullptr)
         return false;
       const dim3 grid(static_cast<unsigned int>((m + 127) / 128), n_tiles);
