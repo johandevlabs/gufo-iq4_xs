@@ -64,6 +64,23 @@ static __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
     return s * 0x01010101;
 }
 
+// The 8-bit sign mask of a 7-bit ksigns_iq2xs index (its eighth bit is the
+// parity), as unpack_ksigns before the broadcast.
+static __device__ __forceinline__ uint32_t ksigns8(const uint32_t v) {
+    const uint32_t s = v & 0x7F;
+    return s ^ ((__popc(s) & 1) << 7);
+}
+
+// Four IQ grid magnitudes (bytes 1..127) with byte b negated where bit b of
+// `bits` is set: the bytes of __vsub4(g ^ __vcmpne4(sel, 0), __vcmpne4(sel, 0))
+// for the matching selector. A negated byte, (m ^ 0xFF) + 1, never carries
+// into the next, so two 32-bit operations replace the per-byte compare and
+// subtract (which this target emulates byte by byte).
+static __device__ __forceinline__ int iq_signed4(const uint32_t magnitudes, const uint32_t bits) {
+    const uint32_t ones = ((bits & 0x0F) * 0x00204081u) & 0x01010101u;
+    return (int) ((magnitudes ^ (ones * 0xFFu)) + ones);
+}
+
 // VDR = vec dot ratio, how many contiguous integers each thread processes when the vec dot kernel is called
 // MMVQ = mul_mat_vec_q, MMQ = mul_mat_q
 
@@ -1000,15 +1017,13 @@ static __device__ __forceinline__ float vec_dot_iq2_xxs_q8_1(
 #pragma unroll
     for (int k0 = 0; k0 < 8; k0 += 2) {
         const uint2 grid_pos = ((const uint2*)iq2xxs_grid)[aux8[k0/2]];
-        const uint32_t signs = unpack_ksigns(aux32 >> (7 * k0 / 2));
+        const uint32_t signs = ksigns8(aux32 >> (7 * k0 / 2));
 
-        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
-        const int grid0 = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int grid0 = iq_signed4(grid_pos.x, signs);
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, k0 + 0);
         sumi = ggml_hip_dp4a(grid0, u0, sumi);
 
-        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
-        const int grid1 = __vsub4(grid_pos.y ^ signs1, signs1);
+        const int grid1 = iq_signed4(grid_pos.y, signs >> 4);
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, k0 + 1);
         sumi = ggml_hip_dp4a(grid1, u1, sumi);
     }
@@ -1037,14 +1052,12 @@ static __device__ __forceinline__ float vec_dot_iq2_xs_q8_1(
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const uint2 grid_pos = ((const uint2*)iq2xs_grid)[q2[l0/2] & 0x1FF];
-        const uint32_t signs = unpack_ksigns(q2[l0/2] >> 9);
+        const uint32_t signs = ksigns8(q2[l0/2] >> 9);
 
-        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
-        const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int grid_l = iq_signed4(grid_pos.x, signs);
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
 
-        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
-        const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
+        const int grid_h = iq_signed4(grid_pos.y, signs >> 4);
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
 
         if (l0 < 4) {
@@ -1085,11 +1098,8 @@ static __device__ __forceinline__ float vec_dot_iq2_s_q8_1(
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int * grid_pos = (const int *)(iq2s_grid + (qs[l0/2] | ((qh << (8-l0)) & 0x300)));
 
-        const int signs0 = __vcmpne4(((signs_packed_8[l0/2] & 0x03) << 7) | ((signs_packed_8[l0/2] & 0x0C) << 21), 0x00000000);
-        const int signs1 = __vcmpne4(((signs_packed_8[l0/2] & 0x30) << 3) | ((signs_packed_8[l0/2] & 0xC0) << 17), 0x00000000);
-
-        const int grid_l = __vsub4(grid_pos[0] ^ signs0, signs0);
-        const int grid_h = __vsub4(grid_pos[1] ^ signs1, signs1);
+        const int grid_l = iq_signed4(grid_pos[0], signs_packed_8[l0/2]);
+        const int grid_h = iq_signed4(grid_pos[1], signs_packed_8[l0/2] >> 4);
 
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
@@ -1124,15 +1134,13 @@ static __device__ __forceinline__ float vec_dot_iq3_xxs_q8_1(
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int2 grid_pos = make_int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
-        const uint32_t signs = unpack_ksigns(aux32 >> (7*l0/2));
+        const uint32_t signs = ksigns8(aux32 >> (7*l0/2));
 
-        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
-        const int grid_l = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int grid_l = iq_signed4(grid_pos.x, signs);
 
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
 
-        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
-        const int grid_h = __vsub4(grid_pos.y ^ signs1, signs1);
+        const int grid_h = iq_signed4(grid_pos.y, signs >> 4);
 
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
 
@@ -1173,14 +1181,8 @@ struct Iq3sMoeFragment {
       const int2 grid_pos =
           make_int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
                     iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
-      const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) |
-                                       ((signs_packed_8[l0 / 2] & 0x0C) << 21),
-                                   0x00000000);
-      const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) |
-                                       ((signs_packed_8[l0 / 2] & 0xC0) << 17),
-                                   0x00000000);
-      grid[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
-      grid[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+      grid[l0 + 0] = iq_signed4(grid_pos.x, signs_packed_8[l0 / 2]);
+      grid[l0 + 1] = iq_signed4(grid_pos.y, signs_packed_8[l0 / 2] >> 4);
     }
     scale = 1 + 2 * ((bq3->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
     d = __half2float(bq3->d);
