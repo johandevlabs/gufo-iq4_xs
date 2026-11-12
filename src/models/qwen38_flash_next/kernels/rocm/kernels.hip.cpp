@@ -9235,11 +9235,28 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   if (m == 0 || batch == 0 || k == 0 || k % 32 != 0)
     return false;
-  hipLaunchKernelGGL((DenseF16GEMMKernel<64, 128, 2, 2, 4, 1, false, false,
-                                         false, false, true>),
-                     dim3((batch + 127) / 128, (m + 63) / 64), dim3(kThreads),
-                     0, stream, w, static_cast<const __half*>(x), out, batch, m,
-                     k);
+  const auto launch = [&]<int BM, int BN, int BK, int WM, int WN, int RG>() {
+    hipLaunchKernelGGL((DenseF16GEMMKernel<BM, BN, BK, WM, WN, RG, false, false,
+                                           false, false, true>),
+                       dim3((batch + BN - 1) / BN, (m + BM - 1) / BM),
+                       dim3(kThreads), 0, stream, w,
+                       static_cast<const __half*>(x), out, batch, m, k);
+  };
+  // Every tile plan gives each output the same ordered K16 products. GSQ-RCO
+  // hyper-connection projections at 2,048 tokens: up (10240 x 320) 1.50 to
+  // 0.83 ms with eight-row-tile groups, down (320 x 10240) 1.42 to 0.84 ms
+  // with eight row waves. Below 1,024 tokens the narrow tile stays faster
+  // for the down projection; the up projection takes the 256-row tile.
+  if (m >= 2048 && k <= 1024) {
+    if (batch >= 1024)
+      launch.template operator()<256, 128, 1, 4, 2, 8>();
+    else
+      launch.template operator()<256, 128, 2, 8, 1, 1>();
+  } else if (m <= 512 && k >= 4096 && batch >= 1024) {
+    launch.template operator()<256, 128, 2, 8, 1, 1>();
+  } else {
+    launch.template operator()<64, 128, 2, 2, 4, 1>();
+  }
   return true;
 }
 

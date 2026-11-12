@@ -467,11 +467,12 @@ void CheckDenseRouted(const Format& f, int rows, int cols) {
 }
 
 /// BF16 projections in prefill (GSQ-RCO's hyper-connection mixers and PLE
-/// key/value): the rows of a pass split at a chunk boundary keep their bits.
+/// key/value): the rows of a pass split at a chunk boundary keep their bits,
+/// also where the whole pass and its pieces take different tile plans.
 void CheckBf16Chunks(int rows, int cols) {
   const std::string tag =
       "BF16 GEMM m=" + std::to_string(rows) + " k=" + std::to_string(cols);
-  constexpr int kTokens = 136;
+  constexpr int kTokens = 1100;
   std::uint32_t seed = 0xBF16U + rows;
   const auto bf16 = [](float v) {
     std::uint32_t bits;
@@ -492,7 +493,7 @@ void CheckBf16Chunks(int rows, int cols) {
   Expect(q::DenseBf16Gemm(dw, dx, full, kTokens, rows, cols, nullptr),
          tag + ": launch rejected");
   const auto whole = Download(full, zeros.size());
-  for (int first : {127, 94, 64, 1}) {
+  for (int first : {1091, 1036, 76, 1}) {
     const int n = kTokens - first;
     Expect(q::DenseBf16Gemm(dw, dx + static_cast<std::size_t>(first) * cols,
                             part, n, rows, cols, nullptr),

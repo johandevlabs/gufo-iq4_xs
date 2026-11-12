@@ -3,8 +3,8 @@
 // shared-expert down projection, the fused SSM projection (16384 x 2560 with
 // its convolution), the stacked attention projection (13312 x 2560 with norms
 // and RoPE), the F16 router (513 x 2560) and recurrent gates (96 x 2560),
-// and the Dynamic 3.1 Q6_K trunk shapes on the Q6_K F16 route beside Q8_0's
-// W8A8 and F16 routes.
+// the Dynamic 3.1 Q6_K trunk shapes on the Q6_K F16 route beside Q8_0's
+// W8A8 and F16 routes, and GSQ-RCO's BF16 hyper-connection projections.
 //
 // dense_gemm_bench [tokens] [reps]
 //
@@ -190,6 +190,26 @@ int main(int argc, char** argv) try {
         },
         reps);
     report("down", ms, 2.0 * tokens * m * k,
+           Hash(y, tokens * m * sizeof(float)));
+    CheckHip(hipFree(w), "hipFree");
+    CheckHip(hipFree(x), "hipFree");
+    CheckHip(hipFree(y), "hipFree");
+  }
+
+  // GSQ-RCO's BF16 hyper-connection down (10240 -> 320) and up (320 ->
+  // 10240) projections over BF16 activations.
+  for (const auto [m, k] : {std::pair<std::size_t, std::size_t>{320, 10240},
+                            std::pair<std::size_t, std::size_t>{10240, 320}}) {
+    auto* w = Upload(Activations(m * k, 61U));
+    auto* x = Upload(Activations(tokens * k, 62U));
+    auto* y = static_cast<float*>(Zeros(tokens * m * sizeof(float)));
+    const double ms = MedianMs(
+        [&] {
+          if (!q::DenseBf16Gemm(w, x, y, tokens, m, k, nullptr))
+            throw std::runtime_error("DenseBf16Gemm");
+        },
+        reps);
+    report(m == 320 ? "hcdn" : "hcup", ms, 2.0 * tokens * m * k,
            Hash(y, tokens * m * sizeof(float)));
     CheckHip(hipFree(w), "hipFree");
     CheckHip(hipFree(x), "hipFree");
