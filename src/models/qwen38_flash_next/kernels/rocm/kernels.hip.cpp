@@ -878,13 +878,16 @@ __device__ __forceinline__ void HcInjectPart(
 /// kMaxChunks float4 per thread, keeps the updated residual in registers
 /// between the two passes, reduces the four stream norms in one block
 /// reduction, and quantizes each 32-wide block over its eight lanes with a
-/// four-code store. Rows of four streams up to 2,560 wide.
+/// four-code store. Rows of four streams up to 2,560 wide. An F32 norm can
+/// also be written as BF16 rows (`xn_bf16`, rounded as NarrowActivations
+/// does) for a BF16 mixer's down projection.
 template<typename XnT, bool kDefer = false, bool kInject = false>
 __global__ void HcCombineVec4Kernel(
     float* res, const float* block_out, const float* inject,
     std::uint32_t inject_parts, const float* gamma, XnT* xn, void* xn_q8,
     std::uint32_t hidden, float eps, float* defer_w,
-    const float* inject_w = nullptr, float* inject_out = nullptr) {
+    const float* inject_w = nullptr, float* inject_out = nullptr,
+    hip_bfloat16* xn_bf16 = nullptr) {
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
   __shared__ float shared[kStreams][kThreads / 32];
@@ -981,6 +984,14 @@ __global__ void HcCombineVec4Kernel(
       XnT* out = xn + (static_cast<std::size_t>(t) * hc_dim) + e;
       if constexpr (std::is_same_v<XnT, float>) {
         *reinterpret_cast<float4*>(out) = n;
+        if (xn_bf16 != nullptr) {
+          hip_bfloat16* b =
+              xn_bf16 + (static_cast<std::size_t>(t) * hc_dim) + e;
+          b[0] = hip_bfloat16(n.x);
+          b[1] = hip_bfloat16(n.y);
+          b[2] = hip_bfloat16(n.z);
+          b[3] = hip_bfloat16(n.w);
+        }
       } else {
         const __half2 lo = __floats2half2_rn(n.x, n.y);
         const __half2 hi = __floats2half2_rn(n.z, n.w);
@@ -7793,11 +7804,11 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
   }
 }
 
-void HcCombine(float* res, const float* block_out, const float* inject,
+bool HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
-               bool decode, bool prefill) {
+               bool decode, bool prefill, void* xn_bf16) {
   // One block per token wants a batch: a decode step keeps the
   // one-block-per-stream kernel's parallelism. The two kernels reduce the
   // norm in different orders, so a prefill pass takes one of them at every
@@ -7806,13 +7817,15 @@ void HcCombine(float* res, const float* block_out, const float* inject,
       hidden % 128 == 0 && hidden <= 2560) {
     hipLaunchKernelGGL(HcCombineVec4Kernel<float>, dim3(n_tokens),
                        dim3(kThreads), 0, stream, res, block_out, inject,
-                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr);
-    return;
+                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr,
+                       nullptr, nullptr, static_cast<hip_bfloat16*>(xn_bf16));
+    return xn_bf16 != nullptr && gamma != nullptr;
   }
   hipLaunchKernelGGL(HcCombineKernel<float>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
                      inject_parts, gamma, xn, nullptr, hidden, streams, eps,
                      nullptr);
+  return false;
 }
 
 bool HcCombineQ8_1(float* res, const float* block_out, const float* inject,
@@ -7936,7 +7949,7 @@ bool HcCombineF16(float* res, const float* block_out, const float* inject,
                                             : HcCombineVec4Kernel<__half>;
     hipLaunchKernelGGL(combine, dim3(n_tokens), dim3(kThreads), 0, stream, res,
                        block_out, inject, inject_parts, gamma, xn, xn_q8,
-                       hidden, eps, defer_w, nullptr, nullptr);
+                       hidden, eps, defer_w, nullptr, nullptr, nullptr);
     return defer_w != nullptr;
   }
   hipLaunchKernelGGL(HcCombineKernel<__half>, dim3(n_tokens, streams),

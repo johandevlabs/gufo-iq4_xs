@@ -2510,9 +2510,20 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
     xn_q8_ready_ = {s_.xn, s_.xn_q8_1, n_tokens, c.HcDim()};
     return;
   }
-  HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn, n_tokens,
-            c.hidden_size, c.hc_count, c.rms_eps, stream_, false,
-            prefill_phase);
+  // A BF16 mixer's down projection reads the norm as BF16 rows: write them
+  // here instead of narrowing the F32 rows again (the same rounding).
+  const bool bf16_down = next != nullptr && gamma != nullptr && prefill_phase &&
+                         next->down.type == GgmlType::kBF16 &&
+                         n_tokens <= options_.max_batch &&
+                         c.HcDim() <= model_->max_half_cols();
+  if (HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn,
+                n_tokens, c.hidden_size, c.hc_count, c.rms_eps, stream_, false,
+                prefill_phase, bf16_down ? s_.x_half : nullptr)) {
+    half_src_ = s_.xn;
+    half_rows_ = n_tokens;
+    half_cols_ = c.HcDim();
+    half_bf16_ = true;
+  }
 }
 
 bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
