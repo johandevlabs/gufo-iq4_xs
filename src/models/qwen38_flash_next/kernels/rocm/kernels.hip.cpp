@@ -1404,10 +1404,13 @@ __global__ void ExpandQ8_0Kernel(const std::uint8_t* q8, float* out,
 
 /// One wave per weight row, kSmallGemmRows rows per block: the row is read
 /// once (four consecutive elements per lane per step) while up to eight
-/// tokens accumulate in registers, then a wave reduction per token.
+/// tokens accumulate in registers, then a wave reduction per token. With
+/// kSplit, the block's waves share one long row instead (the BF16
+/// hyper-connection down projection, K 10240): wave p sums the p-th part of
+/// K the same way, and the parts are added in order.
 constexpr unsigned kSmallGemmRows = 4;
 template<WeightType type, unsigned tokens, bool grouped = false,
-         bool kWhole = false>
+         bool kWhole = false, bool kSplit = false>
 __global__ void SmallGemmKernel(const void* w, const float* x, float* out,
                                 std::uint32_t m, std::uint32_t k) {
   if constexpr (grouped) {
@@ -1415,11 +1418,15 @@ __global__ void SmallGemmKernel(const void* w, const float* x, float* out,
     out += std::size_t{blockIdx.y} * tokens * m;
   }
   const std::uint32_t lane = threadIdx.x % warpSize;
+  const std::uint32_t part = kSplit ? threadIdx.x / warpSize : 0;
   const std::uint32_t row =
-      blockIdx.x * (blockDim.x / warpSize) + threadIdx.x / warpSize;
+      kSplit ? blockIdx.x
+             : blockIdx.x * (blockDim.x / warpSize) + threadIdx.x / warpSize;
   if (row >= m) {
     return;
   }
+  const std::uint32_t k_begin = kSplit ? part * (k / kSmallGemmRows) : 0;
+  const std::uint32_t k_end = kSplit ? k_begin + k / kSmallGemmRows : k;
   const auto* wrow =
       static_cast<const std::uint8_t*>(w) + RowBytes(type, k) * row;
   // A lane's steps are loaded kSteps at a time so their reads overlap (one
@@ -1428,7 +1435,8 @@ __global__ void SmallGemmKernel(const void* w, const float* x, float* out,
   constexpr unsigned kSteps = kWhole || tokens <= 2 ? 4 : 2;
   const std::uint32_t stride = warpSize * 4;
   float acc[tokens] = {};
-  for (std::uint32_t i_base = lane * 4; i_base < k; i_base += stride * kSteps) {
+  for (std::uint32_t i_base = k_begin + lane * 4; i_base < k_end;
+       i_base += stride * kSteps) {
     float wv[kSteps][4];
     float xv[kSteps][tokens][4];
 #pragma unroll
@@ -1512,6 +1520,24 @@ __global__ void SmallGemmKernel(const void* w, const float* x, float* out,
         acc[j] = Materialize(acc[j] + dot);
       }
     }
+  }
+  if constexpr (kSplit) {
+    __shared__ float partial[kSmallGemmRows][tokens];
+#pragma unroll
+    for (unsigned j = 0; j < tokens; ++j) {
+      const float sum = WaveSum(acc[j]);
+      if (lane == 0)
+        partial[part][j] = sum;
+    }
+    __syncthreads();
+    if (threadIdx.x < tokens) {
+      float total = partial[0][threadIdx.x];
+#pragma unroll
+      for (unsigned p = 1; p < kSmallGemmRows; ++p)
+        total += partial[p][threadIdx.x];
+      out[static_cast<std::size_t>(threadIdx.x) * m + row] = total;
+    }
+    return;
   }
 #pragma unroll
   for (unsigned j = 0; j < tokens; ++j) {
@@ -9408,9 +9434,29 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
   return true;
 }
 
+/// Long 16-bit rows (K 8192 and up, in four whole parts) split each row's K
+/// across a block's waves at every token count, grouped batches included.
+bool SplitSmallGemm(WeightType type, const void* w, const float* x,
+                    std::uint32_t k) {
+  return (type == WeightType::kBF16 || type == WeightType::kF16) && k >= 8192 &&
+         k % (kSmallGemmRows * 32 * 4 * 4) == 0 &&
+         (reinterpret_cast<std::uintptr_t>(w) |
+          reinterpret_cast<std::uintptr_t>(x)) %
+                 16 ==
+             0;
+}
+
 template<WeightType type, unsigned tokens>
 void LaunchSmallGemm(const void* w, const float* x, float* out, std::uint32_t m,
                      std::uint32_t k, hipStream_t stream) {
+  if constexpr (type == WeightType::kBF16 || type == WeightType::kF16) {
+    if (SplitSmallGemm(type, w, x, k)) {
+      hipLaunchKernelGGL((SmallGemmKernel<type, tokens, false, true, true>),
+                         dim3(m), dim3(kSmallGemmRows * 32), 0, stream, w, x,
+                         out, m, k);
+      return;
+    }
+  }
   if constexpr (type != WeightType::kQ8_0) {
     // Rows of whole four-step passes (K 2560: router and GDN alpha/beta in
     // F16, indexer in BF16) take the unchecked vector loads, four steps at a
@@ -9437,9 +9483,20 @@ void SmallGemmForType(const void* w, const float* x, float* out,
                       hipStream_t stream) {
   if (tokens > 8) {
     const auto groups = tokens / 8;
-    hipLaunchKernelGGL((SmallGemmKernel<type, 8, true>),
-                       dim3((m + kSmallGemmRows - 1) / kSmallGemmRows, groups),
-                       dim3(kSmallGemmRows * 32), 0, stream, w, x, out, m, k);
+    bool split = false;
+    if constexpr (type == WeightType::kBF16 || type == WeightType::kF16)
+      split = SplitSmallGemm(type, w, x, k);
+    if (split) {
+      if constexpr (type == WeightType::kBF16 || type == WeightType::kF16)
+        hipLaunchKernelGGL((SmallGemmKernel<type, 8, true, true, true>),
+                           dim3(m, groups), dim3(kSmallGemmRows * 32), 0,
+                           stream, w, x, out, m, k);
+    } else {
+      hipLaunchKernelGGL(
+          (SmallGemmKernel<type, 8, true>),
+          dim3((m + kSmallGemmRows - 1) / kSmallGemmRows, groups),
+          dim3(kSmallGemmRows * 32), 0, stream, w, x, out, m, k);
+    }
     const auto consumed = groups * 8;
     x += std::size_t{consumed} * k;
     out += std::size_t{consumed} * m;

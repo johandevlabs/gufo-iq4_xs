@@ -1428,6 +1428,9 @@ int main() {
     CheckSmallProjection(q::WeightType::kBF16, 128, 2560);
     CheckSmallProjection(q::WeightType::kBF16, 512, 2560);
     CheckSmallProjection(q::WeightType::kF16, 7, 131);
+    // GSQ-RCO's BF16 hyper-connection down (split K) and up projections.
+    CheckSmallProjection(q::WeightType::kBF16, 320, 10240);
+    CheckSmallProjection(q::WeightType::kBF16, 10240, 320);
     CheckDecodeGrouping(64, 2560);
     CheckDecodeGrouping(320, 10240);
     CheckDecodeGrouping(1024, 2560, 256);
