@@ -891,8 +891,10 @@ __global__ void HcCombineVec4Kernel(
   constexpr std::uint32_t kStreams = 4;
   constexpr std::uint32_t kMaxChunks = 10;  // 4 x 2560 / 4 / kThreads
   __shared__ float shared[kStreams][kThreads / 32];
-  // The F16 norm row, regathered for the next mixer's inject partials.
-  __shared__ __half2 s_xn[kInject ? kMaxChunks * kThreads * 2 : 1];
+  // The F16 norm row, regathered for the next mixer's inject partials (an
+  // F32 norm is reread from xn).
+  constexpr bool kHalfInject = kInject && !std::is_same_v<XnT, float>;
+  __shared__ __half2 s_xn[kHalfInject ? kMaxChunks * kThreads * 2 : 1];
   const std::uint32_t t = blockIdx.x;
   const std::size_t hc_dim = static_cast<std::size_t>(kStreams) * hidden;
   float w[kStreams];
@@ -997,7 +999,7 @@ __global__ void HcCombineVec4Kernel(
         const __half2 hi = __floats2half2_rn(n.z, n.w);
         *reinterpret_cast<__half2*>(out) = lo;
         *reinterpret_cast<__half2*>(out + 2) = hi;
-        if constexpr (kInject) {
+        if constexpr (kHalfInject) {
           s_xn[e / 2] = lo;
           s_xn[e / 2 + 1] = hi;
         }
@@ -1049,13 +1051,54 @@ __global__ void HcCombineVec4Kernel(
         part[s] = float4{0.0F, 0.0F, 0.0F, 0.0F};
         if (i < hidden) {
           const std::size_t e = static_cast<std::size_t>(s) * hidden + i;
-          const __half2 lo = s_xn[e / 2];
-          const __half2 hi = s_xn[e / 2 + 1];
-          part[s] = float4{__low2float(lo), __high2float(lo), __low2float(hi),
-                           __high2float(hi)};
+          if constexpr (kHalfInject) {
+            const __half2 lo = s_xn[e / 2];
+            const __half2 hi = s_xn[e / 2 + 1];
+            part[s] = float4{__low2float(lo), __high2float(lo), __low2float(hi),
+                             __high2float(hi)};
+          } else {
+            part[s] = *reinterpret_cast<const float4*>(
+                xn + (static_cast<std::size_t>(t) * hc_dim) + e);
+          }
         }
       }
-      HcInjectPart(part, inject_w, inject_out, shared, t, c, parts, hidden);
+      if constexpr (kHalfInject) {
+        HcInjectPart(part, inject_w, inject_out, shared, t, c, parts, hidden);
+      } else {
+        // HcMixEpilogueVec4Kernel<float>'s inject reduction, expression for
+        // expression: fast math contracts and orders it the same way.
+#pragma unroll
+        for (std::uint32_t o = 0; o < kStreams; ++o) {
+          const float* wo = inject_w + static_cast<std::size_t>(o) * hc_dim;
+          float dot = 0.0F;
+          if (i < hidden) {
+#pragma unroll
+            for (std::uint32_t s = 0; s < kStreams; ++s) {
+              const float4 q = *reinterpret_cast<const float4*>(
+                  wo + static_cast<std::size_t>(s) * hidden + i);
+              dot += q.x * part[s].x;
+              dot += q.y * part[s].y;
+              dot += q.z * part[s].z;
+              dot += q.w * part[s].w;
+            }
+          }
+          dot = WaveSum(dot);
+          if (lane == 0) {
+            shared[o][wave] = dot;
+          }
+        }
+        __syncthreads();
+        if (threadIdx.x < kStreams) {
+          float total = 0.0F;
+          for (std::uint32_t q = 0; q < blockDim.x / warpSize; ++q) {
+            total += shared[threadIdx.x][q];
+          }
+          inject_out[(static_cast<std::size_t>(t) * kStreams + threadIdx.x) *
+                         parts +
+                     c] = total;
+        }
+        __syncthreads();  // the next part reuses `shared`
+      }
     }
   }
 }
@@ -7808,18 +7851,26 @@ bool HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
-               bool decode, bool prefill, void* xn_bf16) {
+               bool decode, bool prefill, void* xn_bf16, const float* inject_w,
+               float* inject_out) {
   // One block per token wants a batch: a decode step keeps the
   // one-block-per-stream kernel's parallelism. The two kernels reduce the
   // norm in different orders, so a prefill pass takes one of them at every
   // width: a chunk boundary must not change a row's norm.
   if (!decode && (n_tokens >= 16 || prefill) && streams == 4 &&
       hidden % 128 == 0 && hidden <= 2560) {
-    hipLaunchKernelGGL(HcCombineVec4Kernel<float>, dim3(n_tokens),
-                       dim3(kThreads), 0, stream, res, block_out, inject,
-                       inject_parts, gamma, xn, nullptr, hidden, eps, nullptr,
-                       nullptr, nullptr, static_cast<hip_bfloat16*>(xn_bf16));
-    return xn_bf16 != nullptr && gamma != nullptr;
+    const auto launch = [&]<bool kInject>() {
+      hipLaunchKernelGGL((HcCombineVec4Kernel<float, false, kInject>),
+                         dim3(n_tokens), dim3(kThreads), 0, stream, res,
+                         block_out, inject, inject_parts, gamma, xn, nullptr,
+                         hidden, eps, nullptr, inject_w, inject_out,
+                         static_cast<hip_bfloat16*>(xn_bf16));
+    };
+    if (inject_w != nullptr && inject_out != nullptr && gamma != nullptr)
+      launch.template operator()<true>();
+    else
+      launch.template operator()<false>();
+    return gamma != nullptr;
   }
   hipLaunchKernelGGL(HcCombineKernel<float>, dim3(n_tokens, streams),
                      dim3(kThreads), 0, stream, res, block_out, inject,
@@ -8494,7 +8545,7 @@ template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
-    const __half* xn = nullptr, __half* mixed_half = nullptr,
+    const void* xn = nullptr, __half* mixed_half = nullptr,
     void* mixed_q8 = nullptr, const float* conv_w = nullptr,
     float* conv_out = nullptr, AttentionProjectionOutput attention = {},
     PassCheckpoints checkpoint_rows = {}, std::size_t input_stride = 0,
@@ -8981,6 +9032,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     static_assert(4 * kPlane * sizeof(float) <= sizeof(s_lds));
     float* gates = reinterpret_cast<float*>(s_lds);
     const std::size_t hidden = m / 4;
+    // A BF16 projection's mixer reads the F32 norm, as its separate
+    // epilogue does; the Q8_0 route reads the combine's F16 norm.
+    using XnT = std::conditional_t<kBf16, float, __half>;
+    const auto* xn_rows = static_cast<const XnT*>(xn);
 #pragma unroll
     for (int j = 0; j < kWaveTokTiles; ++j) {
 #pragma unroll
@@ -9011,7 +9066,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
           for (unsigned stream = 0; stream < 4; ++stream) {
             const float* g = gates + stream * kPlane +
                              token_in_tile * kStreamStride + h_local;
-            const float4 v = Load4(xn + token * m + stream * hidden + h);
+            const float4 v = Load4(xn_rows + token * m + stream * hidden + h);
             // Preserve the separate mixer's F32 FMA rounding.
             value.x = __fmaf_rn(v.x, SigmoidF(g[0]), value.x);
             value.y = __fmaf_rn(v.y, SigmoidF(g[1]), value.y);
@@ -9251,6 +9306,26 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
                        dim3(kThreads), 0, stream, xn, nullptr, inject_w,
                        nullptr, nullptr, nullptr, inject, hidden);
   }
+  return true;
+}
+
+bool HcMixBf16Gemm(const void* up, const void* low_rank, const float* xn,
+                   float* mixed, std::uint32_t n_tokens, std::uint32_t hidden,
+                   std::uint32_t rank, hipStream_t stream) {
+  // DenseBf16Gemm's wide plan for the up projection, with its gates mixed in
+  // LDS instead of written: every gate keeps its ordered K16 products and
+  // the mix the separate epilogue's FMA sequence.
+  const std::size_t rows = 4 * std::size_t{hidden};
+  if (n_tokens == 0 || hidden % 64 != 0 || (rows / 256) % 8 != 0 || rank == 0 ||
+      rank % 32 != 0 || up == nullptr || low_rank == nullptr || xn == nullptr ||
+      mixed == nullptr) {
+    return false;
+  }
+  hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 1, 4, 2, 8, true, false,
+                                         false, false, true>),
+                     dim3((n_tokens + 127) / 128, rows / 256), dim3(kThreads),
+                     0, stream, up, static_cast<const __half*>(low_rank), mixed,
+                     n_tokens, rows, rank, xn);
   return true;
 }
 

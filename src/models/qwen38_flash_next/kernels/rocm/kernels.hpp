@@ -104,14 +104,17 @@ void HcMixEpilogueVec4F16(const __half* xn, const float* gate,
 /// updated residual into `xn`.
 /// `inject` is [t][s][inject_parts] partial sums (1 part for a plain GEMM).
 /// Concatenated decode requests retain scalar reduction with `decode=true`.
-/// A prefill pass also writes xn as BF16 rows to `xn_bf16` when given; true
-/// when it did.
+/// True when the row kernel ran with a norm: a prefill pass then also writes
+/// xn as BF16 rows to `xn_bf16`, and the next mixer's HcInjectPartsVec4
+/// inject partials to `inject_out` from `inject_w`, as HcMixEpilogueVec4
+/// would from the F32 norm (they may replace this combine's own `inject`).
 bool HcCombine(float* res, const float* block_out, const float* inject,
                std::uint32_t inject_parts, const float* gamma, float* xn,
                std::uint32_t n_tokens, std::uint32_t hidden,
                std::uint32_t streams, float eps, hipStream_t stream,
                bool decode = false, bool prefill = false,
-               void* xn_bf16 = nullptr);
+               void* xn_bf16 = nullptr, const float* inject_w = nullptr,
+               float* inject_out = nullptr);
 /// The one-block-per-stream HcCombine that also writes xn's Q8_1 rows (as
 /// qfn_mmq_quantize_q8_1 would) to `xn_q8` for a small-batch mixer down
 /// projection. False, with nothing launched, without `gamma` or unless
@@ -279,6 +282,14 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
                   const float* inject_w, float* mixed, __half* mixed_half,
                   void* mixed_q8, float* inject, std::uint32_t n_tokens,
                   std::uint32_t hidden, std::uint32_t rank, hipStream_t stream);
+
+/// BF16 HC up projection (4 x hidden rows of `rank` columns, stream-major)
+/// and the F32-norm mixer in one launch, byte for byte DenseBf16Gemm and
+/// HcMixEpilogueVec4 without inject partials. low_rank is BF16 rows
+/// [n_tokens][rank]. Returns false for unsupported shapes.
+bool HcMixBf16Gemm(const void* up, const void* low_rank, const float* xn,
+                   float* mixed, std::uint32_t n_tokens, std::uint32_t hidden,
+                   std::uint32_t rank, hipStream_t stream);
 
 /// F16 activation rows [batch][k], Q8_0 weights dequantized to F16 in LDS,
 /// F32 accumulation. out is [batch][m]. Unsupported shapes launch nothing.

@@ -2516,13 +2516,25 @@ void Executor::Combine(float* res, const float* gamma, std::uint32_t n_tokens,
                          next->down.type == GgmlType::kBF16 &&
                          n_tokens <= options_.max_batch &&
                          c.HcDim() <= model_->max_half_cols();
+  // Its F32 inject partials too, so that its up projection can mix in the
+  // epilogue (HcMixBf16Gemm): the partials' layout must not change, since
+  // they overwrite this combine's own.
+  const float* bf16_inject =
+      bf16_down && next->up.type == GgmlType::kBF16 &&
+              inject_parts_ == HcInjectPartsVec4(c.hidden_size)
+          ? inject_w
+          : nullptr;
   if (HcCombine(res, s_.block_out, s_.inject, inject_parts_, gamma, s_.xn,
                 n_tokens, c.hidden_size, c.hc_count, c.rms_eps, stream_, false,
-                prefill_phase, bf16_down ? s_.x_half : nullptr)) {
-    half_src_ = s_.xn;
-    half_rows_ = n_tokens;
-    half_cols_ = c.HcDim();
-    half_bf16_ = true;
+                prefill_phase, bf16_down ? s_.x_half : nullptr, bf16_inject,
+                s_.inject)) {
+    if (bf16_down) {
+      half_src_ = s_.xn;
+      half_rows_ = n_tokens;
+      half_cols_ = c.HcDim();
+      half_bf16_ = true;
+    }
+    inject_fused_ = bf16_inject;
   }
 }
 
@@ -2596,6 +2608,17 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
       c.hidden_size == 2560 && c.hc_low_rank == 320 &&
       m.up.type == GgmlType::kQ8_0 && m.up.rows == c.HcDim() &&
       m.up.cols == c.hc_low_rank;
+  // A BF16 mixer on the separate route: the up projection mixes its gates
+  // in place of writing them (HcMixBf16Gemm), once the combine has written
+  // the inject partials.
+  const bool bf16_mix =
+      !xn_half_ && MatrixRows(n_tokens) && extras && c.hc_count == 4 &&
+      c.hidden_size % 64 == 0 && m.up.type == GgmlType::kBF16 &&
+      m.up.rows == c.HcDim() && m.up.cols == c.hc_low_rank &&
+      c.hc_low_rank % 32 == 0 && (c.HcDim() / 256) % 8 == 0 &&
+      (inject == nullptr || m.inject.empty() ||
+       (m.inject.type == GgmlType::kF32 && inject == s_.inject &&
+        inject_fused_ != nullptr && inject_fused_ == m.inject.f32()));
   if (fused_projection) {
     // The up projection writes x_half; keep its input in the gate buffer.
     if (!HcDownF16Gemm(m.down.data, s_.xn_q8t,
@@ -2628,7 +2651,15 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
     } else {
       SiluScale(s_.lo, scale,
                 static_cast<std::size_t>(n_tokens) * c.hc_low_rank, stream_);
-      if (!Dense(m.up, s_.lo, s_.hc_gate, n_tokens, error_msg)) {
+      if (bf16_mix) {
+        NarrowActivations(s_.lo, s_.x_half, true,
+                          static_cast<std::size_t>(n_tokens) * c.hc_low_rank,
+                          stream_);
+        half_src_ = s_.lo;
+        half_rows_ = n_tokens;
+        half_cols_ = c.hc_low_rank;
+        half_bf16_ = true;
+      } else if (!Dense(m.up, s_.lo, s_.hc_gate, n_tokens, error_msg)) {
         return false;
       }
     }
@@ -2685,6 +2716,12 @@ bool Executor::HcMix(const DeviceMixer& m, const float* res, bool normed,
         q8t_rows_ = n_tokens;
         q8t_cols_ = c.hidden_size;
       }
+    }
+  } else if (bf16_mix) {
+    if (!HcMixBf16Gemm(m.up.data, s_.x_half, xn, mixed, n_tokens, c.hidden_size,
+                       c.hc_low_rank, stream_)) {
+      AssignError(error_msg, "BF16 HC mixer projection failed");
+      return false;
     }
   } else if (vectorized) {
     HcMixEpilogueVec4(xn, s_.hc_gate, fused_inject ? m.inject.f32() : nullptr,

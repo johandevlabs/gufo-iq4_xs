@@ -15,6 +15,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
@@ -526,6 +527,117 @@ void CheckBf16Chunks(int rows, int cols) {
     CheckHip(hipFree(p), "free");
 }
 
+/// GSQ-RCO's BF16 HC up projection with the mixer in its epilogue: byte for
+/// byte the separate projection and HcMixEpilogueVec4, at ragged prefill
+/// widths on both sides of DenseBf16Gemm's tile plans.
+void CheckBf16Mix() {
+  constexpr int kHidden = 2560, kRows = 4 * kHidden, kRank = 320;
+  constexpr int kMaxTokens = 1100;
+  std::uint32_t seed = 0x313BU;
+  const auto bf16 = [](float v) {
+    std::uint32_t bits;
+    std::memcpy(&bits, &v, 4);
+    return static_cast<std::uint16_t>(bits >> 16U);
+  };
+  std::vector<std::uint16_t> w(static_cast<std::size_t>(kRows) * kRank);
+  std::vector<std::uint16_t> lo(static_cast<std::size_t>(kMaxTokens) * kRank);
+  std::vector<float> xn(static_cast<std::size_t>(kMaxTokens) * kRows);
+  for (auto& v : w)
+    v = bf16(Uniform(&seed, 0.1F));
+  for (auto& v : lo)
+    v = bf16(Uniform(&seed, 2.0F));
+  for (auto& v : xn)
+    v = Uniform(&seed, 1.5F);
+  auto* dw = Upload(w);
+  auto* dlo = Upload(lo);
+  auto* dxn = Upload(xn);
+  const std::vector<float> gates(static_cast<std::size_t>(kMaxTokens) * kRows);
+  const std::vector<float> mixed(static_cast<std::size_t>(kMaxTokens) *
+                                 kHidden);
+  auto* dgate = Upload(gates);
+  auto* dref = Upload(mixed);
+  auto* dgot = Upload(mixed);
+  for (int n : {1, 17, 128, 213, 1023, 1100}) {
+    const std::string tag = "BF16 HC mixer at " + std::to_string(n);
+    Expect(q::DenseBf16Gemm(dw, dlo, dgate, n, kRows, kRank, nullptr),
+           tag + ": projection rejected");
+    q::HcMixEpilogueVec4(dxn, dgate, nullptr, dref, nullptr, n, kHidden, 4,
+                         nullptr);
+    Expect(q::HcMixBf16Gemm(dw, dlo, dxn, dgot, n, kHidden, kRank, nullptr),
+           tag + ": fused launch rejected");
+    const std::size_t count = static_cast<std::size_t>(n) * kHidden;
+    const auto want = Download(dref, count);
+    const auto got = Download(dgot, count);
+    Expect(!std::memcmp(want.data(), got.data(), count * 4),
+           tag + ": fused mixer changed bits");
+  }
+  std::cout << "BF16 HC mixer: fused projection exact\n";
+  for (void* p : {static_cast<void*>(dw), static_cast<void*>(dlo),
+                  static_cast<void*>(dxn), static_cast<void*>(dgate),
+                  static_cast<void*>(dref), static_cast<void*>(dgot)})
+    CheckHip(hipFree(p), "free");
+}
+
+/// The prefill combine before a BF16 mixer writes that mixer's inject
+/// partials over its own from the F32 norm: byte for byte what the separate
+/// epilogue computes, with the residual and norm unchanged.
+void CheckCombineInject() {
+  constexpr int kHidden = 2560, kHc = 4 * kHidden;
+  const std::uint32_t parts = q::HcInjectPartsVec4(kHidden);
+  std::uint32_t seed = 0x1A7EU;
+  for (int n : {1, 17, 300}) {
+    const std::string tag = "F32 combine inject at " + std::to_string(n);
+    const std::size_t rows = static_cast<std::size_t>(n);
+    std::vector<float> res(rows * kHc), out(rows * kHidden), gamma(kHc),
+        inject(rows * 4 * parts), w(4 * kHc);
+    for (auto& v : res)
+      v = Uniform(&seed, 2.0F);
+    for (auto& v : out)
+      v = Uniform(&seed, 1.0F);
+    for (auto& v : gamma)
+      v = 1.0F + Uniform(&seed, 0.5F);
+    for (auto& v : inject)
+      v = Uniform(&seed, 0.7F);
+    for (auto& v : w)
+      v = Uniform(&seed, 0.05F);
+    auto* dout = Upload(out);
+    auto* dgamma = Upload(gamma);
+    auto* dw = Upload(w);
+    auto* res_a = Upload(res);
+    auto* res_b = Upload(res);
+    auto* inj_a = Upload(inject);
+    auto* inj_b = Upload(inject);
+    const std::vector<float> zeros(rows * kHc);
+    auto* xn_a = Upload(zeros);
+    auto* xn_b = Upload(zeros);
+    auto* gate = Upload(zeros);
+    auto* mixed = Upload(zeros);
+    Expect(q::HcCombine(res_a, dout, inj_a, parts, dgamma, xn_a, n, kHidden, 4,
+                        1e-6F, nullptr, false, true, nullptr, dw, inj_a),
+           tag + ": row kernel not taken");
+    q::HcCombine(res_b, dout, inj_b, parts, dgamma, xn_b, n, kHidden, 4, 1e-6F,
+                 nullptr, false, true);
+    q::HcMixEpilogueVec4(xn_b, gate, dw, mixed, inj_b, n, kHidden, 4, nullptr);
+    for (const auto& [a, b, count, what] :
+         {std::tuple{res_a, res_b, rows * kHc, "residual"},
+          std::tuple{xn_a, xn_b, rows * kHc, "norm"},
+          std::tuple{inj_a, inj_b, rows * 4 * parts, "inject partials"}}) {
+      const auto got = Download(a, count);
+      const auto want = Download(b, count);
+      Expect(!std::memcmp(got.data(), want.data(), count * 4),
+             tag + ": " + what + " changed bits");
+    }
+    for (void* p : {static_cast<void*>(dout), static_cast<void*>(dgamma),
+                    static_cast<void*>(dw), static_cast<void*>(res_a),
+                    static_cast<void*>(res_b), static_cast<void*>(inj_a),
+                    static_cast<void*>(inj_b), static_cast<void*>(xn_a),
+                    static_cast<void*>(xn_b), static_cast<void*>(gate),
+                    static_cast<void*>(mixed)})
+      CheckHip(hipFree(p), "free");
+  }
+  std::cout << "F32 combine: fused inject partials exact\n";
+}
+
 }  // namespace
 
 int main() {
@@ -570,6 +682,8 @@ int main() {
     // Hyper-connection down/up (HC 10240, low rank 320).
     CheckBf16Chunks(320, 10240);
     CheckBf16Chunks(10240, 320);
+    CheckBf16Mix();
+    CheckCombineInject();
   } catch (const std::exception& e) {
     std::cerr << "FAILED: " << e.what() << '\n';
     return 1;
