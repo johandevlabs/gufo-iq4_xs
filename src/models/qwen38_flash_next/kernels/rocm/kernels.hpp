@@ -44,6 +44,9 @@ enum class WeightType : std::uint32_t {
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kIQ4_NL = 20,
+  kIQ3_S = 21,
+  kIQ4_XS = 23,
   kBF16 = 30,
 };
 
@@ -330,10 +333,10 @@ void RoutedCompact(const std::int32_t* ids, const std::uint32_t* counts,
 /// projection's F32 output over the same rows) turns it into
 /// silu(gate) * result.
 /// `tile_rows` is the token rows per tile the map was built with: 16 or 48,
-/// or 128 for the prefill down projection (Q5_1/Q8_0, F16 output and no
-/// `swiglu_gate`). Every tile height gives each row the same bits.
-/// Q4_K and Q5_K need k % 256 == 0, Q5_1 and Q8_0 k % 64 == 0; other types
-/// and tile widths return false.
+/// or 128 for the prefill down projection (Q5_1/Q8_0/IQ4_NL, F16 output and
+/// no `swiglu_gate`). Every tile height gives each row the same bits.
+/// Q4_K, Q5_K, IQ3_S and IQ4_XS need k % 256 == 0, Q5_1, Q8_0 and IQ4_NL
+/// k % 64 == 0; other types and tile widths return false.
 bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const std::int32_t* tiles, std::uint32_t n_tiles,
                    std::uint32_t tile_rows, const std::int32_t* pad_bounds,
@@ -341,9 +344,9 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream);
 
-/// Paired Q4_K/Q5_K gate/up GEMM with SwiGLU and F16 output. Uses the same
-/// routing layout as RoutedF16Gemm, with 128 token rows per tile. The two
-/// projections share one launch and never materialize the gate output;
+/// Paired Q4_K/Q5_K/IQ3_S/IQ4_XS gate/up GEMM with SwiGLU and F16 output. Uses
+/// the same routing layout as RoutedF16Gemm, with 128 token rows per tile. The
+/// two projections share one launch and never materialize the gate output;
 /// every row equals the separate gate and up launches bit for bit.
 bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const __half* x, const std::int32_t* tiles,

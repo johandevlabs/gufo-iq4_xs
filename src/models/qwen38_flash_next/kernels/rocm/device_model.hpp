@@ -13,6 +13,24 @@
 
 namespace gufo::models::qwen38_flash_next::rocm {
 
+/// The expert formats and shape the routed F16 GEMMs (WMMA) read.
+[[nodiscard]] inline bool WmmaExpertLayout(const Config& c, core::GgmlType gate,
+                                           core::GgmlType up,
+                                           core::GgmlType down) {
+  return WmmaExpertFormats(gate, up, down) && c.hidden_size % 256 == 0 &&
+         c.expert_ff % 64 == 0;
+}
+
+/// IQ experts have no tiled MMQ route, so prefill must reach them through
+/// WMMA. Decode reads the same layouts through the vector kernels.
+[[nodiscard]] inline bool IqExpertLayoutSupported(const Config& c,
+                                                  core::GgmlType gate,
+                                                  core::GgmlType up,
+                                                  core::GgmlType down) {
+  return !(IsIqExpert(gate) || IsIqExpert(up) || IsIqExpert(down)) ||
+         WmmaExpertLayout(c, gate, up, down);
+}
+
 /// One weight resident in device memory, still in its GGUF encoding.
 struct DeviceTensor {
   void* data{nullptr};
