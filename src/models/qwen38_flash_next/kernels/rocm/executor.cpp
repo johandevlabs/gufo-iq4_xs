@@ -4034,6 +4034,8 @@ bool Executor::RunLayerHook(Session& session, std::string* error_msg) const {
     at += p.bytes;
   }
   xn_half_ = xn_half;
+  // x_half is not parked: a BF16 mixer narrows the parked F32 norm again.
+  half_src_ = nullptr;
   inject_parts_ = inject_parts;
   inject_fused_ = inject_fused;
   q8_slot_ = q8_slot;
