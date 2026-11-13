@@ -22,27 +22,36 @@
     "fingerprintId": "3d580d978590391537282e83b2332a50d8709cfc10a61084145bd357ec4bf872",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-11-12",
+  "measuredOn": "2026-11-13",
   "mode": null,
   "model": {
     "id": "Qwen3.8-Flash-Next",
     "variant": "iq3"
   },
   "notes": [
-    "peak device-global hipMemGetInfo used bytes (total - free), sampled every 250 ms during the request; idle_gib is the same counter before the server started",
-    "server mode: ar"
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.167 tokens/word, template overhead 12 tokens"
   ],
   "referenceName": "llama.cpp",
   "rows": {
-    "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 58967 --sessions 1 llm --model Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 60.96,
-      "idle_gib": 6.01
-    },
-    "pp2048 + tg128": {
-      "command": "gufo serve --port 58967 --sessions 1 llm --model Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 59.21,
-      "idle_gib": 6.01
+    "0": {
+      "command": "gufo serve --port 34335 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "65a522e33ea5b4b4785511dde52dd463310cab7155230250c2c807ee4f81e866",
+          "draft_n": 0,
+          "draft_n_accepted": 0,
+          "predicted_n": 128,
+          "prompt_n": 2040
+        }
+      ],
+      "pp": 1791.58,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 35.96,
+      "tg_sd": null,
+      "workload": "prose"
     }
   },
   "schemaVersion": 1,
@@ -51,14 +60,14 @@
       "gufo",
       "serve",
       "--port",
-      "58967",
+      "34335",
       "--sessions",
       "1",
       "llm",
       "--model",
-      "Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+      "Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf",
       "--context",
-      "133121",
+      "133760",
       "--served-model-name",
       "bench",
       "--think",
@@ -70,8 +79,8 @@
   "source": {
     "buildMode": "nix-release",
     "dirty": false,
-    "revision": "4744f2c2399e19797ed4147fbcb856cce326bebc"
+    "revision": "a7d2edd28b74dfbe4c1298ec7f6103f0c8c29704"
   },
-  "table": "memory-iq3",
+  "table": "single-ar-iq3",
   "target": "gufo"
 }

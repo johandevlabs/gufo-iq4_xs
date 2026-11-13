@@ -18,7 +18,9 @@ to run the model and what speed to expect.
 <!-- END GENERATED MODEL TABLE -->
 
 This fork adds [Qwen3.8 Flash-Next UD-IQ4_XS and UD-IQ3_XXS](qwen3.8-flash-next-ud-iq.md),
-smaller Flash-Next files for 96 GB machines, measured on a 96 GB Strix Halo.
+smaller Flash-Next files for 96 GB machines, and
+[Qwen3.8 Flash-Next GSQ-RCO IQ3_XXS](qwen3.8-flash-next-gsq-rco.md), the
+smallest, both measured on a 96 GB Strix Halo.
 
 Gufo doesn't ship weights; download them from Hugging Face as each page shows.
 Every speed on these pages was measured on Strix Halo with 128 GB of memory,

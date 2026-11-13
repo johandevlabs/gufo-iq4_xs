@@ -1,0 +1,31 @@
+{
+  "sha256": {
+    "Target GSQ-RCO IQ3_XXS shard 1 of 2": "219ea929900dfa9ef091f3aa473fdba6874b65fcb36526d7d851ac9e95856d15",
+    "Target GSQ-RCO IQ3_XXS shard 2 of 2": "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113",
+    "MTP shared Q8_0": "5ff54097406a905cf3a724c709124ceb0e3e10235ee862298969e91c96fa96e6",
+    "Vision projector BF16": "2e788f8c511d8093c7b43cb87b2fd7e14228340318057f8fb20c86df2efe2355"
+  },
+  "sources": {
+    "target": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF, revision ed59f92082b1e93c0e96d60a8b11aab089b52f09, IQ3_XXS (two shards)",
+    "mtp": "unsloth/Qwen3.8-Flash-Next-GGUF, revision d96201194f103c906994f283f504209dc8d2a10c, MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+    "mmproj": "unsloth/Qwen3.8-Flash-Next-GGUF, revision d96201194f103c906994f283f504209dc8d2a10c, mmproj-BF16.gguf",
+    "verification": "Each downloaded target shard was checked against the Hugging Face LFS SHA-256 on both machines."
+  },
+  "quality-2026-11-13": {
+    "fileAgreement": "quant-quality.json (2026-11-12)",
+    "gufo": "a7d2edd2 for kernel and model tests, the CPU F32 reference probe and functional suites; the decode comparison at ee2c7ead (later commits bit-identical)"
+  },
+  "benchmarks-2026-11-13": {
+    "scope": "Every table in BENCHMARKS.md, both engines, and the memory fit in QUALITY.md (UTC measurement date)",
+    "host": "96 GB GMKtec Evo-X2, Ubuntu 24.04, kernel 7.0, ROCm 10.1, powersave governor with EPP balance_performance, GPU 38-102 C during the runs",
+    "gufo": {
+      "revision": "a7d2edd28b74dfbe4c1298ec7f6103f0c8c29704",
+      "build": "nix build, production gfx1151 binary",
+      "binarySha256": "d6641095c2a8638183b5fd15699d498801f1aa2e790bebb5e0e61e7de2d80ed2"
+    },
+    "referenceAr": "llama.cpp b11069 (commit 68d9053a) from the pinned flake recipe with the gfx1151 rocmPackages passed to llama-cpp.override, ROCm gfx1151",
+    "referenceMtp": "llama-server-mtp, llama.cpp commit 6fcaa16f, pinned ROCm recipe in flake.nix",
+    "udControl": "ud31-control/single-ar-iq3-gufo.json: UD 3.1 UD-IQ3_XXS with the same binary, depth 0",
+    "note": "Per-artifact source revisions and commands are authoritative."
+  }
+}

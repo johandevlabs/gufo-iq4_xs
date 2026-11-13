@@ -1,0 +1,67 @@
+{
+  "date": "2026-11-12",
+  "tool": "llama.cpp b11557 (5c8854fd) llama-server, ROCm gfx1151, teacher-forced top-64 log-probabilities",
+  "dataset": "Strata data/quant_quality/v1 (c62d5e3a): code, docs, english, multilingual, agent; 4,995 positions",
+  "reference": "UD 3.1 UD-Q4_K_XL (unsloth/Qwen3.8-Flash-Next-GGUF d96201194f10)",
+  "formulas": "Strata tools/quant_quality.py compare (c62d5e3a), reimplemented: top-1 agreement; KL(reference||file) over the reference's top 64 tokens, both renormalized, a missing token taking the file's lowest listed log-probability",
+  "results": {
+    "GSQ-RCO IQ3_XXS": {
+      "top1": 84.48,
+      "meanKL": 0.201,
+      "klP99": 2.46,
+      "segments": {
+        "code": [
+          90.89,
+          0.152
+        ],
+        "docs": [
+          73.37,
+          0.285
+        ],
+        "english": [
+          83.28,
+          0.139
+        ],
+        "multilingual": [
+          90.69,
+          0.068
+        ],
+        "agent": [
+          84.18,
+          0.358
+        ]
+      }
+    },
+    "UD 3.1 UD-IQ3_XXS": {
+      "top1": 88.37,
+      "meanKL": 0.123,
+      "klP99": 1.83,
+      "segments": {
+        "code": [
+          93.49,
+          0.086
+        ],
+        "docs": [
+          78.78,
+          0.165
+        ],
+        "english": [
+          89.29,
+          0.063
+        ],
+        "multilingual": [
+          92.79,
+          0.043
+        ],
+        "agent": [
+          87.49,
+          0.257
+        ]
+      }
+    }
+  },
+  "llamaCppGpuWeightsMiB": {
+    "GSQ-RCO IQ3_XXS": 44589.72
+  },
+  "note": "segments are [top-1 %, mean KL]; logits are not retained"
+}
