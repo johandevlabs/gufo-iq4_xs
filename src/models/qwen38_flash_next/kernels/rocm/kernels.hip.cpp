@@ -8675,7 +8675,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       __syncthreads();
     }
   };
-  if constexpr (kSsmConv || kStrided) {
+  // The Q6_K SSM projection runs its final partial tile as a full one: the
+  // missing tokens read zero activations, so their accumulators stay +0 as
+  // when skipped, and the skipping variant spilled.
+  if constexpr ((kSsmConv && !kQ6) || kStrided) {
     if (t_block + BN <= batch)
       accumulate.template operator()<false>();
     else
