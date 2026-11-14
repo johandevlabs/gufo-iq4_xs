@@ -93,9 +93,10 @@ prompt and 358 matched decode steps are byte-identical
 ## Benchmark output consistency
 
 Multi-user AR and MTP completions match the Strycast AR C1 reference at every
-concurrency. Single-user AR and MTP text matches at depth 0 and differs deeper
-with identical token counts, the same pattern as the published UD-Q4_K_XL
-artifacts. llama.cpp MTP matches its own AR on pp2048 C1, fresh and prepared;
+concurrency. Single-user AR text (the first repetition, whose prompt MTP
+shares) matches MTP at depth 0 and differs deeper with identical token
+counts, the same pattern as the published UD-Q4_K_XL artifacts. llama.cpp
+MTP matches its own AR on pp2048 C1, fresh and prepared;
 deeper, its AR and MTP text differ, so only its depth-0 MTP row is qualified.
 
 ## Reproduce
@@ -119,7 +120,8 @@ $B/qwen38_flash_next_snapshot_test --model "$T" --mtp-model "$MTP"
 
 `tools/bench/model-bench.py --model qwen3.8-flash-next-iq4-xs` with
 `artifacts/bench.json`, the same tables and workloads as the UD-Q4_K_XL card,
-one sample per point, on a 96 GB GMKtec Evo-X2 (Ubuntu 24.04, `powersave`
+one sample per point (three for the single-user AR Strycast cells, each
+with its own prompt), on a 96 GB GMKtec Evo-X2 (Ubuntu 24.04, `powersave`
 governor, EPP `balance_performance`). Its GPU reached 97-100 °C under
 sustained load with about 2.5% clock loss. Cold files for the loading row use
 `POSIX_FADV_DONTNEED` verified with `mincore`, without root.
@@ -131,6 +133,14 @@ the gfx1151 `rocmPackages` to `llama-cpp.override`. Without it the recipe
 builds the all-target hipBLASLt, which did not fit on this machine. The
 reference server context was 35456 through 32K, 68224 at 64K and 133760 at
 128K. The reference cells were measured on November 2, 2026, driven from
-Strycast `a53ec202` with the same benchmark driver; neither the reference
-recipes nor the driver changed before the Strycast cells were measured on
-November 9.
+Strycast `a53ec202` with the same benchmark driver. The reference recipes are
+unchanged at `ca0547c3`, where the Strycast cells were measured on November
+14; the driver changed only its documentation paths.
+
+Against the previous cells (Strycast `274e0ba0`, on Gufo 0.31), three
+alternating rounds of both `nix build` binaries on this machine gave
+identical completions; `ca0547c3` decodes AR 3% faster, prefills the same
+within 1%, and is slower with MTP for several users: mixed text −11% at
+C4–C8, repetitive text −5% to −7% at C1–C8
+([`artifacts/v033-ab.json`](artifacts/v033-ab.json)). The draft counts are
+the same, so the time per verification step grew with the Gufo 0.33 base.
