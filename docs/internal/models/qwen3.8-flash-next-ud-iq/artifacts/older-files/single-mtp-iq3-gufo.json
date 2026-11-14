@@ -1,0 +1,117 @@
+{
+  "artifactType": "model-bench-table",
+  "fingerprint": {
+    "canonical": {
+      "cppStandard": "C++20",
+      "cpuArchitecture": "x86_64",
+      "cpuLogicalCores": 32,
+      "cpuModel": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+      "cpuPhysicalCores": 16,
+      "cxxCompiler": "GCC 15.3.0",
+      "gpuArchitecture": "gfx1151",
+      "gpuComputeUnits": 20,
+      "gpuDriver": "amdgpu",
+      "gpuName": "AMD Radeon 8060S Graphics",
+      "gpuPciId": "1002:1586",
+      "kernelRelease": "7.0.0-38-generic",
+      "memoryTotalBytes": 99804033024,
+      "memoryType": "LPDDR5X (Unified)",
+      "rocmVersion": "10.1.0",
+      "schemaVersion": "1.0.0"
+    },
+    "fingerprintId": "3d580d978590391537282e83b2332a50d8709cfc10a61084145bd357ec4bf872",
+    "schemaVersion": "1.0.0"
+  },
+  "measuredOn": "2026-11-14",
+  "mode": "mtp",
+  "model": {
+    "id": "Qwen3.8-Flash-Next",
+    "variant": "iq3"
+  },
+  "notes": [
+    "pp2048/tg128; depth is a cached conversation prefix of synthetic text (8-token reply); measured turn task is recorded per row; tolerance max(32, 0.500%) on cache_n and prompt_n; actual counts per sample in rows",
+    "synthetic text: 1.160 tokens/word, template overhead 12 tokens"
+  ],
+  "referenceName": "llama.cpp",
+  "rows": {
+    "0": {
+      "acceptance": 58.73,
+      "acceptance_sd": null,
+      "accepted_per_step": 1.37,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 33823 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00003.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "counts": [
+        {
+          "cache_n": 0,
+          "completion_sha256": "e8a10428b48d82c5120ed5b647603be5d6ed0134ece77682f1efffee064144f9",
+          "draft_n": 126,
+          "draft_n_accepted": 74,
+          "predicted_n": 128,
+          "prompt_n": 2040
+        }
+      ],
+      "pp": 1724.11,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 48.8,
+      "tg_sd": null,
+      "workload": "prose"
+    },
+    "131072": {
+      "acceptance": 55.14,
+      "acceptance_sd": null,
+      "accepted_per_step": 0.86,
+      "accepted_per_step_sd": null,
+      "command": "gufo serve --port 33823 --sessions 1 llm --model Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00003.gguf --context 133760 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+      "counts": [
+        {
+          "cache_n": 131052,
+          "completion_sha256": "e38ea6ac35b38c8e5028227ff2867e191a0afc917792e68c609e66a183a41941",
+          "draft_n": 107,
+          "draft_n_accepted": 59,
+          "predicted_n": 128,
+          "prompt_n": 2054
+        }
+      ],
+      "pp": 1361.97,
+      "pp_sd": null,
+      "samples": 1,
+      "tg": 43.98,
+      "tg_sd": null,
+      "workload": "prose"
+    }
+  },
+  "schemaVersion": 1,
+  "server": {
+    "command": [
+      "gufo",
+      "serve",
+      "--port",
+      "33823",
+      "--sessions",
+      "1",
+      "llm",
+      "--model",
+      "Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00003.gguf",
+      "--context",
+      "133760",
+      "--served-model-name",
+      "bench",
+      "--think",
+      "off",
+      "--max-pending-per-client",
+      "8",
+      "--speculative",
+      "mtp",
+      "--mtp-model",
+      "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+    ]
+  },
+  "source": {
+    "buildMode": "nix-release",
+    "dirty": false,
+    "revision": "f1d18b421af5687d46dbff88787640ed9acbe928"
+  },
+  "table": "single-mtp-iq3",
+  "target": "gufo"
+}

@@ -18,8 +18,9 @@ three shards (87.2 GiB). The SHA-256 of each file is in
 The pin matters: on November 4, 2026 Unsloth replaced `UD-IQ4_XS` with a
 Dynamic 3.1 build (four shards) that uses other formats almost everywhere
 (IQ3_XXS/IQ2_S experts, Q5_0 and Q2_0 down projections, Q6_K attention and
-shared experts, an IQ4_XS embedding). That file is not supported; Gufo
-declines it when probing the model.
+shared experts, an IQ4_XS embedding). That file has
+[its own card](../qwen3.8-flash-next-ud-iq/README.md), with Dynamic 3.1
+UD-IQ3_XXS.
 
 | Tensors | Format |
 | --- | --- |
